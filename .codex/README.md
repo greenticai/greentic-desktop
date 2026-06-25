@@ -1,6 +1,6 @@
-# Greentic Desktop Runner — Detailed PR Pack
+# Greentic Desktop — Detailed PR Pack
 
-This package defines an implementation-ready roadmap for a generic Greentic Desktop Runner.
+This package defines an implementation-ready roadmap for the Greentic Desktop project.
 
 The design goal is:
 
@@ -8,7 +8,7 @@ The design goal is:
 Prompt → Interactive desktop execution → User refinement → Recorded runner → Versioned approval → MCP tool publication → Reuse in Greentic flows, AWS WorkSpaces, or other MCP clients
 ```
 
-The Desktop Runner is intentionally generic. AWS WorkSpaces is one execution environment, not the architecture itself.
+The desktop automation runtime is intentionally generic. AWS WorkSpaces is one execution environment, not the architecture itself.
 
 ## Main Concepts
 
@@ -16,6 +16,7 @@ The Desktop Runner is intentionally generic. AWS WorkSpaces is one execution env
 - **Adapters**: Web, Windows UI, Java, terminal/mainframe, Office, vision fallback.
 - **Runner Package**: Versioned, signed, Git-friendly recorded automation capability.
 - **Prompt Builder**: Converts user prompts into executable runner drafts.
+- **LLM Integration**: Planning and refinement use `greentic-llm` when available.
 - **Interactive Refinement**: Users correct failed steps by prompting.
 - **MCP Publishing**: Approved runners become typed MCP tools.
 - **LTM**: Stores run history, failures, fixes, screenshots, app versions and root causes.
@@ -47,3 +48,11 @@ The Desktop Runner is intentionally generic. AWS WorkSpaces is one execution env
 22. PR-22 Forwarded Tool Builder
 23. PR-23 Deployment, Updates and Airgapped Support
 24. PR-24 End-to-End MVP Plan
+25. PR-25 Cross-Platform Desktop Platform Layer
+26. PR-26 macOS Accessibility Adapter
+27. PR-27 Linux Desktop Adapter: X11 First
+28. PR-28 Linux Wayland Compatibility Layer
+29. PR-29 Cross-Platform App Launcher and Window Manager
+30. PR-30 Cross-Platform Input and Screenshot Backend
+31. PR-31 Cross-Platform Recording Format Upgrade
+32. PR-32 macOS/Linux CI and Test Desktop Harness

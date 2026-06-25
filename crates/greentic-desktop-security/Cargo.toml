@@ -1,0 +1,20 @@
+[package]
+name = "greentic-desktop-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Security, secrets, and policy enforcement for Greentic desktop runners."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_security"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-core.workspace = true
+greentic-desktop-registry.workspace = true

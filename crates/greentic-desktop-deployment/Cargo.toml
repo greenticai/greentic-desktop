@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-deployment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+greentic-desktop-core.workspace = true
+greentic-desktop-extension.workspace = true
+greentic-desktop-registry.workspace = true

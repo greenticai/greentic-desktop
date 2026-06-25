@@ -1,0 +1,26 @@
+[package]
+name = "greentic-desktop-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Runtime host for Greentic desktop runner configuration, packages, MCP, and telemetry."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true
+greentic-desktop-config.workspace = true
+greentic-desktop-core.workspace = true
+greentic-desktop-extension.workspace = true
+greentic-desktop-mcp.workspace = true
+greentic-desktop-registry.workspace = true
+greentic-desktop-session.workspace = true
+greentic-desktop-telemetry.workspace = true

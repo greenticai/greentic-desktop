@@ -1,0 +1,21 @@
+[package]
+name = "greentic-desktop-rollout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Workspace patch, test, rollout, and rollback flow model for Greentic desktop runners."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_rollout"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-mcp.workspace = true
+greentic-desktop-workspaces.workspace = true

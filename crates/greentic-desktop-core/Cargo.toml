@@ -1,0 +1,30 @@
+[package]
+name = "greentic-desktop-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Core types and validation utilities for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = [
+  "src/**",
+  "tests/**",
+  "benches/**",
+  "Cargo.toml",
+  "../../README.md",
+  "../../LICENSE",
+]
+
+[lib]
+name = "greentic_desktop_core"
+path = "src/lib.rs"
+
+[[bench]]
+name = "perf"
+harness = false
+
+[dev-dependencies]
+criterion.workspace = true

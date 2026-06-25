@@ -1,0 +1,20 @@
+[package]
+name = "greentic-desktop-business"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Business process automation with Greentic desktop runner tools."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_business"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-mcp.workspace = true

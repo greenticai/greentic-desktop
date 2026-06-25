@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Runtime configuration model for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_config"
+path = "src/lib.rs"

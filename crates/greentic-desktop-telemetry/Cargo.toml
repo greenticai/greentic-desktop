@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Telemetry event primitives for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_telemetry"
+path = "src/lib.rs"

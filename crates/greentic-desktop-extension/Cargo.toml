@@ -1,0 +1,19 @@
+[package]
+name = "greentic-desktop-extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Extension manager and sidecar runtime metadata for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_extension"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true

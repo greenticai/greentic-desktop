@@ -1,0 +1,20 @@
+[package]
+name = "greentic-desktop-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Rust-side Playwright web adapter model for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_web"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true

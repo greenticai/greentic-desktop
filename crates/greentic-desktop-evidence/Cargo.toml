@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-evidence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Evidence bundles and immutable audit storage for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_evidence"
+path = "src/lib.rs"

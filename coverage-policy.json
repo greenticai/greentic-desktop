@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "global": {
+    "line_coverage_min": 60.0
+  },
+  "defaults": {
+    "per_file_line_coverage_min": 60.0
+  },
+  "exclusions": {
+    "files": [
+      "crates/greentic-desktop-cli/src/bin/greentic-desktop.rs",
+      "crates/greentic-desktop-cli/src/bin/gtc.rs",
+      "crates/greentic-desktop-core/benches/perf.rs",
+      "crates/greentic-desktop-core/tests/perf_scaling.rs"
+    ]
+  },
+  "per_file": {
+    "crates/greentic-desktop-core/src/lib.rs": {
+      "line_coverage_min": 75.0
+    },
+    "crates/greentic-desktop-security/src/lib.rs": {
+      "line_coverage_min": 75.0
+    },
+    "crates/greentic-desktop-replay/src/lib.rs": {
+      "line_coverage_min": 75.0
+    },
+    "crates/greentic-desktop-mcp/src/lib.rs": {
+      "line_coverage_min": 75.0
+    },
+    "crates/greentic-desktop-registry/src/lib.rs": {
+      "line_coverage_min": 75.0
+    },
+    "crates/greentic-desktop-deployment/src/lib.rs": {
+      "line_coverage_min": 75.0
+    },
+    "crates/greentic-desktop-runtime/src/lib.rs": {
+      "line_coverage_min": 70.0
+    }
+  }
+}

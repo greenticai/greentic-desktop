@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: ./.github/workflows/_reusable_rust.yml
+    with:
+      command: |
+        cargo fmt --all -- --check
+        cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    uses: ./.github/workflows/_reusable_rust.yml
+    with:
+      command: cargo test --all-features
+
+  package-dry-run:
+    uses: ./.github/workflows/_reusable_rust.yml
+    with:
+      command: |
+        chmod +x ci/local_check.sh
+        bash ci/local_check.sh

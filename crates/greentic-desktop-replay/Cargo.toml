@@ -1,0 +1,22 @@
+[package]
+name = "greentic-desktop-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Replay engine and validation model for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_replay"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true
+greentic-desktop-evidence.workspace = true
+greentic-desktop-recorder.workspace = true
+greentic-desktop-session.workspace = true

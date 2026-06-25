@@ -1,0 +1,20 @@
+[package]
+name = "greentic-desktop-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Terminal and mainframe adapter model for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_terminal"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true

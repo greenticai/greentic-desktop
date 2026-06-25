@@ -1,0 +1,23 @@
+[package]
+name = "greentic-desktop-planner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Prompt-to-runner planning model for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_planner"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true
+greentic-desktop-core.workspace = true
+greentic-desktop-recorder.workspace = true
+greentic-desktop-session.workspace = true

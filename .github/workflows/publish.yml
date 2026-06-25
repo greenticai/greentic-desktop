@@ -1,0 +1,172 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Read Cargo version
+        id: version
+        shell: bash
+        run: |
+          version="$(cargo pkgid -p greentic-desktop | sed 's/.*#//')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Verify tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          expected="v${{ steps.version.outputs.version }}"
+          actual="${GITHUB_REF_NAME}"
+          if [ "$actual" != "$expected" ]; then
+            echo "Release tag '$actual' does not match Cargo.toml version '$expected'." >&2
+            exit 1
+          fi
+      - name: Local check
+        shell: bash
+        run: bash ci/local_check.sh
+
+  release-binaries:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/')
+    name: ${{ matrix.target }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_fmt: tgz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive_fmt: tgz
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            archive_fmt: tgz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            archive_fmt: tgz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_fmt: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            archive_fmt: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p greentic-desktop \
+            --bin greentic-desktop \
+            --bin gtc \
+            --release \
+            --target "${{ matrix.target }}"
+      - name: Package Unix archive
+        if: matrix.archive_fmt == 'tgz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify.outputs.version }}"
+          target="${{ matrix.target }}"
+          name="greentic-desktop-v${version}-${target}"
+          mkdir -p "dist/${name}"
+          cp "target/${target}/release/greentic-desktop" "dist/${name}/"
+          cp "target/${target}/release/gtc" "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tgz" "${name}"
+      - name: Package Windows archive
+        if: matrix.archive_fmt == 'zip'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.verify.outputs.version }}"
+          $target = "${{ matrix.target }}"
+          $name = "greentic-desktop-v$version-$target"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/$target/release/greentic-desktop.exe" "dist/$name/"
+          Copy-Item "target/$target/release/gtc.exe" "dist/$name/"
+          Copy-Item "README.md" "dist/$name/"
+          Copy-Item "LICENSE" "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/greentic-desktop-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_fmt }}
+
+  publish-crates:
+    needs: [verify, release-binaries]
+    if: always() && startsWith(github.ref, 'refs/tags/') && needs.verify.result == 'success' && needs.release-binaries.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          crates=(
+            greentic-desktop-core
+            greentic-desktop-config
+            greentic-desktop-adapter
+            greentic-desktop-extension
+            greentic-desktop-recorder
+            greentic-desktop-evidence
+            greentic-desktop-registry
+            greentic-desktop-session
+            greentic-desktop-telemetry
+            greentic-desktop-security
+            greentic-desktop-replay
+            greentic-desktop-mcp
+            greentic-desktop-runtime
+            greentic-desktop
+          )
+
+          for crate in "${crates[@]}"; do
+            echo "==> publishing $crate"
+            cargo publish -p "$crate" --dry-run
+            published=0
+            for attempt in 1 2 3; do
+              if cargo publish -p "$crate"; then
+                published=1
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$((attempt * 20))"
+              fi
+            done
+            if [ "$published" -ne 1 ]; then
+              exit 1
+            fi
+            sleep 20
+          done

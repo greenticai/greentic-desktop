@@ -1,0 +1,20 @@
+[package]
+name = "greentic-desktop-ltm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Long-term memory and root-cause learning for Greentic desktop runners."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_ltm"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-evidence.workspace = true

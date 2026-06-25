@@ -1,0 +1,21 @@
+[package]
+name = "greentic-desktop-refinement"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Interactive runner refinement loop for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_refinement"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true
+greentic-desktop-recorder.workspace = true

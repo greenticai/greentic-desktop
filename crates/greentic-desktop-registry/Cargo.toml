@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Runner registry, lifecycle, versioning, and signing model for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_registry"
+path = "src/lib.rs"

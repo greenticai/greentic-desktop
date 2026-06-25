@@ -1,0 +1,22 @@
+[package]
+name = "greentic-desktop-mvp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+greentic-desktop-adapter.workspace = true
+greentic-desktop-core.workspace = true
+greentic-desktop-forwarded.workspace = true
+greentic-desktop-planner.workspace = true
+greentic-desktop-refinement.workspace = true
+greentic-desktop-registry.workspace = true
+greentic-desktop-rollout.workspace = true
+greentic-desktop-session.workspace = true
+greentic-desktop-workspaces.workspace = true

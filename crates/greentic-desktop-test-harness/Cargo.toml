@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-test-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+greentic-desktop-linux.workspace = true
+greentic-desktop-macos.workspace = true
+greentic-desktop-platform.workspace = true
