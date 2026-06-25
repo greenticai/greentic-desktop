@@ -56,3 +56,5 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 30. PR-30 Cross-Platform Input and Screenshot Backend
 31. PR-31 Cross-Platform Recording Format Upgrade
 32. PR-32 macOS/Linux CI and Test Desktop Harness
+33. PR-33 greentic-llm Prompt-to-Runner Integration
+34. PR-34 Record Command and Recording Session Lifecycle
