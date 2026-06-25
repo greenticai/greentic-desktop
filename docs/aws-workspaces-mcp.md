@@ -83,7 +83,7 @@ The prompt-recording flow should identify:
 - outputs: `customer_id`,
 - evidence: screenshots and redacted tool traces.
 
-The installed CLI does not yet expose a finished prompt-recording command. In this repository, the prompt planner, recorder, refinement loop, replay model, registry model, and forwarded-tool builder are implemented as Rust product models and tests. Until the authoring commands are added, use the CLI to prepare the runtime, install adapters, discover `.gtpack` packages, and serve MCP.
+The installed CLI can plan a draft runner from a prompt with `greentic-desktop runner plan` and can manage recording sessions with `greentic-desktop record ...`. Registry publishing, production approval workflow, AWS forwarder registration, and live AWS API orchestration are still represented by Rust product models and tests while their production commands are being added.
 
 ## Convert And Publish The Runner
 
@@ -239,4 +239,4 @@ The current Greentic CLI can initialize the runtime, install extension manifests
 greentic-desktop mcp serve
 ```
 
-The AWS WorkSpaces install plan, approved-runner pull, forwarded MCP tool builder, and forwarded runner call flow are implemented in this repository as models and tests. The production command surface for prompt recording, registry publish, AWS forwarder registration, and live AWS API orchestration is still being added.
+The AWS WorkSpaces install plan, approved-runner pull, forwarded MCP tool builder, and forwarded runner call flow are implemented in this repository as models and tests. The production command surface for registry publish, AWS forwarder registration, and live AWS API orchestration is still being added.

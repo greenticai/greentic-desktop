@@ -4,13 +4,13 @@
 
 This repository is the early Rust workspace for the Greentic desktop runner. The intended product is a desktop automation runtime that can load adapters, manage sessions, record and replay runner packages, expose MCP tools, capture evidence, enforce security policy, and support reuse from Greentic flows or other MCP clients.
 
-The current implemented state covers PR-01 through PR-32 foundations: core capability and runner-package policy types, a universal adapter SDK, capability validation and adapter selection, signed extension manifests, extension installation/listing/verification, sidecar launch metadata, Rust-side Playwright, Windows UI, Java accessibility, terminal/mainframe, vision fallback, macOS Accessibility, Linux X11, constrained Linux Wayland adapter models, a portable app/window management layer, cross-platform input/screenshot backend, upgraded cross-platform recording format, and macOS/Linux/Windows desktop CI harness modeling, cross-platform desktop detection and capability gating, session bootstrap profiles, recording engine and portable runner package model, prompt-to-runner planner, interactive refinement loop, replay engine and validation model, evidence bundles and immutable audit storage, runner registry/versioning/signing, MCP tool publishing, security/secrets/policy enforcement, LTM/root-cause learning, AWS WorkSpaces integration models, workspace patch/test rollout flows, business-process automation, forwarded tool builder, deployment/update/airgapped support models, end-to-end MVP readiness/demo modeling, runtime configuration, session state, telemetry logging, a runtime host, CLI entrypoints for `greentic-desktop` and `gtc desktop`, CI/release automation, and lightweight performance/concurrency checks.
+The current implemented state covers PR-01 through PR-34 foundations: core capability and runner-package policy types, a universal adapter SDK, capability validation and adapter selection, signed extension manifests, extension installation/listing/verification, sidecar launch metadata, Rust-side Playwright, Windows UI, Java accessibility, terminal/mainframe, vision fallback, macOS Accessibility, Linux X11, constrained Linux Wayland adapter models, a portable app/window management layer, cross-platform input/screenshot backend, upgraded cross-platform recording format, and macOS/Linux/Windows desktop CI harness modeling, cross-platform desktop detection and capability gating, session bootstrap profiles, recording engine and portable runner package model, prompt-to-runner planner, greentic-LLM request integration, runner draft schema validation, planner policy checks, interactive refinement loop, replay engine and validation model, evidence bundles and immutable audit storage, runner registry/versioning/signing, MCP tool publishing, security/secrets/policy enforcement, LTM/root-cause learning, AWS WorkSpaces integration models, workspace patch/test rollout flows, business-process automation, forwarded tool builder, deployment/update/airgapped support models, end-to-end MVP readiness/demo modeling, runtime configuration, session state, telemetry logging, a runtime host, CLI entrypoints for `greentic-desktop` and `gtc desktop`, CLI prompt planning and recording lifecycle commands, CI/release automation, and lightweight performance/concurrency checks.
 
 ## 2. Main Components and Functionality
 
 - **Path:** `Cargo.toml`
   - **Role:** Root Cargo workspace manifest.
-  - **Key functionality:** Defines the PR-01/PR-02 workspace crates, shared package metadata, shared internal path dependencies, and the current workspace version `0.1.0`.
+  - **Key functionality:** Defines the PR-01 through PR-34 workspace crates, shared package metadata, shared dependency versions, shared internal path dependencies, and the current workspace version `0.1.1`; member crates inherit package versions from `[workspace.package]` and dependency declarations from `[workspace.dependencies]`.
   - **Key dependencies / integration points:** Used by all cargo commands, `ci/local_check.sh`, and GitHub Actions. `greentic-desktop` is the installable CLI package; its direct/transitive runtime dependency crates are publishable so crates.io and cargo-binstall can resolve it.
 
 - **Path:** `crates/greentic-desktop-core`
@@ -60,13 +60,28 @@ The current implemented state covers PR-01 through PR-32 foundations: core capab
 
 - **Path:** `crates/greentic-desktop-recorder`
   - **Role:** Recording engine and portable runner package model.
-  - **Key functionality:** Captures human demonstration events, prompt-generated steps, hybrid recordings, screenshots references, normalized summaries, redacted sensitive values, merged prompt/recorded steps, deterministic runner YAML output, portable platform support declarations, per-platform preferred adapters, OS-specific app launch values and locators, portable logical steps, runtime replay-plan selection, unsupported-platform preflight failures, and platform-path evidence URIs.
+  - **Key functionality:** Captures human demonstration events, prompt-generated steps, hybrid recordings, screenshots references, normalized summaries, redacted sensitive values, merged prompt/recorded steps, deterministic runner YAML output, recording session states/manifests, append-only raw JSONL events, start/pause/resume/stop/cancel/status/list lifecycle operations, normalisation/finalisation helpers, portable platform support declarations, per-platform preferred adapters, OS-specific app launch values and locators, portable logical steps, runtime replay-plan selection, unsupported-platform preflight failures, and platform-path evidence URIs.
   - **Key dependencies / integration points:** Consumes `RecordedEvent`, `LocatorTarget`, and `RunnerStep` from the adapter SDK. Portable replay plans are intended to feed platform/windowing/input adapters.
+
+- **Path:** `crates/greentic-desktop-llm`
+  - **Role:** Thin greentic-LLM prompt planning adapter.
+  - **Key functionality:** Defines the structured `desktop.prompt_to_runner` LLM request envelope, model policy, planning context, response/error types, mock static client, and deterministic heuristic client used by local CLI/tests when no external LLM service is configured.
+  - **Key dependencies / integration points:** Used by the planner crate as the LLM abstraction boundary so future real `greentic-llm` wiring can replace the heuristic client without changing planner validation.
+
+- **Path:** `crates/greentic-desktop-runner-schema`
+  - **Role:** Runner draft schema validation.
+  - **Key functionality:** Parses constrained JSON runner drafts from LLM output, validates required fields, risk level, namespaced capabilities, step shape, and clarification-only drafts, converts validated drafts into recorder `RunnerPackage` values, and emits structured `planner.*` diagnostics for invalid output.
+  - **Key dependencies / integration points:** Uses adapter runner steps, core risk levels, and recorder runner packages. Used by the planner before saving any LLM-produced draft.
+
+- **Path:** `crates/greentic-desktop-policy`
+  - **Role:** Prompt-planning policy checks.
+  - **Key functionality:** Applies planner policy to validated runner drafts, denying critical drafts by default, optionally blocking high-risk drafts, and requiring inputs for destructive/submitting actions.
+  - **Key dependencies / integration points:** Uses core risk levels and runner-schema draft documents. Used by the planner after schema validation and before file writes.
 
 - **Path:** `crates/greentic-desktop-planner`
   - **Role:** Prompt-to-runner planner.
-  - **Key functionality:** Produces draft runner packages from natural-language prompts; infers inputs, outputs, likely adapter, risk level, session profile, evidence policy, steps, assertions, and open questions using deterministic prompt/context signals.
-  - **Key dependencies / integration points:** Uses adapter capabilities, core risk levels, session profiles, and recorder runner packages. Future LLM routing can fit behind the same planning context.
+  - **Key functionality:** Produces draft runner packages from natural-language prompts; builds greentic-LLM request context, accepts structured LLM draft JSON, validates schema and required capabilities, applies planner policy, writes draft runner YAML, supports dry-run planning, and still provides the earlier deterministic prompt/context planner for modeled flows.
+  - **Key dependencies / integration points:** Uses adapter capabilities, core risk levels, the LLM adapter crate, runner-schema validation, planner policy, session profiles, and recorder runner packages.
 
 - **Path:** `crates/greentic-desktop-refinement`
   - **Role:** Interactive refinement loop.
@@ -180,7 +195,7 @@ The current implemented state covers PR-01 through PR-32 foundations: core capab
 
 - **Path:** `crates/greentic-desktop-cli`
   - **Role:** Installable command-line package.
-  - **Key functionality:** Publishes as the `greentic-desktop` crate and provides `greentic-desktop` and `gtc` binaries. Implemented commands are `info`, `init`, `config show`, `extension install ID`, `extension list`, `extension update`, `extension verify [ID]`, `extension sidecar ID`, `runner list`, and `mcp serve [--bind ADDR]`; the `gtc` binary requires the `desktop` prefix.
+  - **Key functionality:** Publishes as the `greentic-desktop` crate and provides `greentic-desktop` and `gtc` binaries. Implemented commands are `info`, `init`, `config show`, `extension install ID`, `extension list`, `extension update`, `extension verify [ID]`, `extension sidecar ID`, `runner list`, `runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]`, `record start/pause/resume/stop/cancel/status/list/normalise/finalise/mark-input/mark-secret/mark-output/add-assertion/note`, and `mcp serve [--bind ADDR]`; the `gtc` binary requires the `desktop` prefix.
   - **Key dependencies / integration points:** Calls runtime/config APIs, includes cargo-binstall metadata for Linux/macOS/Windows x64 and ARM release archives, and is intended to install through `cargo binstall greentic-desktop`. Verified manually with `greentic-desktop info` and `gtc desktop config show`.
 
 - **Path:** `crates/greentic-desktop-core/tests/perf_scaling.rs`
@@ -195,7 +210,7 @@ The current implemented state covers PR-01 through PR-32 foundations: core capab
 
 - **Path:** `ci/local_check.sh`
   - **Role:** Single local developer validation entrypoint.
-  - **Key functionality:** Runs formatting, Clippy with denied warnings, tests, build, docs, `cargo package --no-verify`, verified `cargo package`, and `cargo publish --dry-run` for publishable crates.
+  - **Key functionality:** Runs formatting, Clippy with denied warnings, tests, build, docs, `cargo package --no-verify`, verified `cargo package`, and `cargo publish --dry-run` for publishable crates. Publish ordering includes the prompt-planning support crates needed by the CLI.
   - **Key dependencies / integration points:** Passed after PR-01 implementation. Used directly by developers and by workflow jobs.
 
 - **Path:** `.github/workflows/ci.yml`
@@ -210,11 +225,11 @@ The current implemented state covers PR-01 through PR-32 foundations: core capab
 
 - **Path:** `README.md`
   - **Role:** Public non-technical overview.
-  - **Key functionality:** Explains Greentic Desktop at a high level for non-technical users, describes the runner lifecycle, lists current CLI entry points, links to detailed feature docs, and clearly distinguishes the implemented CLI/runtime surface from the broader modeled product workflows.
+  - **Key functionality:** Explains Greentic Desktop at a high level for non-technical users, describes the runner lifecycle, lists current CLI entry points including prompt planning and recording, links to detailed feature docs, and clearly distinguishes the implemented CLI/runtime surface from the broader modeled product workflows.
 
 - **Path:** `docs/`
   - **Role:** Detailed feature documentation.
-  - **Key functionality:** Provides in-depth docs for getting started, runners, adapters and desktop support, recording/refinement, MCP tools, security/secrets/approvals, evidence, business workflows, deployment/rollout, CLI usage, and developer notes.
+  - **Key functionality:** Provides in-depth docs for getting started, runners, adapters and desktop support, per-adapter usage guides for every built-in extension, recording/refinement, MCP tools, AWS WorkSpaces MCP forwarding, security/secrets/approvals, evidence, business workflows, deployment/rollout, CLI usage, and developer notes.
 
 - **Path:** `.codex/README.md` and `.codex/done/PR-*.md`
   - **Role:** Completed implementation roadmap for the desktop runner.
@@ -227,9 +242,9 @@ The current implemented state covers PR-01 through PR-32 foundations: core capab
 
 ## 3. Work In Progress, TODOs, and Stubs
 
-- **Location:** `.codex/done/PR-01-*.md` through `.codex/done/PR-32-*.md`
+- **Location:** `.codex/done/PR-01-*.md` through `.codex/done/PR-34-*.md`
   - **Status:** Complete
-  - **Short description:** The full PR roadmap has been implemented through macOS/Linux CI and test desktop harness modeling.
+  - **Short description:** The full PR roadmap has been implemented through greentic-LLM prompt planning integration and CLI recording session lifecycle.
 
 - **Location:** `crates/greentic-desktop-runtime::serve_mcp`
   - **Status:** Complete
@@ -274,11 +289,11 @@ The current implemented state covers PR-01 through PR-32 foundations: core capab
 ## 4. Broken, Failing, or Conflicting Areas
 
 - **Location:** `ci/local_check.sh`
-  - **Evidence:** `bash ci/local_check.sh` passed after the README/docs rewrite.
-  - **Likely cause / nature of issue:** No current local check failure. The successful run covered formatting, Clippy with denied warnings, tests, build, docs, package verification, and `cargo publish --dry-run` for `greentic-desktop-core`.
+  - **Evidence:** `bash ci/local_check.sh` passed after PR-33/PR-34 implementation.
+  - **Likely cause / nature of issue:** No current local check failure. The successful run covered formatting, Clippy with denied warnings, tests, build, docs, package verification, and `cargo publish --dry-run` for locally packageable crates including the new `greentic-desktop-llm` crate.
 
 - **Location:** Product implementation versus `.codex/PR-*.md` roadmap
-  - **Evidence:** PR-01 through PR-32 now have corresponding workspace implementations and their tracking documents are kept under `.codex/done/`.
+  - **Evidence:** PR-01 through PR-34 now have corresponding workspace implementations and their tracking documents are kept under `.codex/done/`.
   - **Likely cause / nature of issue:** No remaining PR roadmap mismatch is known. Future work should focus on replacing deterministic models with real sidecar/native integrations and a full MCP protocol server where needed.
 
 ## 5. Notes for Future Work

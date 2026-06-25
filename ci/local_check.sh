@@ -27,6 +27,10 @@ publishable_crates() {
     greentic-desktop-adapter \
     greentic-desktop-extension \
     greentic-desktop-recorder \
+    greentic-desktop-llm \
+    greentic-desktop-runner-schema \
+    greentic-desktop-policy \
+    greentic-desktop-planner \
     greentic-desktop-evidence \
     greentic-desktop-registry \
     greentic-desktop-session \
@@ -54,7 +58,8 @@ locally_packageable_crates() {
     greentic-desktop-evidence \
     greentic-desktop-registry \
     greentic-desktop-session \
-    greentic-desktop-telemetry
+    greentic-desktop-telemetry \
+    greentic-desktop-llm
   do
     if cargo metadata --no-deps --format-version 1 \
       | grep -q "\"name\":\"$crate\""; then

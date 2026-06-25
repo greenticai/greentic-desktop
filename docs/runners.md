@@ -38,6 +38,78 @@ The intended lifecycle is:
 5. Expose it as an MCP tool or use it inside a larger business workflow.
 6. Keep evidence for each run.
 
+## Generate A Draft Runner
+
+Use prompt planning when you can describe the task before recording it:
+
+```bash
+greentic-desktop runner plan \
+  --prompt "Create CRM customer with company name and email and return customer id" \
+  --profile local-crm \
+  --out ./runners/crm.create_customer.draft.yaml
+```
+
+Use recording when the task is easier to demonstrate:
+
+```bash
+greentic-desktop record start \
+  --name crm.create_customer \
+  --profile local-crm \
+  --adapter greentic.desktop.playwright \
+  --out ./recordings/crm.create_customer
+
+greentic-desktop record stop --session rec_123
+
+greentic-desktop record normalise \
+  --recording ./recordings/crm.create_customer/raw \
+  --out ./runners/crm.create_customer.draft.yaml
+```
+
+Both paths produce a draft runner YAML file that should be reviewed before production use.
+
+## Make A Runner Discoverable
+
+The current CLI discovers local `.gtpack` runner packages from the runtime runner folder:
+
+```text
+~/.greentic/desktop/runners
+```
+
+Place reviewed runner packages there, or use the folder selected by `GREENTIC_DESKTOP_HOME`. Then list them:
+
+```bash
+greentic-desktop runner list
+```
+
+Draft YAML files are useful for review and editing. Production runner packages are expected to be packaged, signed, and published before they are exposed as tools.
+
+## Use A Runner
+
+After a runner is approved and exposed as an MCP tool, start the MCP endpoint:
+
+```bash
+greentic-desktop mcp serve
+```
+
+An MCP client can list tools and call the runner by name. A call for a CRM customer runner uses the normal MCP `tools/call` shape:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "crm.create_customer",
+    "arguments": {
+      "company_name": "Example Ltd",
+      "email": "buyer@example.com"
+    }
+  }
+}
+```
+
+The response contains structured outputs, or a structured failure, plus an evidence reference when replay reaches the execution stage.
+
 ## Signed Published Runners
 
 Published runners are expected to be signed. By default, the runtime refuses unsigned published runner packages while still allowing unsigned drafts during local authoring.

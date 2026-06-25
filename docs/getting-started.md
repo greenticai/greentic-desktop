@@ -62,9 +62,26 @@ Before recording, decide:
 - what proves the task worked, such as a confirmation message or created ID,
 - what output should be returned to the caller.
 
+Start a recording session:
+
+```bash
+greentic-desktop record start \
+  --name crm.create_customer \
+  --profile local-crm \
+  --adapter greentic.desktop.playwright \
+  --out ./recordings/crm.create_customer
+```
+
 During recording, Greentic Desktop captures the meaningful desktop actions: opening an app or page, clicking controls, filling fields, reading values, waiting for visible text, and taking screenshots when evidence is needed. Sensitive values are redacted before they become part of a runner.
 
-The authoring flow is modeled in this repository, but the installed CLI does not yet expose a finished `record` command. Until that command is added, the current CLI can still prepare the runtime, install adapters, discover `.gtpack` files placed in the runner folder, and serve the MCP endpoint.
+Pause, resume, inspect, or stop the recording as needed:
+
+```bash
+greentic-desktop record pause --session rec_123
+greentic-desktop record resume --session rec_123
+greentic-desktop record status --session rec_123
+greentic-desktop record stop --session rec_123
+```
 
 ## 6. Convert The Recording Into A Runner
 
@@ -91,6 +108,15 @@ greentic-desktop runner list
 ```
 
 See [Runners](runners.md) for the runner package lifecycle and [Recording and Refinement](recording-and-refinement.md) for how recorded actions become stable replay steps.
+
+You can also create a draft runner directly from a prompt:
+
+```bash
+greentic-desktop runner plan \
+  --prompt "Create CRM customer with company name and email and return customer id" \
+  --profile local-crm \
+  --out ./runners/crm.create_customer.draft.yaml
+```
 
 ## 7. Expose The Runner As An MCP Tool Forwarder
 

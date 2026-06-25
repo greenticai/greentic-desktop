@@ -1,25 +1,20 @@
 [package]
-name = "greentic-desktop-planner"
+name = "greentic-desktop-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
-description = "Prompt-to-runner planning model for the Greentic desktop runner."
+description = "Prompt planning policy checks for Greentic desktop runner drafts."
 keywords.workspace = true
 categories.workspace = true
 include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 
 [lib]
-name = "greentic_desktop_planner"
+name = "greentic_desktop_policy"
 path = "src/lib.rs"
 
 [dependencies]
-greentic-desktop-adapter.workspace = true
 greentic-desktop-core.workspace = true
-greentic-desktop-llm.workspace = true
-greentic-desktop-policy.workspace = true
-greentic-desktop-recorder.workspace = true
 greentic-desktop-runner-schema.workspace = true
-greentic-desktop-session.workspace = true

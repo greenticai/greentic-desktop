@@ -11,6 +11,9 @@ members = [
   "crates/greentic-desktop-terminal",
   "crates/greentic-desktop-vision",
   "crates/greentic-desktop-recorder",
+  "crates/greentic-desktop-llm",
+  "crates/greentic-desktop-runner-schema",
+  "crates/greentic-desktop-policy",
   "crates/greentic-desktop-planner",
   "crates/greentic-desktop-refinement",
   "crates/greentic-desktop-replay",
@@ -38,7 +41,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/greenticai/greentic-desktop"
@@ -49,36 +52,39 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 criterion = "0.8"
-greentic-desktop-core = { path = "crates/greentic-desktop-core", version = "0.1.0" }
-greentic-desktop-config = { path = "crates/greentic-desktop-config", version = "0.1.0" }
-greentic-desktop-adapter = { path = "crates/greentic-desktop-adapter", version = "0.1.0" }
-greentic-desktop-extension = { path = "crates/greentic-desktop-extension", version = "0.1.0" }
-greentic-desktop-web = { path = "crates/greentic-desktop-web", version = "0.1.0" }
-greentic-desktop-windows = { path = "crates/greentic-desktop-windows", version = "0.1.0" }
-greentic-desktop-java = { path = "crates/greentic-desktop-java", version = "0.1.0" }
-greentic-desktop-terminal = { path = "crates/greentic-desktop-terminal", version = "0.1.0" }
-greentic-desktop-vision = { path = "crates/greentic-desktop-vision", version = "0.1.0" }
-greentic-desktop-recorder = { path = "crates/greentic-desktop-recorder", version = "0.1.0" }
-greentic-desktop-planner = { path = "crates/greentic-desktop-planner", version = "0.1.0" }
-greentic-desktop-refinement = { path = "crates/greentic-desktop-refinement", version = "0.1.0" }
-greentic-desktop-replay = { path = "crates/greentic-desktop-replay", version = "0.1.0" }
-greentic-desktop-evidence = { path = "crates/greentic-desktop-evidence", version = "0.1.0" }
-greentic-desktop-registry = { path = "crates/greentic-desktop-registry", version = "0.1.0" }
-greentic-desktop-mcp = { path = "crates/greentic-desktop-mcp", version = "0.1.0" }
-greentic-desktop-security = { path = "crates/greentic-desktop-security", version = "0.1.0" }
-greentic-desktop-ltm = { path = "crates/greentic-desktop-ltm", version = "0.1.0" }
-greentic-desktop-workspaces = { path = "crates/greentic-desktop-workspaces", version = "0.1.0" }
-greentic-desktop-rollout = { path = "crates/greentic-desktop-rollout", version = "0.1.0" }
-greentic-desktop-business = { path = "crates/greentic-desktop-business", version = "0.1.0" }
-greentic-desktop-forwarded = { path = "crates/greentic-desktop-forwarded", version = "0.1.0" }
-greentic-desktop-deployment = { path = "crates/greentic-desktop-deployment", version = "0.1.0" }
-greentic-desktop-mvp = { path = "crates/greentic-desktop-mvp", version = "0.1.0" }
-greentic-desktop-platform = { path = "crates/greentic-desktop-platform", version = "0.1.0" }
-greentic-desktop-macos = { path = "crates/greentic-desktop-macos", version = "0.1.0" }
-greentic-desktop-linux = { path = "crates/greentic-desktop-linux", version = "0.1.0" }
-greentic-desktop-windowing = { path = "crates/greentic-desktop-windowing", version = "0.1.0" }
-greentic-desktop-io = { path = "crates/greentic-desktop-io", version = "0.1.0" }
-greentic-desktop-test-harness = { path = "crates/greentic-desktop-test-harness", version = "0.1.0" }
-greentic-desktop-session = { path = "crates/greentic-desktop-session", version = "0.1.0" }
-greentic-desktop-runtime = { path = "crates/greentic-desktop-runtime", version = "0.1.0" }
-greentic-desktop-telemetry = { path = "crates/greentic-desktop-telemetry", version = "0.1.0" }
+greentic-desktop-core = { path = "crates/greentic-desktop-core", version = "0.1" }
+greentic-desktop-config = { path = "crates/greentic-desktop-config", version = "0.1" }
+greentic-desktop-adapter = { path = "crates/greentic-desktop-adapter", version = "0.1" }
+greentic-desktop-extension = { path = "crates/greentic-desktop-extension", version = "0.1" }
+greentic-desktop-web = { path = "crates/greentic-desktop-web", version = "0.1" }
+greentic-desktop-windows = { path = "crates/greentic-desktop-windows", version = "0.1" }
+greentic-desktop-java = { path = "crates/greentic-desktop-java", version = "0.1" }
+greentic-desktop-terminal = { path = "crates/greentic-desktop-terminal", version = "0.1" }
+greentic-desktop-vision = { path = "crates/greentic-desktop-vision", version = "0.1" }
+greentic-desktop-recorder = { path = "crates/greentic-desktop-recorder", version = "0.1" }
+greentic-desktop-llm = { path = "crates/greentic-desktop-llm", version = "0.1" }
+greentic-desktop-runner-schema = { path = "crates/greentic-desktop-runner-schema", version = "0.1" }
+greentic-desktop-policy = { path = "crates/greentic-desktop-policy", version = "0.1" }
+greentic-desktop-planner = { path = "crates/greentic-desktop-planner", version = "0.1" }
+greentic-desktop-refinement = { path = "crates/greentic-desktop-refinement", version = "0.1" }
+greentic-desktop-replay = { path = "crates/greentic-desktop-replay", version = "0.1" }
+greentic-desktop-evidence = { path = "crates/greentic-desktop-evidence", version = "0.1" }
+greentic-desktop-registry = { path = "crates/greentic-desktop-registry", version = "0.1" }
+greentic-desktop-mcp = { path = "crates/greentic-desktop-mcp", version = "0.1" }
+greentic-desktop-security = { path = "crates/greentic-desktop-security", version = "0.1" }
+greentic-desktop-ltm = { path = "crates/greentic-desktop-ltm", version = "0.1" }
+greentic-desktop-workspaces = { path = "crates/greentic-desktop-workspaces", version = "0.1" }
+greentic-desktop-rollout = { path = "crates/greentic-desktop-rollout", version = "0.1" }
+greentic-desktop-business = { path = "crates/greentic-desktop-business", version = "0.1" }
+greentic-desktop-forwarded = { path = "crates/greentic-desktop-forwarded", version = "0.1" }
+greentic-desktop-deployment = { path = "crates/greentic-desktop-deployment", version = "0.1" }
+greentic-desktop-mvp = { path = "crates/greentic-desktop-mvp", version = "0.1" }
+greentic-desktop-platform = { path = "crates/greentic-desktop-platform", version = "0.1" }
+greentic-desktop-macos = { path = "crates/greentic-desktop-macos", version = "0.1" }
+greentic-desktop-linux = { path = "crates/greentic-desktop-linux", version = "0.1" }
+greentic-desktop-windowing = { path = "crates/greentic-desktop-windowing", version = "0.1" }
+greentic-desktop-io = { path = "crates/greentic-desktop-io", version = "0.1" }
+greentic-desktop-test-harness = { path = "crates/greentic-desktop-test-harness", version = "0.1" }
+greentic-desktop-session = { path = "crates/greentic-desktop-session", version = "0.1" }
+greentic-desktop-runtime = { path = "crates/greentic-desktop-runtime", version = "0.1" }
+greentic-desktop-telemetry = { path = "crates/greentic-desktop-telemetry", version = "0.1" }

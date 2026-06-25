@@ -35,7 +35,7 @@ The usual path is:
 4. **Expose it as an MCP tool forwarder.** The approved runner is converted into a tool with a stable name, input schema, output schema, permissions, approval policy, and evidence settings. A local or forwarded MCP client can then call that tool instead of driving the desktop directly.
 5. **Use it from an assistant or workflow.** The caller supplies the required inputs, Greentic Desktop replays the desktop task, and the response includes structured outputs plus an evidence reference.
 
-The current CLI can initialize the runtime, install adapter manifests, discover local `.gtpack` runner packages, and serve the MCP endpoint. The recording, runner conversion, approval, and forwarded-tool builder flows are implemented in this repository as product models and tests; user-facing commands for those authoring steps are still being added. See [Getting Started](docs/getting-started.md), [Recording and Refinement](docs/recording-and-refinement.md), [Runners](docs/runners.md), and [MCP Tools](docs/mcp-tools.md) for the detailed workflow.
+The current CLI can initialize the runtime, install adapter manifests, plan draft runners from prompts, manage recording sessions, discover local `.gtpack` runner packages, and serve the MCP endpoint. Approval, registry publish, and forwarded-tool registration are still represented by product models and tests while their production command surface is being added. See [Getting Started](docs/getting-started.md), [Recording and Refinement](docs/recording-and-refinement.md), [Runners](docs/runners.md), and [MCP Tools](docs/mcp-tools.md) for the detailed workflow.
 
 ## Current Command-Line Entry Points
 
@@ -45,7 +45,7 @@ For published releases, install the CLI with cargo-binstall:
 cargo binstall greentic-desktop
 ```
 
-From this repository, the current CLI can show runtime information, initialize local storage, manage built-in extensions, list local runner packages, and serve a small MCP endpoint.
+From this repository, the current CLI can show runtime information, initialize local storage, manage built-in extensions, plan draft runners, manage recording sessions, list local runner packages, and serve a small MCP endpoint.
 
 ```bash
 greentic-desktop info
@@ -53,6 +53,8 @@ greentic-desktop init
 greentic-desktop extension install greentic.desktop.playwright
 greentic-desktop extension list
 greentic-desktop runner list
+greentic-desktop runner plan --prompt "Create CRM customer with company name and email" --dry-run
+greentic-desktop record start --name crm.create_customer --profile local-crm --adapter greentic.desktop.playwright --out ./recordings/crm.create_customer
 greentic-desktop mcp serve
 ```
 
@@ -67,6 +69,14 @@ gtc desktop info
 - [Getting Started](docs/getting-started.md)
 - [Runners](docs/runners.md)
 - [Adapters and Supported Desktops](docs/adapters.md)
+  - [Playwright Web Adapter](docs/adapters/playwright-web.md)
+  - [Terminal TN3270 Adapter](docs/adapters/terminal-tn3270.md)
+  - [Windows UI Adapter](docs/adapters/windows-ui.md)
+  - [Java Accessibility Adapter](docs/adapters/java-accessibility.md)
+  - [Vision Adapter](docs/adapters/vision.md)
+  - [macOS Accessibility Adapter](docs/adapters/macos-accessibility.md)
+  - [Linux X11 Adapter](docs/adapters/linux-x11.md)
+  - [Linux Wayland Adapter](docs/adapters/linux-wayland.md)
 - [Recording and Refinement](docs/recording-and-refinement.md)
 - [MCP Tools](docs/mcp-tools.md)
 - [Security, Approvals, and Secrets](docs/security.md)
@@ -81,7 +91,7 @@ gtc desktop info
 
 This repository contains the Rust workspace for Greentic Desktop. The current implementation includes:
 
-- A runtime and CLI for local initialization, extension management, runner discovery, and MCP serving.
+- A runtime and CLI for local initialization, extension management, prompt planning, recording session lifecycle, runner discovery, and MCP serving.
 - Models for runner packages, portable desktop steps, replay validation, evidence, registry signing, security policy, deployment, rollout, and business flows.
 - Built-in extension manifests for web, terminal, Windows UI Automation, Java accessibility, vision fallback, macOS accessibility, Linux X11, and Linux Wayland compatibility.
 - Test coverage for the modeled workflows and local validation through CI.

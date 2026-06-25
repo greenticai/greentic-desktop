@@ -1,0 +1,16 @@
+[package]
+name = "greentic-desktop-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Thin Greentic LLM request adapter for desktop prompt-to-runner planning."
+keywords.workspace = true
+categories.workspace = true
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
+
+[lib]
+name = "greentic_desktop_llm"
+path = "src/lib.rs"
