@@ -47,6 +47,7 @@ path = "src/bin/gtc.rs"
 [dependencies]
 greentic-desktop-config.workspace = true
 greentic-desktop-extension.workspace = true
+greentic-desktop-gui.workspace = true
 greentic-desktop-planner.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-runtime.workspace = true

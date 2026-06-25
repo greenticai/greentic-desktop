@@ -2,6 +2,20 @@
 
 Greentic Desktop runs desktop automation from a local runtime. The runtime keeps its own home folder with installed extensions, runner packages, configuration, and evidence.
 
+## GUI-First Path
+
+1. Install a release or build from this repository.
+2. Start `greentic-desktop`, or double-click `greentic-desktop.exe` on Windows.
+3. Open Automate Hub from the browser URL.
+4. Complete the setup checklist.
+5. Open **Settings** and install or verify the required extensions.
+6. Open **Create** and generate a runner from a prompt, or record a task.
+7. Test the runner and save it.
+8. Open **My Runners** and publish the approved runner as an MCP tool.
+9. Open **MCP Tools**, start the MCP service, and copy the client configuration.
+
+The detailed browser workflow is in [Automate Hub GUI](gui.md). A release validation checklist is in [End-To-End Smoke Checklist](e2e-smoke.md).
+
 ## 1. Check The Runtime
 
 Run:

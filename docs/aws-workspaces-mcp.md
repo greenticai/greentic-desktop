@@ -10,6 +10,8 @@ https://agentaccess-mcp.<region>.api.aws/mcp
 
 AWS requires SigV4 signing with the service name `agentaccess-mcp`, and every request must include the streaming session URL from `CreateStreamingURL` in the `X-Amzn-AgentAccess-Streaming-Session-Url` header. See the AWS guide: [WorkSpaces Applications MCP server](https://docs.aws.amazon.com/appstream2/latest/developerguide/agent-access-mcp-server.html).
 
+Automate Hub can drive the local parts of this setup: install or verify extensions in **Settings**, create or record the runner in **Create**, test and publish it from **My Runners**, then copy local MCP configuration from **MCP Tools**. Do not claim AWS registration is complete until the AWS-side stack, streaming URL, and SigV4 MCP connection are configured.
+
 ## When To Use This Pattern
 
 Use the AWS-forwarded pattern when:

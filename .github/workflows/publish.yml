@@ -2,7 +2,18 @@ name: Publish
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the current Cargo version if no release tag exists'
+        required: false
+        default: false
+        type: boolean
   push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
     tags:
       - 'v*'
 
@@ -13,13 +24,22 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.publish-intent.outputs.release_tag }}
+      should_publish: ${{ steps.publish-intent.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/automate-hub/package-lock.json
       - uses: Swatinem/rust-cache@v2
       - name: Read Cargo version
         id: version
@@ -28,6 +48,34 @@ jobs:
           version="$(cargo pkgid -p greentic-desktop | sed 's/.*#//')"
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Determine publish intent
+        id: publish-intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          tag="v${version}"
+          should_publish=false
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            should_publish=true
+            tag="${GITHUB_REF_NAME}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "Release tag ${tag} already exists; skipping publish jobs."
+            else
+              should_publish=true
+            fi
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.publish }}" == "true" ]]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "Release tag ${tag} already exists; skipping publish jobs."
+            else
+              should_publish=true
+            fi
+          fi
+
+          echo "release_tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "should_publish=${should_publish}" >> "$GITHUB_OUTPUT"
       - name: Verify tag matches Cargo version
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -38,13 +86,36 @@ jobs:
             echo "Release tag '$actual' does not match Cargo.toml version '$expected'." >&2
             exit 1
           fi
+      - name: Frontend build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd frontend/automate-hub
+          npm ci
+          npm run lint
+          npm run build
+          test -f dist/index.html
       - name: Local check
         shell: bash
         run: bash ci/local_check.sh
+      - name: Create release tag for main version push
+        if: steps.publish-intent.outputs.should_publish == 'true' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.publish-intent.outputs.release_tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Release tag ${tag} already exists."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${tag}"
 
   release-binaries:
     needs: verify
-    if: startsWith(github.ref, 'refs/tags/')
+    if: needs.verify.outputs.should_publish == 'true'
     name: ${{ matrix.target }}
     permissions:
       contents: write
@@ -76,9 +147,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/automate-hub/package-lock.json
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      - name: Build embedded frontend assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd frontend/automate-hub
+          npm ci
+          npm run build
+          test -f dist/index.html
       - name: Build release binaries
         shell: bash
         run: |
@@ -88,6 +172,14 @@ jobs:
             --bin gtc \
             --release \
             --target "${{ matrix.target }}"
+      - name: GUI startup smoke check
+        if: matrix.archive_fmt == 'tgz'
+        shell: bash
+        run: bash ci/gui_smoke.sh "target/${{ matrix.target }}/release/greentic-desktop"
+      - name: GUI startup smoke check
+        if: matrix.archive_fmt == 'zip'
+        shell: bash
+        run: bash ci/gui_smoke.sh "target/${{ matrix.target }}/release/greentic-desktop.exe"
       - name: Package Unix archive
         if: matrix.archive_fmt == 'tgz'
         shell: bash
@@ -101,6 +193,8 @@ jobs:
           cp "target/${target}/release/gtc" "dist/${name}/"
           cp README.md LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tgz" "${name}"
+          tar -tzf "dist/${name}.tgz" | grep -Fx "${name}/greentic-desktop"
+          tar -tzf "dist/${name}.tgz" | grep -Fx "${name}/gtc"
       - name: Package Windows archive
         if: matrix.archive_fmt == 'zip'
         shell: pwsh
@@ -114,14 +208,96 @@ jobs:
           Copy-Item "README.md" "dist/$name/"
           Copy-Item "LICENSE" "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist/$name.zip")
+          try {
+            $entries = $zip.Entries | ForEach-Object { $_.FullName }
+            if ($entries -notcontains "$name/greentic-desktop.exe") {
+              throw "Archive is missing $name/greentic-desktop.exe"
+            }
+            if ($entries -notcontains "$name/gtc.exe") {
+              throw "Archive is missing $name/gtc.exe"
+            }
+          } finally {
+            $zip.Dispose()
+          }
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.verify.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/greentic-desktop-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_fmt }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true
+
+  publish-extension-artifacts:
+    needs: verify
+    if: needs.verify.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: greentic.desktop.playwright
+            image: playwright
+          - id: greentic.desktop.windows-uia
+            image: windows-uia
+          - id: greentic.desktop.macos-ax
+            image: macos-ax
+          - id: greentic.desktop.linux-x11
+            image: linux-x11
+          - id: greentic.desktop.java-accessibility
+            image: java-accessibility
+          - id: greentic.desktop.vision-fallback
+            image: vision-fallback
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oras-project/setup-oras@v1
+      - name: Package extension
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify.outputs.version }}"
+          mkdir -p dist/extensions
+          package="$(bash ci/package_extension.sh "${{ matrix.id }}" "${version}" dist/extensions)"
+          echo "package=${package}" >> "$GITHUB_OUTPUT"
+      - name: Login to GHCR
+        shell: bash
+        run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Publish extension OCI artifact
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify.outputs.version }}"
+          ref="ghcr.io/greenticai/greentic-desktop/extensions/${{ matrix.image }}:${version}"
+          output="$(oras push "${ref}" \
+            "${{ steps.package.outputs.package }}:application/vnd.greentic.desktop.extension.layer.v1+tar+zstd" \
+            --artifact-type application/vnd.greentic.desktop.extension.manifest.v1+json)"
+          echo "$output"
+          digest="$(printf '%s\n' "$output" | sed -n 's/^Digest: //p' | tail -n 1)"
+          test -n "$digest"
+          echo "${{ matrix.id }} ${ref}@${digest}" >> "dist/extensions/published-digests.txt"
+          cat >"dist/extensions/store-index-${{ matrix.image }}.json" <<EOF
+          {"id":"${{ matrix.id }}","latest":"${version}","source":"oci://${ref}","digest":"${digest}"}
+          EOF
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Upload extension digest record
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-digest-${{ matrix.image }}
+          path: |
+            dist/extensions/published-digests.txt
+            dist/extensions/store-index-${{ matrix.image }}.json
 
   publish-crates:
-    needs: [verify, release-binaries]
-    if: always() && startsWith(github.ref, 'refs/tags/') && needs.verify.result == 'success' && needs.release-binaries.result == 'success'
+    needs: [verify, release-binaries, publish-extension-artifacts]
+    if: always() && needs.verify.outputs.should_publish == 'true' && needs.verify.result == 'success' && needs.release-binaries.result == 'success' && needs.publish-extension-artifacts.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -135,10 +311,85 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          : "${CARGO_REGISTRY_TOKEN:?CARGO_REGISTRY_TOKEN secret is required}"
+          version="${{ needs.verify.outputs.version }}"
+          user_agent="greentic-desktop-publish/${version}"
+
+          crate_version_status() {
+            local crate="$1"
+            curl -L -sS -o /dev/null -w "%{http_code}" \
+              -H "User-Agent: ${user_agent}" \
+              "https://crates.io/api/v1/crates/${crate}/${version}"
+          }
+
+          crate_version_exists() {
+            [ "$(crate_version_status "$1")" = "200" ]
+          }
+
+          wait_for_crate_version() {
+            local crate="$1"
+            local status
+            for attempt in {1..30}; do
+              status="$(crate_version_status "$crate")"
+              if [ "$status" = "200" ]; then
+                echo "${crate} ${version} is visible in crates.io."
+                return 0
+              fi
+              if [ "$status" != "404" ]; then
+                echo "crates.io returned HTTP ${status} while checking ${crate} ${version}; retrying." >&2
+              fi
+              sleep 10
+            done
+            echo "${crate} ${version} did not become visible in crates.io in time." >&2
+            return 1
+          }
+
+          dry_run_publish() {
+            local crate="$1"
+            for attempt in {1..5}; do
+              if cargo publish -p "$crate" --dry-run; then
+                return 0
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                sleep "$((attempt * 20))"
+              fi
+            done
+            return 1
+          }
+
+          publish_crate() {
+            local crate="$1"
+            echo "==> publishing ${crate} ${version}"
+            if crate_version_exists "$crate"; then
+              echo "${crate} ${version} is already published; skipping upload."
+              return 0
+            fi
+
+            dry_run_publish "$crate"
+
+            for attempt in {1..5}; do
+              if cargo publish -p "$crate"; then
+                wait_for_crate_version "$crate"
+                return 0
+              fi
+              if crate_version_exists "$crate"; then
+                echo "${crate} ${version} appeared after a failed upload attempt; treating as published."
+                return 0
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                sleep "$((attempt * 30))"
+              fi
+            done
+
+            echo "Failed to publish ${crate} ${version}." >&2
+            return 1
+          }
+
           crates=(
             greentic-desktop-core
             greentic-desktop-config
             greentic-desktop-adapter
+            greentic-distributor-client
             greentic-desktop-extension
             greentic-desktop-recorder
             greentic-desktop-llm
@@ -149,6 +400,8 @@ jobs:
             greentic-desktop-registry
             greentic-desktop-session
             greentic-desktop-telemetry
+            greentic-desktop-gui-assets
+            greentic-desktop-gui
             greentic-desktop-security
             greentic-desktop-replay
             greentic-desktop-mcp
@@ -157,20 +410,5 @@ jobs:
           )
 
           for crate in "${crates[@]}"; do
-            echo "==> publishing $crate"
-            cargo publish -p "$crate" --dry-run
-            published=0
-            for attempt in 1 2 3; do
-              if cargo publish -p "$crate"; then
-                published=1
-                break
-              fi
-              if [ "$attempt" -lt 3 ]; then
-                sleep "$((attempt * 20))"
-              fi
-            done
-            if [ "$published" -ne 1 ]; then
-              exit 1
-            fi
-            sleep 20
+            publish_crate "$crate"
           done

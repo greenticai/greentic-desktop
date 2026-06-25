@@ -14,6 +14,9 @@ use greentic_desktop_mcp::{example_runner_tool, McpServerState};
 use greentic_desktop_registry::{RegistryError, SignedRunnerManifest, SigningKey};
 use greentic_desktop_session::DesktopSession;
 use greentic_desktop_telemetry::TelemetryLog;
+use greentic_distributor_client::{
+    DistributorError, GreenticDistributorClient, ResolvedArtifact, StoreExtension,
+};
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
@@ -31,6 +34,7 @@ pub struct DesktopRuntime {
 pub enum RuntimeError {
     Io(std::io::Error),
     Extension(ExtensionError),
+    Distributor(DistributorError),
     Registry(RegistryError),
     Security(String),
     InvalidCapabilities(String),
@@ -41,6 +45,7 @@ impl fmt::Display for RuntimeError {
         match self {
             Self::Io(err) => write!(f, "{err}"),
             Self::Extension(err) => write!(f, "{err}"),
+            Self::Distributor(err) => write!(f, "{err}"),
             Self::Registry(err) => write!(f, "{err}"),
             Self::Security(message) | Self::InvalidCapabilities(message) => write!(f, "{message}"),
         }
@@ -58,6 +63,12 @@ impl From<std::io::Error> for RuntimeError {
 impl From<ExtensionError> for RuntimeError {
     fn from(value: ExtensionError) -> Self {
         Self::Extension(value)
+    }
+}
+
+impl From<DistributorError> for RuntimeError {
+    fn from(value: DistributorError) -> Self {
+        Self::Distributor(value)
     }
 }
 
@@ -162,16 +173,67 @@ impl DesktopRuntime {
         )
     }
 
+    pub fn resolve_extension_source(&self, source: &str) -> Result<ResolvedArtifact, RuntimeError> {
+        let client =
+            GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"));
+        client.resolve(source).map_err(Into::into)
+    }
+
+    pub fn search_extension_store(&self, query: &str) -> Vec<StoreExtension> {
+        GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"))
+            .search(query)
+    }
+
+    pub fn extension_versions(&self, id_or_alias: &str) -> Option<Vec<String>> {
+        GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"))
+            .versions(id_or_alias)
+    }
+
     pub fn install_extension(&self, extension_id: &str) -> Result<ExtensionManifest, RuntimeError> {
         self.telemetry
             .record("extension_install", extension_id.to_owned());
-        let manifest = built_in_extension(extension_id).ok_or_else(|| {
+        let artifact = self.resolve_extension_source(extension_id)?;
+        let manifest = built_in_extension(&artifact.extension_id).ok_or_else(|| {
             RuntimeError::Extension(ExtensionError::NotFound(format!(
-                "extension {extension_id} not found in configured registries"
+                "extension {} not found in configured registries",
+                artifact.extension_id
             )))
         })?;
-        self.extension_manager().install(&manifest)?;
+        self.extension_manager().install_resolved(
+            &manifest,
+            &artifact.resolved_uri,
+            &artifact.digest,
+        )?;
         Ok(manifest)
+    }
+
+    pub fn update_extension(&self, extension_id: &str) -> Result<ExtensionManifest, RuntimeError> {
+        self.install_extension(extension_id)
+    }
+
+    pub fn remove_extension(&self, extension_id: &str) -> Result<(), RuntimeError> {
+        self.extension_manager()
+            .remove(extension_id)
+            .map_err(Into::into)
+    }
+
+    pub fn set_extension_enabled(
+        &self,
+        extension_id: &str,
+        enabled: bool,
+    ) -> Result<(), RuntimeError> {
+        self.extension_manager()
+            .set_enabled(extension_id, enabled)
+            .map_err(Into::into)
+    }
+
+    pub fn extension_health(
+        &self,
+        extension_id: &str,
+    ) -> Result<greentic_desktop_extension::ExtensionHealth, RuntimeError> {
+        self.extension_manager()
+            .health(extension_id)
+            .map_err(Into::into)
     }
 
     pub fn list_extensions(&self) -> Result<Vec<ExtensionManifest>, RuntimeError> {
@@ -521,6 +583,30 @@ mod tests {
     }
 
     #[test]
+    fn installs_extension_through_distributor_sources() {
+        let root = temp_root("greentic-desktop-distributor-runtime-test");
+        let mut config = RuntimeConfig::default();
+        config.runner.home = root.clone();
+        config.evidence.store = root.join("evidence");
+        let runtime = DesktopRuntime::new(config);
+
+        let manifest = runtime
+            .install_extension(
+                "oci://ghcr.io/greenticai/greentic-desktop/extensions/playwright:1.0.0",
+            )
+            .expect("oci install should resolve through distributor");
+
+        assert_eq!(manifest.id, "greentic.desktop.playwright");
+        let resolved = runtime
+            .resolve_extension_source("store://greentic.desktop.playwright")
+            .expect("store source should resolve");
+        assert_eq!(resolved.extension_id, "greentic.desktop.playwright");
+        assert!(resolved.digest.starts_with("sha256:"));
+
+        fs::remove_dir_all(root).expect("test dir should be removable");
+    }
+
+    #[test]
     fn starts_sidecar_extension_metadata() {
         let root = temp_root("greentic-desktop-sidecar-runtime-test");
         let mut config = RuntimeConfig::default();
@@ -548,7 +634,10 @@ mod tests {
             .install_extension("greentic.desktop.missing")
             .expect_err("unknown extension should fail");
 
-        assert!(err.to_string().contains("not found"));
+        assert!(
+            err.to_string().contains("not found")
+                || err.to_string().contains("invalid extension source")
+        );
     }
 
     #[test]

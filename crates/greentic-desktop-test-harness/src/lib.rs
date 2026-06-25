@@ -69,14 +69,14 @@ pub fn desktop_harness_plan() -> HarnessPlan {
             HarnessJob {
                 name: "ubuntu-x11-virtual-display".to_owned(),
                 environment: HarnessEnvironment::UbuntuX11VirtualDisplay,
-                command: "xvfb-run -a cargo test -p greentic-desktop-linux can_detect_x11_session can_list_windows_and_inspect_at_spi_tree"
+                command: "xvfb-run -a cargo test -p greentic-desktop-linux -- can_detect_x11_session can_list_windows_and_inspect_at_spi_tree"
                     .to_owned(),
                 permission_gated: false,
             },
             HarnessJob {
                 name: "ubuntu-wayland-detection".to_owned(),
                 environment: HarnessEnvironment::UbuntuWaylandDetection,
-                command: "cargo test -p greentic-desktop-linux detects_wayland_and_reports_global_restrictions wayland_requires_manual_approval_when_portal_is_missing"
+                command: "cargo test -p greentic-desktop-linux -- detects_wayland_and_reports_global_restrictions wayland_requires_manual_approval_when_portal_is_missing"
                     .to_owned(),
                 permission_gated: false,
             },

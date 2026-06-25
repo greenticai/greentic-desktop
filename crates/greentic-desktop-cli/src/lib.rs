@@ -1,5 +1,6 @@
 use greentic_desktop_config::RuntimeConfig;
 use greentic_desktop_extension::built_in_extension;
+use greentic_desktop_gui::{open_default_browser, GuiApiState, GuiHost, GuiHostOptions};
 use greentic_desktop_planner::{
     plan_prompt_with_default_llm, save_draft_runner, PlannerDiagnostic, PlannerOptions,
     PlanningContext,
@@ -10,17 +11,21 @@ use greentic_desktop_recorder::{
     start_recording_session, stop_recording_session, RecordingLifecycleError,
     RecordingStartRequest,
 };
-use greentic_desktop_runtime::{discover_runners, DesktopRuntime};
+use greentic_desktop_runtime::{discover_extensions, discover_runners, DesktopRuntime};
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug)]
 pub enum CliError {
     Io(std::io::Error),
     Planner(PlannerDiagnostic),
     Recording(RecordingLifecycleError),
+    Gui(greentic_desktop_gui::GuiError),
     Runtime(greentic_desktop_runtime::RuntimeError),
     Usage(String),
 }
@@ -31,6 +36,7 @@ impl fmt::Display for CliError {
             Self::Io(err) => write!(f, "{err}"),
             Self::Planner(err) => write!(f, "{err}"),
             Self::Recording(err) => write!(f, "{err}"),
+            Self::Gui(err) => write!(f, "{err}"),
             Self::Runtime(err) => write!(f, "{err}"),
             Self::Usage(message) => write!(f, "{message}"),
         }
@@ -63,12 +69,18 @@ impl From<RecordingLifecycleError> for CliError {
     }
 }
 
+impl From<greentic_desktop_gui::GuiError> for CliError {
+    fn from(value: greentic_desktop_gui::GuiError) -> Self {
+        Self::Gui(value)
+    }
+}
+
 pub fn run_desktop_cli(args: impl IntoIterator<Item = String>) -> Result<(), CliError> {
-    run(args, false, &mut io::stdout())
+    run(args, false, &mut io::stdout(), true)
 }
 
 pub fn run_gtc_cli(args: impl IntoIterator<Item = String>) -> Result<(), CliError> {
-    run(args, true, &mut io::stdout())
+    run(args, true, &mut io::stdout(), true)
 }
 
 pub fn run_with_writer(
@@ -76,17 +88,18 @@ pub fn run_with_writer(
     require_desktop_prefix: bool,
     writer: &mut dyn Write,
 ) -> Result<(), CliError> {
-    run(args, require_desktop_prefix, writer)
+    run(args, require_desktop_prefix, writer, false)
 }
 
 fn run(
     args: impl IntoIterator<Item = String>,
     require_desktop_prefix: bool,
     writer: &mut dyn Write,
+    block_gui: bool,
 ) -> Result<(), CliError> {
     let mut args: Vec<String> = args.into_iter().collect();
-    if args.is_empty() {
-        return Err(CliError::Usage(usage(require_desktop_prefix)));
+    if !require_desktop_prefix && args.is_empty() {
+        return run_gui(GuiCliOptions::default(), writer, block_gui);
     }
 
     if require_desktop_prefix {
@@ -94,6 +107,20 @@ fn run(
             return Err(CliError::Usage(usage(true)));
         }
         args.remove(0);
+        if args.is_empty() {
+            return Err(CliError::Usage(usage(true)));
+        }
+    }
+
+    if matches!(args.as_slice(), [command] if command == "--help" || command == "-h" || command == "help")
+    {
+        writer.write_all(usage(require_desktop_prefix).as_bytes())?;
+        writeln!(writer)?;
+        return Ok(());
+    }
+
+    if !require_desktop_prefix && args.first().map(String::as_str) == Some("gui") {
+        return run_gui(parse_gui_args(&args[1..])?, writer, block_gui);
     }
 
     let config = RuntimeConfig::default();
@@ -121,11 +148,65 @@ fn run(
                 )?;
             }
         }
+        [command, subcommand, query] if command == "extension" && subcommand == "search" => {
+            for extension in runtime.search_extension_store(query) {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\t{}",
+                    extension.id, extension.latest, extension.name, extension.source
+                )?;
+            }
+        }
         [command, subcommand, extension_id]
             if command == "extension" && subcommand == "install" =>
         {
             let manifest = runtime.install_extension(extension_id)?;
             writeln!(writer, "installed: {}", manifest.id)?;
+        }
+        [command, subcommand, extension_id]
+            if command == "extension" && subcommand == "versions" =>
+        {
+            let versions = runtime
+                .extension_versions(extension_id)
+                .ok_or_else(|| CliError::Usage(format!("unknown extension: {extension_id}")))?;
+            writeln!(writer, "{}\t{}", extension_id, versions.join(","))?;
+        }
+        [command, subcommand, extension_id] if command == "extension" && subcommand == "info" => {
+            let manifest = runtime
+                .list_extensions()?
+                .into_iter()
+                .find(|manifest| manifest.id == *extension_id)
+                .ok_or_else(|| CliError::Usage(format!("unknown extension: {extension_id}")))?;
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}",
+                manifest.id,
+                manifest.version,
+                manifest.runtime.as_str(),
+                manifest.capabilities.join(",")
+            )?;
+        }
+        [command, subcommand, extension_id] if command == "extension" && subcommand == "update" => {
+            let manifest = runtime.update_extension(extension_id)?;
+            writeln!(writer, "updated: {}", manifest.id)?;
+        }
+        [command, subcommand, extension_id] if command == "extension" && subcommand == "remove" => {
+            runtime.remove_extension(extension_id)?;
+            writeln!(writer, "removed: {extension_id}")?;
+        }
+        [command, subcommand, extension_id] if command == "extension" && subcommand == "enable" => {
+            runtime.set_extension_enabled(extension_id, true)?;
+            writeln!(writer, "enabled: {extension_id}")?;
+        }
+        [command, subcommand, extension_id]
+            if command == "extension" && subcommand == "disable" =>
+        {
+            runtime.set_extension_enabled(extension_id, false)?;
+            writeln!(writer, "disabled: {extension_id}")?;
+        }
+        [command, subcommand, extension_id] if command == "extension" && subcommand == "health" => {
+            let health = runtime.extension_health(extension_id)?;
+            writeln!(writer, "health: {}\t{}", health.id, health.status)?;
         }
         [command, subcommand] if command == "extension" && subcommand == "update" => {
             let installed = runtime.verify_extensions()?;
@@ -187,10 +268,138 @@ fn usage(require_desktop_prefix: bool) -> String {
     } else {
         "greentic-desktop"
     };
+    let gui_command = if require_desktop_prefix {
+        ""
+    } else {
+        "gui [--bind ADDR] [--no-open]|"
+    };
 
     format!(
-        "usage: {prefix} <info|init|config show|extension install ID|extension list|extension update|extension verify [ID]|extension sidecar ID|runner list|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
+        "usage: {prefix} <{gui_command}info|init|config show|extension search QUERY|extension install ID|extension list|extension info ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuiCliOptions {
+    bind: SocketAddr,
+    open_browser: bool,
+}
+
+impl Default for GuiCliOptions {
+    fn default() -> Self {
+        Self {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            open_browser: true,
+        }
+    }
+}
+
+fn parse_gui_args(args: &[String]) -> Result<GuiCliOptions, CliError> {
+    let mut options = GuiCliOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--no-open" => {
+                options.open_browser = false;
+                index += 1;
+            }
+            "--bind" => {
+                let Some(bind) = args.get(index + 1) else {
+                    return Err(CliError::Usage("gui --bind requires an address".to_owned()));
+                };
+                options.bind = bind
+                    .parse()
+                    .map_err(|_| CliError::Usage(format!("invalid GUI bind address: {bind}")))?;
+                index += 2;
+            }
+            "--help" | "-h" => {
+                return Err(CliError::Usage(
+                    "usage: greentic-desktop gui [--bind ADDR] [--no-open]".to_owned(),
+                ));
+            }
+            other => return Err(CliError::Usage(format!("unknown gui option: {other}"))),
+        }
+    }
+    Ok(options)
+}
+
+fn run_gui(
+    options: GuiCliOptions,
+    writer: &mut dyn Write,
+    block_gui: bool,
+) -> Result<(), CliError> {
+    let config = RuntimeConfig::default();
+    let runtime = DesktopRuntime::new(config.clone());
+    runtime.init()?;
+
+    let info = runtime.info();
+    let api_state = GuiApiState {
+        app_version: info.version,
+        platform: info.os,
+        runtime_home: config.runner.home.clone(),
+        evidence_store: config.evidence.store.clone(),
+        mcp_bind: config.mcp.bind.clone(),
+        installed_core_adapter_ids: info.installed_adapters,
+        installed_extension_ids: discover_extensions(&config.runner.home).unwrap_or_default(),
+        runner_names: discover_runners(&config.runner.home).unwrap_or_default(),
+        gui_token: gui_session_token(),
+    };
+    let gui_token = api_state.gui_token.clone();
+    let handle = GuiHost::start(GuiHostOptions {
+        bind: options.bind,
+        api_state,
+    })?;
+    let url = handle.token_url(&gui_token);
+    if !options.bind.ip().is_loopback() {
+        writeln!(
+            writer,
+            "warning: GUI is bound outside loopback; only use this on a trusted local network."
+        )?;
+    }
+    writeln!(writer, "Greentic Automate Hub: {url}")?;
+    let log_path = config.runner.home.join("greentic-desktop.log");
+    let _ = fs::create_dir_all(&config.runner.home);
+    let _ = fs::write(
+        &log_path,
+        format!(
+            "version={}\ngui_url={}\nruntime_home={}\nmcp_bind={}\n",
+            env!("CARGO_PKG_VERSION"),
+            handle.url(),
+            config.runner.home.display(),
+            config.mcp.bind
+        ),
+    );
+
+    if options.open_browser {
+        if let Err(err) = open_default_browser(&url) {
+            let _ = fs::create_dir_all(&config.runner.home);
+            let _ = fs::write(&log_path, format!("browser_open_error={err}\n"));
+            writeln!(writer, "warning: {err}")?;
+        }
+    }
+
+    if block_gui {
+        loop {
+            thread::sleep(Duration::from_secs(3600));
+        }
+    }
+
+    drop(handle);
+    Ok(())
+}
+
+fn gui_session_token() -> String {
+    let seed = format!("{:?}-{}", SystemTime::now(), std::process::id());
+    format!("{:016x}", fnv1a64(seed.as_bytes()))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn handle_record(
@@ -572,13 +781,54 @@ mod tests {
     }
 
     #[test]
-    fn empty_args_print_usage() {
+    fn empty_desktop_args_start_gui_in_nonblocking_test_mode() {
+        with_temp_home(|home| {
+            let mut output = Vec::new();
+            run_with_writer(Vec::<String>::new(), false, &mut output)
+                .expect("default desktop invocation should start GUI");
+            let output = String::from_utf8(output).expect("output should be utf8");
+
+            assert!(output.contains("Greentic Automate Hub: http://127.0.0.1:"));
+            assert!(home.join("extensions").is_dir());
+        });
+    }
+
+    #[test]
+    fn explicit_gui_no_open_and_help_dispatch() {
         with_temp_home(|_| {
             let mut output = Vec::new();
-            let err =
-                run_with_writer(Vec::<String>::new(), false, &mut output).expect_err("usage error");
+            run_with_writer(
+                [
+                    "gui".to_owned(),
+                    "--no-open".to_owned(),
+                    "--bind".to_owned(),
+                    "127.0.0.1:0".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("explicit GUI command should start");
+            assert!(String::from_utf8(output)
+                .expect("output should be utf8")
+                .contains("Greentic Automate Hub: http://127.0.0.1:"));
 
-            assert!(err.to_string().contains("greentic-desktop"));
+            let mut help = Vec::new();
+            run_with_writer(["--help".to_owned()], false, &mut help).expect("help should print");
+            let help = String::from_utf8(help).expect("help should be utf8");
+            assert!(help.contains("greentic-desktop"));
+            assert!(help.contains("gui [--bind ADDR] [--no-open]"));
+        });
+    }
+
+    #[test]
+    fn gtc_desktop_without_subcommand_prints_usage() {
+        with_temp_home(|_| {
+            let mut output = Vec::new();
+            let err = run_with_writer(["desktop".to_owned()], true, &mut output)
+                .expect_err("gtc desktop needs a subcommand");
+
+            assert!(err.to_string().contains("gtc desktop"));
+            assert!(!err.to_string().contains("gui [--bind"));
         });
     }
 
@@ -593,8 +843,38 @@ mod tests {
             run_with_writer(
                 [
                     "extension".to_owned(),
+                    "search".to_owned(),
+                    "browser".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("extension search should succeed");
+            assert!(String::from_utf8(output.clone())
+                .expect("output should be utf8")
+                .contains("greentic.desktop.playwright"));
+
+            output.clear();
+            run_with_writer(
+                [
+                    "extension".to_owned(),
+                    "versions".to_owned(),
+                    "playwright".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("extension versions should succeed");
+            assert!(String::from_utf8(output.clone())
+                .expect("output should be utf8")
+                .contains("1.0.0"));
+
+            output.clear();
+            run_with_writer(
+                [
+                    "extension".to_owned(),
                     "install".to_owned(),
-                    "greentic.desktop.playwright".to_owned(),
+                    "playwright".to_owned(),
                 ],
                 false,
                 &mut output,

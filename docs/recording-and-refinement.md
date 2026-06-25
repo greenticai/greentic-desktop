@@ -6,6 +6,8 @@ Greentic Desktop supports three ways to create a runner:
 - **Human demonstration**: capture what a person does.
 - **Hybrid**: combine a prompt-generated outline with recorded desktop actions.
 
+The GUI path is usually easiest: open **Create**, choose recording, mark inputs and outputs during review, normalise the recording, test it, and finalise the runner. See [Automate Hub GUI](gui.md).
+
 ## Recording
 
 A recording captures events such as clicks, fills, target metadata, values, timestamps, adapter names, and optional screenshot references.
@@ -94,3 +96,5 @@ The planner builds a structured LLM request, validates the returned draft agains
 Refinement lets a user correct a runner without editing YAML manually. For example, a correction can say that the submit step should use the "Save" button at the bottom right. Greentic Desktop records a scoped diff for the changed step.
 
 This is meant to keep runner maintenance approachable for operations teams while still producing reviewable changes.
+
+In Automate Hub, failed runner cards open a refinement panel. Enter the correction, preview the diff, apply it, then retest the runner and open the new evidence reference.
