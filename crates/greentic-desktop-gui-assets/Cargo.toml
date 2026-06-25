@@ -1,0 +1,15 @@
+[package]
+name = "greentic-desktop-gui-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Embedded Automate Hub UI assets for the Greentic desktop runner."
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "greentic_desktop_gui_assets"
+path = "src/lib.rs"

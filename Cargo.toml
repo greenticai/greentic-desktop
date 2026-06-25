@@ -5,6 +5,7 @@ members = [
   "crates/greentic-desktop-config",
   "crates/greentic-desktop-adapter",
   "crates/greentic-desktop-extension",
+  "crates/greentic-distributor-client",
   "crates/greentic-desktop-web",
   "crates/greentic-desktop-windows",
   "crates/greentic-desktop-java",
@@ -37,6 +38,8 @@ members = [
   "crates/greentic-desktop-session",
   "crates/greentic-desktop-runtime",
   "crates/greentic-desktop-telemetry",
+  "crates/greentic-desktop-gui-assets",
+  "crates/greentic-desktop-gui",
   "crates/greentic-desktop-cli",
 ]
 
@@ -56,6 +59,7 @@ greentic-desktop-core = { path = "crates/greentic-desktop-core", version = "0.1"
 greentic-desktop-config = { path = "crates/greentic-desktop-config", version = "0.1" }
 greentic-desktop-adapter = { path = "crates/greentic-desktop-adapter", version = "0.1" }
 greentic-desktop-extension = { path = "crates/greentic-desktop-extension", version = "0.1" }
+greentic-distributor-client = { path = "crates/greentic-distributor-client", version = "0.1" }
 greentic-desktop-web = { path = "crates/greentic-desktop-web", version = "0.1" }
 greentic-desktop-windows = { path = "crates/greentic-desktop-windows", version = "0.1" }
 greentic-desktop-java = { path = "crates/greentic-desktop-java", version = "0.1" }
@@ -88,3 +92,5 @@ greentic-desktop-test-harness = { path = "crates/greentic-desktop-test-harness",
 greentic-desktop-session = { path = "crates/greentic-desktop-session", version = "0.1" }
 greentic-desktop-runtime = { path = "crates/greentic-desktop-runtime", version = "0.1" }
 greentic-desktop-telemetry = { path = "crates/greentic-desktop-telemetry", version = "0.1" }
+greentic-desktop-gui-assets = { path = "crates/greentic-desktop-gui-assets", version = "0.1" }
+greentic-desktop-gui = { path = "crates/greentic-desktop-gui", version = "0.1" }

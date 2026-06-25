@@ -37,7 +37,17 @@ The usual path is:
 
 The current CLI can initialize the runtime, install adapter manifests, plan draft runners from prompts, manage recording sessions, discover local `.gtpack` runner packages, and serve the MCP endpoint. Approval, registry publish, and forwarded-tool registration are still represented by product models and tests while their production command surface is being added. See [Getting Started](docs/getting-started.md), [Recording and Refinement](docs/recording-and-refinement.md), [Runners](docs/runners.md), and [MCP Tools](docs/mcp-tools.md) for the detailed workflow.
 
-## Current Command-Line Entry Points
+## Open Greentic Desktop
+
+Start the GUI-first experience with:
+
+```bash
+greentic-desktop
+```
+
+Automate Hub opens in the browser. From there you can complete setup, create from prompt, record a task, test and save runners, publish approved runners as MCP tools, and copy MCP client configuration for AI workers. See [Automate Hub GUI](docs/gui.md) for the full browser workflow.
+
+## Command-Line Entry Points
 
 For published releases, install the CLI with cargo-binstall:
 
@@ -45,9 +55,18 @@ For published releases, install the CLI with cargo-binstall:
 cargo binstall greentic-desktop
 ```
 
-From this repository, the current CLI can show runtime information, initialize local storage, manage built-in extensions, plan draft runners, manage recording sessions, list local runner packages, and serve a small MCP endpoint.
+Windows users can also download the `x86_64-pc-windows-msvc` or
+`aarch64-pc-windows-msvc` zip from a GitHub release, extract it, and
+double-click `greentic-desktop.exe` to open Automate Hub. Public
+`cargo binstall` requires public crates.io metadata and publicly accessible
+release assets; private GitHub releases need an authenticated distribution path.
+See [Release And Installation](docs/release.md).
+
+From this repository, `greentic-desktop` with no arguments starts the local Automate Hub GUI, opens the default browser, and serves the embedded frontend from a loopback address. The current CLI can also show runtime information, initialize local storage, manage built-in extensions, plan draft runners, manage recording sessions, list local runner packages, and serve a small MCP endpoint.
 
 ```bash
+greentic-desktop
+greentic-desktop gui --no-open --bind 127.0.0.1:0
 greentic-desktop info
 greentic-desktop init
 greentic-desktop extension install greentic.desktop.playwright
@@ -67,6 +86,7 @@ gtc desktop info
 ## Detailed Documentation
 
 - [Getting Started](docs/getting-started.md)
+- [Automate Hub GUI](docs/gui.md)
 - [Runners](docs/runners.md)
 - [Adapters and Supported Desktops](docs/adapters.md)
   - [Playwright Web Adapter](docs/adapters/playwright-web.md)
@@ -83,6 +103,11 @@ gtc desktop info
 - [Evidence and Audit Trail](docs/evidence.md)
 - [Business Workflows](docs/business-workflows.md)
 - [Deployment and Rollout](docs/deployment-and-rollout.md)
+- [Release And Installation](docs/release.md)
+- [Extension Store](docs/extension-store.md)
+- [Extension Package Format](docs/extension-package-format.md)
+- [Extension GHCR Publish Pipeline](docs/extension-ghcr-pipeline.md)
+- [End-To-End Smoke Checklist](docs/e2e-smoke.md)
 - [AWS WorkSpaces MCP Forwarding](docs/aws-workspaces-mcp.md)
 - [CLI Reference](docs/cli-reference.md)
 - [Developer Notes](docs/developer-notes.md)

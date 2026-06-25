@@ -226,6 +226,7 @@ version = "0.1.1"
 dependencies = [
  "greentic-desktop-config",
  "greentic-desktop-extension",
+ "greentic-desktop-gui",
  "greentic-desktop-planner",
  "greentic-desktop-recorder",
  "greentic-desktop-runtime",
@@ -288,6 +289,22 @@ dependencies = [
  "greentic-desktop-security",
  "greentic-desktop-session",
 ]
+
+[[package]]
+name = "greentic-desktop-gui"
+version = "0.1.1"
+dependencies = [
+ "greentic-desktop-adapter",
+ "greentic-desktop-extension",
+ "greentic-desktop-gui-assets",
+ "greentic-desktop-planner",
+ "greentic-desktop-recorder",
+ "greentic-distributor-client",
+]
+
+[[package]]
+name = "greentic-desktop-gui-assets"
+version = "0.1.1"
 
 [[package]]
 name = "greentic-desktop-io"
@@ -445,6 +462,7 @@ dependencies = [
  "greentic-desktop-registry",
  "greentic-desktop-session",
  "greentic-desktop-telemetry",
+ "greentic-distributor-client",
 ]
 
 [[package]]
@@ -517,6 +535,10 @@ dependencies = [
  "greentic-desktop-registry",
  "greentic-desktop-session",
 ]
+
+[[package]]
+name = "greentic-distributor-client"
+version = "0.1.1"
 
 [[package]]
 name = "half"

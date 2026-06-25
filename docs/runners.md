@@ -38,6 +38,8 @@ The intended lifecycle is:
 5. Expose it as an MCP tool or use it inside a larger business workflow.
 6. Keep evidence for each run.
 
+Automate Hub exposes this lifecycle under **My Runners**: test or run a runner, inspect evidence, refine failed steps, approve high-risk actions, and publish the runner as an MCP tool.
+
 ## Generate A Draft Runner
 
 Use prompt planning when you can describe the task before recording it:

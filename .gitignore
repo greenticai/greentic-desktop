@@ -1,3 +1,6 @@
 /target/
 **/*.rs.bk
 /.greentic
+/frontend/automate-hub/dist/
+/frontend/automate-hub/.output/
+/frontend/automate-hub/node_modules/

@@ -220,7 +220,7 @@ The current implemented state covers PR-01 through PR-34 foundations: core capab
 
 - **Path:** `.github/workflows/publish.yml`
   - **Role:** crates.io release workflow.
-  - **Key functionality:** Triggers from `workflow_dispatch` or `v*` tags; verifies tag `v<version>` matches `greentic-desktop`; runs `ci/local_check.sh`; on tag releases builds Linux/macOS/Windows x64 and ARM binary archives for cargo-binstall; performs final dry-runs and real publishes for the CLI crate and its publishable dependency chain.
+  - **Key functionality:** Triggers from `workflow_dispatch` or `v*` tags; verifies tag `v<version>` matches `greentic-desktop`; runs `ci/local_check.sh`; on tag releases builds Linux/macOS/Windows x64 and ARM binary archives for cargo-binstall; verifies archive paths before upload; performs final dry-runs and idempotent real publishes for the CLI crate and its publishable dependency chain, waiting for each crates.io version to become visible before publishing downstream dependents.
   - **Key dependencies / integration points:** Requires `CARGO_REGISTRY_TOKEN` for crates.io and GitHub `contents: write` for release asset uploads. GHCR publishing is not enabled.
 
 - **Path:** `README.md`
@@ -233,8 +233,8 @@ The current implemented state covers PR-01 through PR-34 foundations: core capab
 
 - **Path:** `.codex/README.md` and `.codex/done/PR-*.md`
   - **Role:** Completed implementation roadmap for the desktop runner.
-  - **Key functionality:** Documents the PR sequence and completed implementation briefs through PR-32.
-  - **Key dependencies / integration points:** Used as historical implementation context; active code lives in workspace crates.
+  - **Key functionality:** Documents the PR sequence and completed implementation briefs through PR-34; indexes active planning PRs for the Automate Hub GUI and remote extension distribution/store work through PR-53.
+  - **Key dependencies / integration points:** Used as historical implementation context and implementation-ready planning context; active code lives in workspace crates.
 
 - **Path:** `.codex/global_rules.md` and `.codex/repo_overview_task.md`
   - **Role:** Codex working rules and overview maintenance routine.

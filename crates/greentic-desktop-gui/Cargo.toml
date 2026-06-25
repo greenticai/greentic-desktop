@@ -1,0 +1,23 @@
+[package]
+name = "greentic-desktop-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Loopback HTTP host for the Greentic Automate Hub browser UI."
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "greentic_desktop_gui"
+path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-adapter.workspace = true
+greentic-distributor-client.workspace = true
+greentic-desktop-extension.workspace = true
+greentic-desktop-gui-assets.workspace = true
+greentic-desktop-planner.workspace = true
+greentic-desktop-recorder.workspace = true

@@ -35,6 +35,8 @@ publishable_crates() {
     greentic-desktop-registry \
     greentic-desktop-session \
     greentic-desktop-telemetry \
+    greentic-desktop-gui-assets \
+    greentic-desktop-gui \
     greentic-desktop-security \
     greentic-desktop-replay \
     greentic-desktop-mcp \
@@ -59,7 +61,9 @@ locally_packageable_crates() {
     greentic-desktop-registry \
     greentic-desktop-session \
     greentic-desktop-telemetry \
-    greentic-desktop-llm
+    greentic-desktop-llm \
+    greentic-desktop-gui-assets \
+    greentic-desktop-gui
   do
     if cargo metadata --no-deps --format-version 1 \
       | grep -q "\"name\":\"$crate\""; then
@@ -85,6 +89,37 @@ cargo build --all-features
 
 header "cargo doc"
 cargo doc --no-deps --all-features
+
+if [ "${GREENTIC_CHECK_FRONTEND:-0}" = "1" ]; then
+  header "frontend build"
+  if command -v bun >/dev/null 2>&1; then
+    (
+      cd frontend/automate-hub
+      if [ ! -d node_modules ]; then
+        bun install
+      fi
+      bun run build
+      test -f dist/index.html
+    )
+  elif command -v npm >/dev/null 2>&1; then
+    (
+      cd frontend/automate-hub
+      if [ ! -d node_modules ]; then
+        if [ -f package-lock.json ]; then
+          npm ci
+        else
+          npm install
+        fi
+      fi
+      npm run lint
+      npm run build
+      test -f dist/index.html
+    )
+  else
+    printf 'GREENTIC_CHECK_FRONTEND=1 requires bun or npm.\n' >&2
+    exit 1
+  fi
+fi
 
 CRATES="$(locally_packageable_crates)"
 if [ -z "$CRATES" ]; then

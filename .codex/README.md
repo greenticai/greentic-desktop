@@ -58,3 +58,30 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 32. PR-32 macOS/Linux CI and Test Desktop Harness
 33. PR-33 greentic-llm Prompt-to-Runner Integration
 34. PR-34 Record Command and Recording Session Lifecycle
+35. PR-35 Embed Automate Hub Frontend Assets
+36. PR-36 GUI Host and Default Browser Startup
+37. PR-37 Local GUI API and Type Contract
+38. PR-38 Home, Settings, Extensions, and Setup Integration
+39. PR-39 Prompt-to-Runner GUI Wizard
+40. PR-40 Recording GUI Wizard and Recorder Bridge
+41. PR-41 Runner Management, Validation, and Publishing
+42. PR-42 MCP Tools GUI and Server Lifecycle
+43. PR-43 Approvals, Evidence, Activity, and Refinement UX
+44. PR-44 Windows Click-to-Run Packaging and Release
+45. PR-45 GUI Security, Localhost Boundaries, and Operational Hardening
+46. PR-46 GUI Documentation and End-to-End User Flows
+47. PR-47 Extension Package Format and OCI Artifact Layout
+48. PR-48 greentic-distributor-client Integration for Extensions
+49. PR-49 Local Extension Store, Install, Update and Remove
+50. PR-50 Extension Store Index and Friendly Aliases
+51. PR-51 Extension Build and Publish Pipeline to GHCR
+52. PR-52 Extension Signing, Verification and Trust Policy
+53. PR-53 Extension Manager API for Web UI
+
+## Roadmap Alignment
+
+- **GUI foundation:** PR-35 through PR-37 embed the Automate Hub, start it from `greentic-desktop`, and define the local JSON API.
+- **GUI extension surface:** PR-38 consumes the remote extension capabilities from PR-47 through PR-53 in Settings > Extensions.
+- **Remote extension backend:** PR-47 through PR-53 define package format, distributor resolution, local store, friendly index, GHCR publishing, signing/trust, and the web API.
+- **Create and operate runners:** PR-39 through PR-43 connect prompt, recording, runners, MCP, evidence, approvals, and refinement to the same backend.
+- **Shipping and hardening:** PR-44 through PR-46 cover Windows click-to-run, GUI security, and user documentation, including extension trust prompts and store workflows.

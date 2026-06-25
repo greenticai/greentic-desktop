@@ -19,7 +19,9 @@ Runner IDs are normalized into stable tool names so they can be safely listed an
 
 ## Listing Tools
 
-The runtime has a minimal MCP endpoint that can answer tool listing requests. The CLI starts it with:
+Automate Hub has an **MCP Tools** page for starting, stopping, restarting, enabling, disabling, testing, and copying published runner tools. It also shows local client configuration.
+
+The CLI can also start the MCP endpoint:
 
 ```bash
 greentic-desktop mcp serve
@@ -70,7 +72,7 @@ A runner tool call uses the standard MCP `tools/call` request shape:
 }
 ```
 
-The current runtime endpoint returns a generated example `tools/list` response. The broader tool-call path is implemented in the MCP model and is used by the business, forwarded-tool, and WorkSpaces models.
+The GUI-managed MCP service lists published and enabled runner tools. Disabled tools remain visible in the GUI but are not exposed through MCP `tools/list`.
 
 ## From Prompt Or Recording To Tool
 

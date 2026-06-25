@@ -11,6 +11,40 @@ Published releases can be installed with:
 cargo binstall greentic-desktop
 ```
 
+Windows release zips also support direct click-to-run use: extract the archive
+and double-click `greentic-desktop.exe` to open Automate Hub. The same binary
+continues to support terminal commands. Public `cargo binstall` requires public
+crates.io metadata and public release assets; private release assets require an
+authenticated distribution path. See [Release And Installation](release.md).
+
+## Automate Hub GUI
+
+Starting `greentic-desktop` with no arguments initializes the runtime home, starts a
+loopback GUI server on a free port, opens the default browser, prints the URL, and
+keeps serving until interrupted.
+
+```bash
+greentic-desktop
+```
+
+The GUI can also be started explicitly:
+
+```bash
+greentic-desktop gui
+greentic-desktop gui --bind 127.0.0.1:0
+greentic-desktop gui --no-open
+```
+
+The GUI host also exposes a local JSON API under `/api/v1/*` for the embedded
+frontend. Initial endpoints include `/api/v1/health`, `/api/v1/runtime/info`,
+`/api/v1/setup/checklist`, `/api/v1/extensions/*`, `/api/v1/runners`,
+`/api/v1/recordings`, and `/api/v1/mcp/status`.
+
+`gtc desktop` remains an explicit CLI command surface and does not start the GUI
+when no subcommand is supplied.
+
+For browser-first setup, see [Automate Hub GUI](gui.md).
+
 ## Runtime Info
 
 ```bash
@@ -41,12 +75,36 @@ Install a built-in extension manifest:
 
 ```bash
 greentic-desktop extension install greentic.desktop.playwright
+greentic-desktop extension install playwright
 ```
 
 List installed extensions:
 
 ```bash
 greentic-desktop extension list
+```
+
+Search the extension store and list versions:
+
+```bash
+greentic-desktop extension search browser
+greentic-desktop extension versions greentic.desktop.playwright
+```
+
+Show one installed extension:
+
+```bash
+greentic-desktop extension info greentic.desktop.playwright
+```
+
+Update, remove, enable, disable, or health-check an extension:
+
+```bash
+greentic-desktop extension update greentic.desktop.playwright
+greentic-desktop extension remove greentic.desktop.playwright
+greentic-desktop extension enable greentic.desktop.playwright
+greentic-desktop extension disable greentic.desktop.playwright
+greentic-desktop extension health greentic.desktop.playwright
 ```
 
 Verify installed extensions:
