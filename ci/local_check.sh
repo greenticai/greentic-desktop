@@ -62,8 +62,7 @@ locally_packageable_crates() {
     greentic-desktop-session \
     greentic-desktop-telemetry \
     greentic-desktop-llm \
-    greentic-desktop-gui-assets \
-    greentic-desktop-gui
+    greentic-desktop-gui-assets
   do
     if cargo metadata --no-deps --format-version 1 \
       | grep -q "\"name\":\"$crate\""; then
