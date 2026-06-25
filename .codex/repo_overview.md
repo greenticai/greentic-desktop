@@ -10,7 +10,7 @@ The current implemented state covers PR-01 through PR-34 foundations: core capab
 
 - **Path:** `Cargo.toml`
   - **Role:** Root Cargo workspace manifest.
-  - **Key functionality:** Defines the PR-01 through PR-34 workspace crates, shared package metadata, shared dependency versions, shared internal path dependencies, and the current workspace version `0.1.1`; member crates inherit package versions from `[workspace.package]` and dependency declarations from `[workspace.dependencies]`.
+  - **Key functionality:** Defines the PR-01 through PR-34 workspace crates, shared package metadata, shared dependency versions, shared internal path dependencies, and the current workspace version `0.1.2`; member crates inherit package versions from `[workspace.package]` and dependency declarations from `[workspace.dependencies]`.
   - **Key dependencies / integration points:** Used by all cargo commands, `ci/local_check.sh`, and GitHub Actions. `greentic-desktop` is the installable CLI package; its direct/transitive runtime dependency crates are publishable so crates.io and cargo-binstall can resolve it.
 
 - **Path:** `crates/greentic-desktop-core`
