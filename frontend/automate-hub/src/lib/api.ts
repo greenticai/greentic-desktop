@@ -237,7 +237,7 @@ export const api = {
   mcpClientConfig: () => request<McpClientConfigDto>("/mcp/client-config"),
   mcpLifecycle: (action: "start" | "stop" | "restart") =>
     request<McpStatusDto>(`/mcp/${action}`, jsonInit("POST")),
-  mcpToolAction: (id: string, action: "test" | "enable" | "disable") =>
+  mcpToolAction: (id: string, action: "test" | "enable" | "disable" | "delete") =>
     request<McpToolActionResultDto>(
       `/mcp/tools/${encodeURIComponent(id)}/${action}`,
       jsonInit("POST"),

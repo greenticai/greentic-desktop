@@ -1628,6 +1628,15 @@ fn mcp_tool_action_json(path: &str, state: &GuiApiState) -> Result<String, Strin
             persist_mcp_tool_with_status(state, &runner, "disabled")?;
             Ok(mcp_tool_result_json(&runner, "disable", "disabled"))
         }
+        "delete" => {
+            std::fs::remove_file(mcp_tool_path(state, &runner.id)).map_err(|err| {
+                api_error_json(
+                    "runtime.io",
+                    &format!("Could not delete MCP tool entry: {err}"),
+                )
+            })?;
+            Ok(mcp_tool_result_json(&runner, "delete", "deleted"))
+        }
         "test" => Ok(format!(
             r#"{{"toolId":"{}","toolName":"{}","action":"test","status":"passed","evidenceRef":"local://mcp/{}/test/latest","outputs":{{"result":"sample-output"}}}}"#,
             escape_json(&runner.id),
@@ -3286,6 +3295,20 @@ mod tests {
         let tools = String::from_utf8_lossy(&tools);
         assert!(tools.contains("\"name\":\"runner.crm.create_customer\""));
         assert!(tools.contains("\"status\":\"enabled\""));
+
+        let tool_delete = post(
+            handle.addr(),
+            "/api/v1/mcp/tools/crm.create_customer/delete",
+            "{}",
+        );
+        assert!(String::from_utf8_lossy(&tool_delete).contains("\"status\":\"deleted\""));
+        assert!(!root
+            .join("mcp-tools")
+            .join("crm.create_customer.mcp.json")
+            .exists());
+
+        let list = get(handle.addr(), "/api/v1/runners");
+        assert!(String::from_utf8_lossy(&list).contains("\"id\":\"crm.create_customer\""));
 
         let delete = post(
             handle.addr(),

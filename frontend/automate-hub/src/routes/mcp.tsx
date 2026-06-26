@@ -3,12 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { Plug, Play, Copy, Power, RotateCw, CheckCircle2, Circle } from "lucide-react";
+import { Plug, Play, Copy, Power, RotateCw, CheckCircle2, Circle, Trash2 } from "lucide-react";
 
 export const Route = createFileRoute("/mcp")({
   head: () => ({ meta: [{ title: "MCP Tools · Greentic Desktop" }] }),
   component: MCPPage,
 });
+
+type ToolAction = "test" | "enable" | "disable" | "delete";
 
 function MCPPage() {
   const queryClient = useQueryClient();
@@ -26,12 +28,13 @@ function MCPPage() {
       setActionStatus(error instanceof Error ? error.message : "MCP action failed"),
   });
   const toolAction = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: "test" | "enable" | "disable" }) =>
+    mutationFn: ({ id, action }: { id: string; action: ToolAction }) =>
       api.mcpToolAction(id, action),
     onSuccess: (result) => {
       setActionStatus(`${result.toolName}: ${result.action} ${result.status}`);
       void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] });
       void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["runners"] });
     },
     onError: (error) =>
       setActionStatus(error instanceof Error ? error.message : "Tool action failed"),
@@ -39,6 +42,19 @@ function MCPPage() {
   const mcpTools = tools.data?.tools ?? [];
   const enabledTools = mcpTools.filter((tool) => tool.status === "enabled").length;
   const busy = lifecycle.isPending || toolAction.isPending;
+
+  function runToolAction(id: string, action: ToolAction) {
+    const tool = mcpTools.find((candidate) => candidate.id === id);
+    if (
+      action === "delete" &&
+      !window.confirm(
+        `Delete MCP tool "${tool?.name ?? id}"? This unpublishes it but keeps the runner.`,
+      )
+    ) {
+      return;
+    }
+    toolAction.mutate({ id, action });
+  }
 
   return (
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
@@ -168,7 +184,7 @@ function MCPPage() {
                 size="sm"
                 className="gap-1.5"
                 disabled={busy || t.status !== "enabled"}
-                onClick={() => toolAction.mutate({ id: t.id, action: "test" })}
+                onClick={() => runToolAction(t.id, "test")}
               >
                 <Play className="h-3.5 w-3.5" /> Test
               </Button>
@@ -178,10 +194,7 @@ function MCPPage() {
                 className="gap-1.5"
                 disabled={busy}
                 onClick={() =>
-                  toolAction.mutate({
-                    id: t.id,
-                    action: t.status === "enabled" ? "disable" : "enable",
-                  })
+                  runToolAction(t.id, t.status === "enabled" ? "disable" : "enable")
                 }
               >
                 <Power className="h-3.5 w-3.5" />
@@ -194,6 +207,15 @@ function MCPPage() {
                 onClick={() => void navigator.clipboard?.writeText(t.name)}
               >
                 <Copy className="h-3.5 w-3.5" /> Copy tool name
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                className="gap-1.5"
+                disabled={busy}
+                onClick={() => runToolAction(t.id, "delete")}
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete
               </Button>
             </div>
           </div>
