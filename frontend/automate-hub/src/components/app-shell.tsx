@@ -1,5 +1,6 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Home, Plus, Workflow, Plug, Settings, Leaf, Circle } from "lucide-react";
+import { BrandLogo } from "@/components/brand-logo";
+import { Home, Plus, Workflow, Plug, Settings, Circle } from "lucide-react";
 
 const nav = [
   { to: "/", label: "Home", icon: Home },
@@ -16,10 +17,9 @@ export function AppShell() {
       <aside className="w-64 shrink-0 border-r border-sidebar-border bg-sidebar flex flex-col">
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-sidebar-border">
           <div
-            className="h-9 w-9 rounded-lg flex items-center justify-center"
-            style={{ background: "var(--gradient-primary)" }}
+            className="h-9 w-9 rounded-lg flex items-center justify-center bg-background border border-sidebar-border"
           >
-            <Leaf className="h-5 w-5 text-primary-foreground" />
+            <BrandLogo className="h-7 w-7" />
           </div>
           <div>
             <div className="text-sm font-semibold leading-tight">Greentic</div>

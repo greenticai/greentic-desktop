@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import type { ExtensionDto } from "@/lib/types";
+import type { ExtensionDto, SetupChecklistItemDto } from "@/lib/types";
 import {
   Select,
   SelectContent,
@@ -27,7 +27,7 @@ export const Route = createFileRoute("/settings")({
   component: SettingsPage,
 });
 
-const desktopSetup = [
+const desktopSetup: SetupChecklistItemDto[] = [
   { id: "loading", label: "Loading setup", ok: false, status: "warning", help: "" },
 ];
 
@@ -113,6 +113,11 @@ function SettingsPage() {
     onSuccess: (result) => setActionStatus(result.message),
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "LLM test failed"),
   });
+  const setupAction = useMutation({
+    mutationFn: ({ id, action }: { id: string; action?: string }) => api.setupFix(id, action),
+    onSuccess: (result) => setActionStatus(result.message),
+    onError: (error) => setActionStatus(error instanceof Error ? error.message : "Setup failed"),
+  });
   const saveLlm = useMutation({
     mutationFn: () => api.saveLlmSettings(llm.data!),
     onSuccess: () => setActionStatus("LLM settings saved"),
@@ -159,7 +164,12 @@ function SettingsPage() {
               {s.ok ? (
                 <span className="text-xs text-muted-foreground shrink-0">Ready</span>
               ) : (
-                <Button size="sm" variant="outline" onClick={() => setActionStatus(s.help)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={setupAction.isPending}
+                  onClick={() => setupAction.mutate({ id: s.id, action: s.action })}
+                >
                   Fix
                 </Button>
               )}
