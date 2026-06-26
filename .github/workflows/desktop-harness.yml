@@ -12,6 +12,11 @@ concurrency:
   group: desktop-harness-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   unit-matrix:
     name: ${{ matrix.name }}
