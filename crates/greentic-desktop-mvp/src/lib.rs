@@ -127,6 +127,14 @@ pub fn run_crm_customer_mvp_demo() -> MvpDemoOutcome {
     draft.package.inputs = vec!["company_name".to_owned(), "email".to_owned()];
     draft.package.secrets = vec!["password".to_owned()];
     draft.package.outputs = vec!["customer_id".to_owned()];
+    for step in &mut draft.package.steps {
+        if let Some(value) = &mut step.value {
+            *value = value
+                .replace("{{inputs.company_name}}", "{{company_name}}")
+                .replace("{{inputs.email}}", "{{email}}")
+                .replace("{{secrets.service_account}}", "{{password}}");
+        }
+    }
 
     let correction = parse_correction(
         "submit",
@@ -272,7 +280,7 @@ fn success_criteria_for(
         ),
         criterion(
             "MCP client receives JSON output.",
-            outputs_json == "{\"customer_id\":\"resolved\"}",
+            outputs_json == "{\"customer_id\":\"buyer@example.test\"}",
         ),
     ]
 }
@@ -317,7 +325,10 @@ mod tests {
         assert_eq!(outcome.draft_runner_id, "crm.create_customer");
         assert_eq!(outcome.published_tool_name, "crm.create_customer");
         assert_eq!(outcome.correction_diff.step_id, "submit");
-        assert_eq!(outcome.mcp_outputs_json, "{\"customer_id\":\"resolved\"}");
+        assert_eq!(
+            outcome.mcp_outputs_json,
+            "{\"customer_id\":\"buyer@example.test\"}"
+        );
         assert!(outcome.mcp_evidence_uri.contains("run_crm.create_customer"));
     }
 

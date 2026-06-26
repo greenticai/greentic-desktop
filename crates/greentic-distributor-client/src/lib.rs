@@ -1,3 +1,4 @@
+use greentic_desktop_extension::{built_in_extension, ExtensionManifest};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,84 @@ pub struct StoreExtension {
     pub capabilities: Vec<String>,
     pub permissions: Vec<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltInExtensionCatalogEntry {
+    pub manifest_id: &'static str,
+    pub aliases: &'static [&'static str],
+    pub description: &'static str,
+    pub platforms: &'static [&'static str],
+    pub source_slug: &'static str,
+    pub publisher: &'static str,
+}
+
+const BUILT_IN_EXTENSION_CATALOG: &[BuiltInExtensionCatalogEntry] = &[
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.playwright",
+        aliases: &["playwright", "browser", "web"],
+        description: "Automate browser-based applications.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "playwright",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.vision",
+        aliases: &["vision", "screenshot"],
+        description: "Use screenshots and visual matching as a fallback.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "vision",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.macos.ax",
+        aliases: &["macos", "macos-ax"],
+        description: "Drive native macOS apps through Accessibility.",
+        platforms: &["macos"],
+        source_slug: "macos-ax",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.linux.x11",
+        aliases: &["linux-x11", "x11"],
+        description: "Drive native Linux X11 apps through AT-SPI and XTest.",
+        platforms: &["linux"],
+        source_slug: "linux-x11",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.linux.wayland",
+        aliases: &["linux-wayland", "wayland"],
+        description:
+            "Drive Wayland-compatible Linux workflows through safe portals and accessibility.",
+        platforms: &["linux"],
+        source_slug: "linux-wayland",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.windows-ui",
+        aliases: &["windows", "windows-ui"],
+        description: "Drive native Windows apps through UI Automation.",
+        platforms: &["windows"],
+        source_slug: "windows-ui",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.java-accessibility",
+        aliases: &["java", "java-accessibility"],
+        description: "Drive Java Swing and AWT apps through Java Accessibility.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "java-accessibility",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.terminal-tn3270",
+        aliases: &["terminal", "tn3270"],
+        description: "Drive terminal and mainframe workflows.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "terminal-tn3270",
+        publisher: "greenticai",
+    },
+];
 
 impl GreenticDistributorClient {
     pub fn new(cache_dir: impl AsRef<Path>) -> Self {
@@ -170,155 +249,7 @@ impl GreenticDistributorClient {
 impl StoreIndex {
     pub fn default_greentic() -> Self {
         Self {
-            extensions: vec![
-                StoreExtension {
-                    id: "greentic.desktop.playwright".to_owned(),
-                    aliases: vec![
-                        "playwright".to_owned(),
-                        "browser".to_owned(),
-                        "web".to_owned(),
-                    ],
-                    name: "Playwright Web Adapter".to_owned(),
-                    description: "Automate browser-based applications.".to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/playwright:1.0.0"
-                        .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["windows".to_owned(), "macos".to_owned(), "linux".to_owned()],
-                    capabilities: vec![
-                        "web.goto".to_owned(),
-                        "web.click".to_owned(),
-                        "web.fill".to_owned(),
-                        "web.extract_text".to_owned(),
-                    ],
-                    permissions: vec!["network".to_owned()],
-                },
-                StoreExtension {
-                    id: "greentic.desktop.vision".to_owned(),
-                    aliases: vec!["vision".to_owned(), "screenshot".to_owned()],
-                    name: "Vision Screenshot Fallback Adapter".to_owned(),
-                    description: "Use screenshots and visual matching as a fallback.".to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/vision:1.0.0"
-                        .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["windows".to_owned(), "macos".to_owned(), "linux".to_owned()],
-                    capabilities: vec![
-                        "vision.screenshot".to_owned(),
-                        "vision.find_text".to_owned(),
-                    ],
-                    permissions: vec!["screen_capture".to_owned(), "keyboard_mouse".to_owned()],
-                },
-                StoreExtension {
-                    id: "greentic.desktop.macos.ax".to_owned(),
-                    aliases: vec!["macos".to_owned(), "macos-ax".to_owned()],
-                    name: "macOS Accessibility Adapter".to_owned(),
-                    description: "Drive native macOS apps through Accessibility.".to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/macos-ax:1.0.0"
-                        .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["macos".to_owned()],
-                    capabilities: vec![
-                        "macos.activate_app".to_owned(),
-                        "macos.find_window".to_owned(),
-                        "macos.find_element".to_owned(),
-                        "macos.type_text".to_owned(),
-                        "macos.click_element".to_owned(),
-                        "macos.read_text".to_owned(),
-                    ],
-                    permissions: vec!["screen_capture".to_owned(), "keyboard_mouse".to_owned()],
-                },
-                StoreExtension {
-                    id: "greentic.desktop.linux.x11".to_owned(),
-                    aliases: vec!["linux-x11".to_owned(), "x11".to_owned()],
-                    name: "Linux X11 Desktop Adapter".to_owned(),
-                    description: "Drive native Linux X11 apps through AT-SPI and XTest.".to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/linux-x11:1.0.0"
-                        .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["linux".to_owned()],
-                    capabilities: vec![
-                        "linux.find_window".to_owned(),
-                        "linux.activate_window".to_owned(),
-                        "linux.find_element".to_owned(),
-                        "linux.type_text".to_owned(),
-                        "linux.click_element".to_owned(),
-                        "linux.read_text".to_owned(),
-                    ],
-                    permissions: vec![
-                        "desktop.x11".to_owned(),
-                        "screen_capture".to_owned(),
-                        "keyboard_mouse".to_owned(),
-                    ],
-                },
-                StoreExtension {
-                    id: "greentic.desktop.windows-ui".to_owned(),
-                    aliases: vec!["windows".to_owned(), "windows-ui".to_owned()],
-                    name: "Windows UI Automation Adapter".to_owned(),
-                    description: "Drive native Windows apps through UI Automation.".to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/windows-ui:1.0.0"
-                        .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["windows".to_owned()],
-                    capabilities: vec![
-                        "windows.open_app".to_owned(),
-                        "windows.find_window".to_owned(),
-                        "windows.find_element".to_owned(),
-                        "windows.type_text".to_owned(),
-                        "windows.click_element".to_owned(),
-                        "windows.read_text".to_owned(),
-                    ],
-                    permissions: vec!["desktop.ui_automation".to_owned()],
-                },
-                StoreExtension {
-                    id: "greentic.desktop.java-accessibility".to_owned(),
-                    aliases: vec!["java".to_owned(), "java-accessibility".to_owned()],
-                    name: "Java Accessibility Adapter".to_owned(),
-                    description: "Drive Java Swing and AWT apps through Java Accessibility."
-                        .to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source:
-                        "oci://ghcr.io/greenticai/greentic-desktop/extensions/java-accessibility:1.0.0"
-                            .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["windows".to_owned(), "macos".to_owned(), "linux".to_owned()],
-                    capabilities: vec![
-                        "java.find_window".to_owned(),
-                        "java.find_component".to_owned(),
-                        "java.type_text".to_owned(),
-                        "java.click_component".to_owned(),
-                        "java.read_text".to_owned(),
-                    ],
-                    permissions: vec!["desktop.java_accessibility".to_owned()],
-                },
-                StoreExtension {
-                    id: "greentic.desktop.terminal-tn3270".to_owned(),
-                    aliases: vec!["terminal".to_owned(), "tn3270".to_owned()],
-                    name: "Terminal TN3270 Adapter".to_owned(),
-                    description: "Drive terminal and mainframe workflows.".to_owned(),
-                    latest: "1.0.0".to_owned(),
-                    versions: vec!["1.0.0".to_owned()],
-                    source:
-                        "oci://ghcr.io/greenticai/greentic-desktop/extensions/terminal-tn3270:1.0.0"
-                            .to_owned(),
-                    publisher: "greenticai".to_owned(),
-                    platforms: vec!["windows".to_owned(), "macos".to_owned(), "linux".to_owned()],
-                    capabilities: vec![
-                        "terminal.connect".to_owned(),
-                        "terminal.send_keys".to_owned(),
-                    ],
-                    permissions: vec!["network".to_owned()],
-                },
-            ],
+            extensions: built_in_store_extensions(),
         }
     }
 
@@ -342,6 +273,51 @@ impl StoreIndex {
             })
             .cloned()
             .collect()
+    }
+}
+
+pub fn built_in_store_extensions() -> Vec<StoreExtension> {
+    BUILT_IN_EXTENSION_CATALOG
+        .iter()
+        .map(|entry| {
+            let manifest = built_in_extension(entry.manifest_id).unwrap_or_else(|| {
+                panic!(
+                    "built-in extension manifest {} must exist for store catalog",
+                    entry.manifest_id
+                )
+            });
+            store_extension_from_manifest(entry, &manifest)
+        })
+        .collect()
+}
+
+fn store_extension_from_manifest(
+    entry: &BuiltInExtensionCatalogEntry,
+    manifest: &ExtensionManifest,
+) -> StoreExtension {
+    StoreExtension {
+        id: manifest.id.clone(),
+        aliases: entry
+            .aliases
+            .iter()
+            .map(|alias| (*alias).to_owned())
+            .collect(),
+        name: manifest.name.clone(),
+        description: entry.description.to_owned(),
+        latest: manifest.version.clone(),
+        versions: vec![manifest.version.clone()],
+        source: format!(
+            "oci://ghcr.io/greenticai/greentic-desktop/extensions/{}:{}",
+            entry.source_slug, manifest.version
+        ),
+        publisher: entry.publisher.to_owned(),
+        platforms: entry
+            .platforms
+            .iter()
+            .map(|platform| (*platform).to_owned())
+            .collect(),
+        capabilities: manifest.capabilities.clone(),
+        permissions: manifest.permissions.clone(),
     }
 }
 
@@ -468,5 +444,53 @@ mod tests {
             .resolve("file://./playwright.extension.tar.zst")
             .expect("file should resolve");
         assert_eq!(file.extension_id, "greentic.desktop.playwright");
+    }
+
+    #[test]
+    fn store_entries_are_generated_from_built_in_manifests() {
+        let index = StoreIndex::default_greentic();
+        assert_eq!(index.extensions.len(), BUILT_IN_EXTENSION_CATALOG.len());
+
+        for catalog in BUILT_IN_EXTENSION_CATALOG {
+            let manifest = built_in_extension(catalog.manifest_id).expect("manifest");
+            let store = index.find(catalog.manifest_id).expect("store extension");
+
+            assert_eq!(store.name, manifest.name);
+            assert_eq!(store.latest, manifest.version);
+            assert_eq!(store.versions, vec![manifest.version.clone()]);
+            assert_eq!(store.capabilities, manifest.capabilities);
+            assert_eq!(store.permissions, manifest.permissions);
+            assert_eq!(
+                store.aliases,
+                catalog
+                    .aliases
+                    .iter()
+                    .map(|alias| (*alias).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                store.source,
+                format!(
+                    "oci://ghcr.io/greenticai/greentic-desktop/extensions/{}:{}",
+                    catalog.source_slug, manifest.version
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_store_capabilities_match_manifest_without_summarising() {
+        let index = StoreIndex::default_greentic();
+        let terminal = index
+            .find("terminal")
+            .expect("terminal alias should resolve");
+        let manifest =
+            built_in_extension("greentic.desktop.terminal-tn3270").expect("terminal manifest");
+
+        assert!(terminal
+            .capabilities
+            .contains(&"terminal.extract_field".to_owned()));
+        assert_eq!(terminal.capabilities, manifest.capabilities);
+        assert_eq!(terminal.permissions, manifest.permissions);
     }
 }

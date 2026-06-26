@@ -1,21 +1,21 @@
 [package]
-name = "greentic-desktop-windows"
+name = "greentic-desktop-workflow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
-description = "Windows UI Automation adapter model for the Greentic desktop runner."
+description = "Generic desktop workflow model and compiler for Greentic Desktop."
 keywords.workspace = true
 categories.workspace = true
 publish = false
 include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 
 [lib]
-name = "greentic_desktop_windows"
+name = "greentic_desktop_workflow"
 path = "src/lib.rs"
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
-greentic-desktop-workflow.workspace = true
+serde.workspace = true

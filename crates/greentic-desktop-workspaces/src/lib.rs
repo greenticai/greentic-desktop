@@ -116,6 +116,17 @@ pub fn call_forwarded_runner(
 pub fn workspace_validation_tool() -> PublishedRunnerTool {
     let mut tool = example_runner_tool();
     tool.package.id = "workspace.validate_after_patch".to_owned();
+    tool.package.inputs = vec!["email".to_owned()];
+    tool.package.secrets = vec!["password".to_owned()];
+    if let Some(step) = tool
+        .package
+        .steps
+        .iter_mut()
+        .find(|step| step.value.is_some())
+    {
+        step.value = Some("{{email}}".to_owned());
+    }
+    tool.package.outputs = vec!["validation_result".to_owned()];
     tool
 }
 

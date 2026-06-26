@@ -2141,7 +2141,9 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
             .map(|entry| entry.capabilities.clone())
             .unwrap_or_else(|| vec!["extension.run".to_owned()]),
         permissions: ExtensionPermissions {
-            network: permissions.iter().any(|permission| permission == "network"),
+            network: permissions
+                .iter()
+                .any(|permission| permission == "network" || permission.starts_with("network.")),
             filesystem: if permissions
                 .iter()
                 .any(|permission| permission == "filesystem.write")
@@ -2150,12 +2152,12 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
             } else {
                 "none".to_owned()
             },
-            screen_capture: permissions
-                .iter()
-                .any(|permission| permission == "screen_capture"),
+            screen_capture: permissions.iter().any(|permission| {
+                permission == "screen_capture" || permission == "desktop.screenshot"
+            }),
             keyboard_mouse: permissions
                 .iter()
-                .any(|permission| permission == "keyboard_mouse"),
+                .any(|permission| permission == "keyboard_mouse" || permission == "desktop.input"),
         },
         sbom_path: "SBOM.spdx.json".to_owned(),
         signature_dir: "signatures/".to_owned(),
@@ -2334,8 +2336,9 @@ fn permission_prompts_json(permissions: &[String]) -> String {
 fn permission_prompt_label(permission: &str) -> String {
     match permission {
         "network" => "Network access".to_owned(),
-        "screen_capture" => "Screen capture".to_owned(),
-        "keyboard_mouse" => "Keyboard and mouse control".to_owned(),
+        other if other.starts_with("network.") => "Network access".to_owned(),
+        "screen_capture" | "desktop.screenshot" => "Screen capture".to_owned(),
+        "keyboard_mouse" | "desktop.input" => "Keyboard and mouse control".to_owned(),
         "filesystem.write" => "Filesystem write access".to_owned(),
         other if other.starts_with("filesystem.") => "Filesystem access".to_owned(),
         other => other.replace(['_', '.'], " "),
@@ -2710,7 +2713,7 @@ mod tests {
         );
         let detail = String::from_utf8_lossy(&detail);
         assert!(detail.contains("\"extension\""));
-        assert!(detail.contains("\"permissions\":[\"network\"]"));
+        assert!(detail.contains("\"permissions\":[\"network.localhost\"]"));
         assert!(detail.contains("\"permissionPrompts\":[\"Network access\"]"));
         assert!(detail.contains("\"capabilities\":[\"web.goto\""));
 
@@ -2792,7 +2795,6 @@ mod tests {
         assert!(blocked.contains("HTTP/1.1 400 Bad Request"));
         assert!(blocked.contains("extension.trust_policy_blocked"));
         assert!(blocked.contains("screen capture permission requires approval"));
-        assert!(blocked.contains("keyboard and mouse control requires approval"));
 
         let installed = get(handle.addr(), "/api/v1/extensions/installed");
         assert!(!String::from_utf8_lossy(&installed).contains("greentic.desktop.vision"));
@@ -2800,16 +2802,14 @@ mod tests {
         let approved = post(
             handle.addr(),
             "/api/v1/extensions/install",
-            r#"{"source":"vision","approveScreenCapture":true,"approveKeyboardMouse":true}"#,
+            r#"{"source":"vision","approveScreenCapture":true}"#,
         );
         let approved = String::from_utf8_lossy(&approved);
         assert!(approved.contains("\"id\":\"greentic.desktop.vision\""));
         assert!(approved.contains("\"signatureStatus\":\"valid\""));
         assert!(approved.contains("\"sbomPresent\":true"));
         assert!(approved.contains("\"screen_capture\""));
-        assert!(approved.contains("\"keyboard_mouse\""));
         assert!(approved.contains("\"Screen capture\""));
-        assert!(approved.contains("\"Keyboard and mouse control\""));
 
         let installed = get(handle.addr(), "/api/v1/extensions/installed");
         let installed = String::from_utf8_lossy(&installed);

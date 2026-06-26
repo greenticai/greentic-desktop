@@ -194,7 +194,7 @@ mod tests {
         let key = SigningKey::new("local-dev", "material");
         sign_manifest(
             RunnerManifest {
-                runner_id: "crm.create_customer".to_owned(),
+                runner_id: "web.submit_form".to_owned(),
                 version: "1.2.0".to_owned(),
                 lifecycle: RunnerLifecycle::Published,
                 stage: RegistryStage::Prod,
@@ -215,20 +215,21 @@ mod tests {
     fn package() -> RunnerPackage {
         let base = example_runner_tool().package;
         RunnerPackage {
-            id: "crm.create_customer".to_owned(),
+            id: "web.submit_form".to_owned(),
             version: "1.2.0".to_owned(),
             mode: RecordingMode::Hybrid,
-            inputs: vec!["email".to_owned()],
-            secrets: vec!["password".to_owned()],
+            inputs: vec!["form_value".to_owned()],
+            secrets: vec!["session_token".to_owned()],
             steps: vec![RunnerStep {
-                id: "fill_email".to_owned(),
+                id: "fill_value".to_owned(),
                 action: "fill".to_owned(),
                 target: LocatorTarget::default(),
-                value: Some("{{email}}".to_owned()),
+                value: Some("{{form_value}}".to_owned()),
                 required_capability: "web.fill".to_owned(),
             }],
             assertions: base.assertions,
-            outputs: vec!["customer_id".to_owned()],
+            outputs: vec!["confirmation".to_owned()],
+            open_questions: Vec::new(),
         }
     }
 
@@ -255,16 +256,16 @@ mod tests {
     fn published_runner_becomes_valid_mcp_tool() {
         let built = built(ForwardingMode::Local);
 
-        assert_eq!(built.metadata.name, "crm.create_customer");
-        assert_eq!(built.descriptor().name, "crm.create_customer");
+        assert_eq!(built.metadata.name, "web.submit_form");
+        assert_eq!(built.descriptor().name, "web.submit_form");
     }
 
     #[test]
     fn tool_schema_matches_runner_input_output_schema() {
         let built = built(ForwardingMode::Local);
 
-        assert_eq!(built.metadata.input_schema.required, vec!["email"]);
-        assert_eq!(built.metadata.output_schema.required, vec!["customer_id"]);
+        assert_eq!(built.metadata.input_schema.required, vec!["form_value"]);
+        assert_eq!(built.metadata.output_schema.required, vec!["confirmation"]);
         assert!(built
             .metadata
             .required_permissions
@@ -277,7 +278,7 @@ mod tests {
 
         assert_eq!(
             built.metadata.forwarded_name,
-            Some("forwarded___crm_create_customer".to_owned())
+            Some("forwarded___web_submit_form".to_owned())
         );
     }
 
@@ -288,13 +289,16 @@ mod tests {
 
         let result = call_built_tool(
             &mut state,
-            "crm.create_customer",
-            BTreeMap::from([("email".to_owned(), "user@example.test".to_owned())]),
-            BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
+            "web.submit_form",
+            BTreeMap::from([("form_value".to_owned(), "user@example.test".to_owned())]),
+            BTreeMap::from([("session_token".to_owned(), "secret".to_owned())]),
         );
 
         assert!(result.success);
-        assert_eq!(result.outputs_json, "{\"customer_id\":\"resolved\"}");
-        assert!(result.evidence_uri.contains("run_crm.create_customer"));
+        assert_eq!(
+            result.outputs_json,
+            "{\"confirmation\":\"user@example.test\"}"
+        );
+        assert!(result.evidence_uri.contains("run_web.submit_form"));
     }
 }

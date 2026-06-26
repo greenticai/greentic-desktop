@@ -2,6 +2,11 @@ use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterError, AdapterResult, Assertion, AssertionResult, DesktopAdapter,
     LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
 };
+use greentic_desktop_workflow::{
+    compile_workflow, workflow_id_component, DesktopWorkflow, TerminalField, WorkflowAction,
+    WorkflowActionKind, WorkflowEvidencePolicy, WorkflowOutput, WorkflowOutputExtractor,
+    WorkflowRisk, WorkflowTarget, WorkflowValueType,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -259,28 +264,18 @@ pub fn run_terminal_workflow(
     adapter: &TerminalAdapter,
     workflow: TerminalWorkflow,
 ) -> AdapterResult<TerminalWorkflowOutcome> {
+    let prompt = workflow.prompt.clone();
+    let text_outputs = workflow.text_outputs.clone();
+    let field_outputs = workflow.field_outputs.clone();
+    let compiled = compile_workflow(&terminal_desktop_workflow(&workflow))
+        .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
+
     adapter.connect_profile(workflow.profile);
     if !workflow.initial_screen.is_empty() {
         adapter.record_screen_buffer(workflow.initial_screen);
     }
 
-    let mut steps = vec![RunnerStep {
-        id: "connect".to_owned(),
-        action: "connect".to_owned(),
-        target: LocatorTarget::default(),
-        value: None,
-        required_capability: "terminal.connect".to_owned(),
-    }];
-    for action in &workflow.actions {
-        steps.push(RunnerStep {
-            id: workflow_id_component(&action.name),
-            action: action.required_capability.clone(),
-            target: LocatorTarget::default(),
-            value: action.value.clone(),
-            required_capability: action.required_capability.clone(),
-        });
-    }
-
+    let steps = compiled.steps;
     let results = adapter.replay(&steps)?;
     if !workflow.final_screen.is_empty() {
         adapter.record_screen_buffer(workflow.final_screen);
@@ -294,7 +289,7 @@ pub fn run_terminal_workflow(
         .visible_text;
 
     let mut outputs = BTreeMap::new();
-    for output in workflow.text_outputs {
+    for output in text_outputs {
         if !visible.iter().any(|line| line.contains(&output.expected)) {
             return Err(AdapterError::ExecutionFailed(format!(
                 "Expected terminal text {} was not visible",
@@ -304,7 +299,7 @@ pub fn run_terminal_workflow(
         outputs.insert(output.name, output.expected);
     }
 
-    for output in workflow.field_outputs {
+    for output in field_outputs {
         let value = adapter.extract_field(output.field).ok_or_else(|| {
             AdapterError::ExecutionFailed(format!(
                 "No terminal field was visible for {}",
@@ -323,29 +318,56 @@ pub fn run_terminal_workflow(
     }
 
     Ok(TerminalWorkflowOutcome {
-        prompt: workflow.prompt,
+        prompt,
         outputs,
         steps: results,
     })
 }
 
-fn workflow_id_component(value: &str) -> String {
-    let rendered = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned();
-    if rendered.is_empty() {
-        "item".to_owned()
-    } else {
-        rendered
+fn terminal_desktop_workflow(workflow: &TerminalWorkflow) -> DesktopWorkflow {
+    DesktopWorkflow {
+        id: format!(
+            "terminal-workflow-{}",
+            workflow_id_component(&workflow.profile.name)
+        ),
+        summary: workflow.prompt.clone(),
+        target: WorkflowTarget::terminal(workflow.profile.name.clone()),
+        inputs: Vec::new(),
+        actions: workflow
+            .actions
+            .iter()
+            .map(|action| WorkflowAction {
+                name: action.name.clone(),
+                kind: WorkflowActionKind::AdapterCapability(action.required_capability.clone()),
+                target: LocatorTarget::default(),
+                value_template: action.value.clone(),
+                risk: WorkflowRisk::Low,
+            })
+            .collect(),
+        outputs: workflow
+            .text_outputs
+            .iter()
+            .map(|output| WorkflowOutput {
+                name: output.name.clone(),
+                value_type: WorkflowValueType::String,
+                extractor: WorkflowOutputExtractor::VisibleText(output.expected.clone()),
+                required: true,
+                expected: Some(output.expected.clone()),
+            })
+            .chain(workflow.field_outputs.iter().map(|output| WorkflowOutput {
+                name: output.name.clone(),
+                value_type: WorkflowValueType::String,
+                extractor: WorkflowOutputExtractor::TerminalField(TerminalField {
+                    row: output.field.row,
+                    col: output.field.col,
+                    len: output.field.len,
+                }),
+                required: true,
+                expected: output.expected.clone(),
+            }))
+            .collect(),
+        assertions: Vec::new(),
+        evidence_policy: WorkflowEvidencePolicy::default(),
     }
 }
 

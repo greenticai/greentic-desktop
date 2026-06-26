@@ -2,6 +2,7 @@ use greentic_desktop_adapter::{AdapterCapabilities, LocatorTarget, RunnerStep};
 use greentic_desktop_core::RiskLevel;
 use greentic_desktop_recorder::{RecordingMode, RunnerPackage};
 use greentic_desktop_replay::{replay, ReplayRequest};
+use greentic_desktop_runner_schema::{McpInputSchema, McpOutputSchema, RunnerSchemaField};
 use greentic_desktop_security::{
     enforce_policy, ActionRequest, PolicyContext, PolicyDecision, SecurityPolicy,
 };
@@ -14,6 +15,8 @@ pub struct McpTool {
     pub description: String,
     pub input_schema_ref: String,
     pub output_schema_ref: String,
+    pub input_schema_json: String,
+    pub output_schema_json: String,
     pub risk: RiskLevel,
 }
 
@@ -40,11 +43,22 @@ impl PublishedRunnerTool {
     }
 
     pub fn descriptor(&self) -> McpTool {
+        let input_schema = McpInputSchema {
+            fields: schema_fields(&self.package.inputs, false)
+                .into_iter()
+                .chain(schema_fields(&self.package.secrets, true))
+                .collect(),
+        };
+        let output_schema = McpOutputSchema {
+            fields: schema_fields(&self.package.outputs, false),
+        };
         McpTool {
             name: self.tool_name(),
             description: format!("Run desktop runner {}", self.package.id),
             input_schema_ref: "inputs.schema.json".to_owned(),
             output_schema_ref: "outputs.schema.json".to_owned(),
+            input_schema_json: input_schema.to_json_schema(),
+            output_schema_json: output_schema.to_json_schema(),
             risk: self.risk,
         }
     }
@@ -183,8 +197,8 @@ impl McpServerState {
                     "{{\"name\":\"{}\",\"description\":\"{}\",\"input_schema\":\"{}\",\"output_schema\":\"{}\"}}",
                     escape_json(&tool.name),
                     escape_json(&tool.description),
-                    escape_json(&tool.input_schema_ref),
-                    escape_json(&tool.output_schema_ref)
+                    escape_json(&tool.input_schema_json),
+                    escape_json(&tool.output_schema_json)
                 )
             })
             .collect::<Vec<_>>()
@@ -207,22 +221,155 @@ pub fn stable_tool_name(runner_id: &str) -> String {
 }
 
 pub fn example_runner_tool() -> PublishedRunnerTool {
-    PublishedRunnerTool {
-        package: RunnerPackage {
-            id: "crm.create_customer".to_owned(),
-            version: "1.2.0".to_owned(),
-            mode: RecordingMode::Hybrid,
-            inputs: vec!["email".to_owned()],
-            secrets: vec!["password".to_owned()],
-            steps: vec![RunnerStep {
-                id: "fill_email".to_owned(),
+    published_runner_tool_for_web_form()
+}
+
+pub fn published_runner_tool_for_web_form() -> PublishedRunnerTool {
+    published_runner_tool(
+        "web.submit_form",
+        vec!["form_value"],
+        vec!["session_token"],
+        vec![
+            RunnerStep {
+                id: "fill_value".to_owned(),
                 action: "fill".to_owned(),
                 target: LocatorTarget::default(),
-                value: Some("{{email}}".to_owned()),
+                value: Some("{{form_value}}".to_owned()),
                 required_capability: "web.fill".to_owned(),
-            }],
-            assertions: vec!["success visible".to_owned()],
-            outputs: vec!["customer_id".to_owned()],
+            },
+            RunnerStep {
+                id: "submit".to_owned(),
+                action: "click".to_owned(),
+                target: LocatorTarget::default(),
+                value: None,
+                required_capability: "web.click".to_owned(),
+            },
+        ],
+        vec!["confirmation"],
+        vec!["web.fill", "web.click"],
+        RiskLevel::Medium,
+    )
+}
+
+pub fn published_runner_tool_for_native_app() -> PublishedRunnerTool {
+    published_runner_tool(
+        "native.update_record",
+        vec!["record_value"],
+        Vec::new(),
+        vec![
+            RunnerStep {
+                id: "open_app".to_owned(),
+                action: "open_app".to_owned(),
+                target: LocatorTarget::default(),
+                value: None,
+                required_capability: "windows.open_app".to_owned(),
+            },
+            RunnerStep {
+                id: "type_value".to_owned(),
+                action: "type_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("{{record_value}}".to_owned()),
+                required_capability: "windows.type_text".to_owned(),
+            },
+        ],
+        vec!["result"],
+        vec!["windows.open_app", "windows.type_text"],
+        RiskLevel::Medium,
+    )
+}
+
+pub fn published_runner_tool_for_java_form() -> PublishedRunnerTool {
+    published_runner_tool(
+        "java.submit_form",
+        vec!["field_value"],
+        Vec::new(),
+        vec![
+            RunnerStep {
+                id: "find_field".to_owned(),
+                action: "find_component".to_owned(),
+                target: LocatorTarget::default(),
+                value: None,
+                required_capability: "java.find_component".to_owned(),
+            },
+            RunnerStep {
+                id: "type_field".to_owned(),
+                action: "type_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("{{field_value}}".to_owned()),
+                required_capability: "java.type_text".to_owned(),
+            },
+        ],
+        vec!["status"],
+        vec!["java.find_component", "java.type_text"],
+        RiskLevel::Low,
+    )
+}
+
+pub fn published_runner_tool_for_terminal_lookup() -> PublishedRunnerTool {
+    published_runner_tool(
+        "terminal.lookup_record",
+        vec!["lookup_key"],
+        Vec::new(),
+        vec![
+            RunnerStep {
+                id: "connect".to_owned(),
+                action: "connect".to_owned(),
+                target: LocatorTarget::default(),
+                value: None,
+                required_capability: "terminal.connect".to_owned(),
+            },
+            RunnerStep {
+                id: "send_lookup".to_owned(),
+                action: "send_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("{{lookup_key}}".to_owned()),
+                required_capability: "terminal.send_text".to_owned(),
+            },
+        ],
+        vec!["lookup_result"],
+        vec!["terminal.connect", "terminal.send_text"],
+        RiskLevel::Low,
+    )
+}
+
+pub fn published_runner_tool_for_vision_extraction() -> PublishedRunnerTool {
+    published_runner_tool(
+        "vision.extract_visible_text",
+        Vec::new(),
+        Vec::new(),
+        vec![RunnerStep {
+            id: "capture".to_owned(),
+            action: "screenshot".to_owned(),
+            target: LocatorTarget::default(),
+            value: None,
+            required_capability: "vision.screenshot".to_owned(),
+        }],
+        vec!["visible_text"],
+        vec!["vision.screenshot"],
+        RiskLevel::Low,
+    )
+}
+
+fn published_runner_tool(
+    id: &str,
+    inputs: Vec<&str>,
+    secrets: Vec<&str>,
+    steps: Vec<RunnerStep>,
+    outputs: Vec<&str>,
+    capabilities: Vec<&str>,
+    risk: RiskLevel,
+) -> PublishedRunnerTool {
+    PublishedRunnerTool {
+        package: RunnerPackage {
+            id: id.to_owned(),
+            version: "1.2.0".to_owned(),
+            mode: RecordingMode::Hybrid,
+            inputs: inputs.into_iter().map(str::to_owned).collect(),
+            secrets: secrets.into_iter().map(str::to_owned).collect(),
+            steps,
+            assertions: Vec::new(),
+            outputs: outputs.into_iter().map(str::to_owned).collect(),
+            open_questions: Vec::new(),
         },
         session_profile: SessionProfile {
             id: "empty".to_owned(),
@@ -230,11 +377,11 @@ pub fn example_runner_tool() -> PublishedRunnerTool {
             teardown: Vec::new(),
         },
         adapters: vec![AdapterCapabilities::new(
-            "greentic.desktop.playwright",
+            adapter_id_for_capabilities(&capabilities),
             "1.0.0",
-            ["web.fill"],
+            capabilities,
         )],
-        risk: RiskLevel::Medium,
+        risk,
         allowed: true,
         requires_human_approval: false,
         rate_limit_per_minute: 10,
@@ -246,6 +393,35 @@ pub fn example_runner_tool() -> PublishedRunnerTool {
             ..ActionRequest::default()
         },
     }
+}
+
+fn adapter_id_for_capabilities(capabilities: &[&str]) -> &'static str {
+    let first = capabilities.first().copied().unwrap_or("vision.screenshot");
+    if first.starts_with("web.") {
+        "greentic.desktop.playwright"
+    } else if first.starts_with("windows.") {
+        "greentic.desktop.windows-ui"
+    } else if first.starts_with("java.") {
+        "greentic.desktop.java-accessibility"
+    } else if first.starts_with("terminal.") {
+        "greentic.desktop.terminal-tn3270"
+    } else {
+        "greentic.desktop.vision"
+    }
+}
+
+fn schema_fields(keys: &[String], secret: bool) -> Vec<RunnerSchemaField> {
+    keys.iter()
+        .map(|key| RunnerSchemaField {
+            name: key.clone(),
+            value_type: greentic_desktop_workflow::WorkflowValueType::String,
+            required: true,
+            secret,
+            default_value: None,
+            enum_values: Vec::new(),
+            validation: None,
+        })
+        .collect()
 }
 
 fn inputs_cover_schema(
@@ -279,10 +455,7 @@ mod tests {
     use super::*;
 
     fn state() -> McpServerState {
-        McpServerState::new(
-            vec![example_runner_tool()],
-            ["crm.create_customer".to_owned()],
-        )
+        McpServerState::new(vec![example_runner_tool()], ["web.submit_form".to_owned()])
     }
 
     #[test]
@@ -290,27 +463,32 @@ mod tests {
         let tools = state().list_tools();
 
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "crm.create_customer");
+        assert_eq!(tools[0].name, "web.submit_form");
         assert_eq!(tools[0].input_schema_ref, "inputs.schema.json");
+        assert!(tools[0].input_schema_json.contains("form_value"));
+        assert!(tools[0].output_schema_json.contains("confirmation"));
     }
 
     #[test]
     fn tools_call_executes_runner_and_returns_outputs_with_evidence() {
         let mut state = state();
         let result = state.call_tool(McpCallRequest {
-            tool_name: "crm.create_customer".to_owned(),
-            inputs: BTreeMap::from([("email".to_owned(), "user@example.test".to_owned())]),
-            secrets: BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
+            tool_name: "web.submit_form".to_owned(),
+            inputs: BTreeMap::from([("form_value".to_owned(), "user@example.test".to_owned())]),
+            secrets: BTreeMap::from([("session_token".to_owned(), "secret".to_owned())]),
             approved_by_human: false,
             environment: "dev".to_owned(),
             approvals: 0,
         });
 
         assert!(result.success);
-        assert_eq!(result.outputs_json, "{\"customer_id\":\"resolved\"}");
+        assert_eq!(
+            result.outputs_json,
+            "{\"confirmation\":\"user@example.test\"}"
+        );
         assert_eq!(
             result.evidence_uri,
-            "evidence://run_crm.create_customer/bundle.json"
+            "evidence://run_web.submit_form/bundle.json"
         );
     }
 
@@ -318,12 +496,12 @@ mod tests {
     fn failed_calls_return_structured_failure_and_evidence_reference() {
         let mut tool = example_runner_tool();
         tool.adapters.clear();
-        let mut state = McpServerState::new(vec![tool], ["crm.create_customer".to_owned()]);
+        let mut state = McpServerState::new(vec![tool], ["web.submit_form".to_owned()]);
 
         let result = state.call_tool(McpCallRequest {
-            tool_name: "crm.create_customer".to_owned(),
-            inputs: BTreeMap::from([("email".to_owned(), "user@example.test".to_owned())]),
-            secrets: BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
+            tool_name: "web.submit_form".to_owned(),
+            inputs: BTreeMap::from([("form_value".to_owned(), "user@example.test".to_owned())]),
+            secrets: BTreeMap::from([("session_token".to_owned(), "secret".to_owned())]),
             approved_by_human: false,
             environment: "dev".to_owned(),
             approvals: 0,
@@ -331,17 +509,14 @@ mod tests {
 
         assert!(!result.success);
         assert_eq!(result.failure.expect("failure").code, "runner_failed");
-        assert!(result.evidence_uri.contains("run_crm.create_customer"));
+        assert!(result.evidence_uri.contains("run_web.submit_form"));
     }
 
     #[test]
     fn forwarded_tool_names_are_stable() {
         let tool = example_runner_tool();
 
-        assert_eq!(
-            tool.forwarded_tool_name(),
-            "forwarded___crm_create_customer"
-        );
+        assert_eq!(tool.forwarded_tool_name(), "forwarded___web_submit_form");
         assert_eq!(
             stable_tool_name("workspace validate-after patch"),
             "workspace_validate_after_patch"
@@ -353,12 +528,12 @@ mod tests {
         let mut tool = example_runner_tool();
         tool.risk = RiskLevel::High;
         tool.security_policy.risk_level = RiskLevel::High;
-        let mut state = McpServerState::new(vec![tool], ["crm.create_customer".to_owned()]);
+        let mut state = McpServerState::new(vec![tool], ["web.submit_form".to_owned()]);
 
         let result = state.call_tool(McpCallRequest {
-            tool_name: "crm.create_customer".to_owned(),
-            inputs: BTreeMap::from([("email".to_owned(), "user@example.test".to_owned())]),
-            secrets: BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
+            tool_name: "web.submit_form".to_owned(),
+            inputs: BTreeMap::from([("form_value".to_owned(), "user@example.test".to_owned())]),
+            secrets: BTreeMap::from([("session_token".to_owned(), "secret".to_owned())]),
             approved_by_human: false,
             environment: "dev".to_owned(),
             approvals: 0,
@@ -372,12 +547,12 @@ mod tests {
     fn dangerous_actions_are_blocked_at_call_time() {
         let mut tool = example_runner_tool();
         tool.actions.delete_records = true;
-        let mut state = McpServerState::new(vec![tool], ["crm.create_customer".to_owned()]);
+        let mut state = McpServerState::new(vec![tool], ["web.submit_form".to_owned()]);
 
         let result = state.call_tool(McpCallRequest {
-            tool_name: "crm.create_customer".to_owned(),
-            inputs: BTreeMap::from([("email".to_owned(), "user@example.test".to_owned())]),
-            secrets: BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
+            tool_name: "web.submit_form".to_owned(),
+            inputs: BTreeMap::from([("form_value".to_owned(), "user@example.test".to_owned())]),
+            secrets: BTreeMap::from([("session_token".to_owned(), "secret".to_owned())]),
             approved_by_human: true,
             environment: "dev".to_owned(),
             approvals: 1,
@@ -392,6 +567,40 @@ mod tests {
         let json = state().render_tools_list_json();
 
         assert!(json.contains("\"tools\""));
-        assert!(json.contains("\"name\":\"crm.create_customer\""));
+        assert!(json.contains("\"name\":\"web.submit_form\""));
+        assert!(json.contains("form_value"));
+    }
+
+    #[test]
+    fn generic_fixture_builders_cover_all_runner_technologies() {
+        let tools = vec![
+            published_runner_tool_for_web_form(),
+            published_runner_tool_for_native_app(),
+            published_runner_tool_for_java_form(),
+            published_runner_tool_for_terminal_lookup(),
+            published_runner_tool_for_vision_extraction(),
+        ];
+        let names = tools
+            .iter()
+            .map(PublishedRunnerTool::tool_name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "web.submit_form",
+                "native.update_record",
+                "java.submit_form",
+                "terminal.lookup_record",
+                "vision.extract_visible_text",
+            ]
+        );
+        assert!(tools.iter().all(|tool| {
+            let descriptor = tool.descriptor();
+            descriptor.input_schema_json.contains("\"type\":\"object\"")
+                && descriptor
+                    .output_schema_json
+                    .contains("\"type\":\"object\"")
+        }));
     }
 }

@@ -4,6 +4,7 @@ members = [
   "crates/greentic-desktop-core",
   "crates/greentic-desktop-config",
   "crates/greentic-desktop-adapter",
+  "crates/greentic-desktop-workflow",
   "crates/greentic-desktop-extension",
   "crates/greentic-distributor-client",
   "crates/greentic-desktop-web",
@@ -58,6 +59,7 @@ criterion = "0.8"
 greentic-desktop-core = { path = "crates/greentic-desktop-core", version = "0.1" }
 greentic-desktop-config = { path = "crates/greentic-desktop-config", version = "0.1" }
 greentic-desktop-adapter = { path = "crates/greentic-desktop-adapter", version = "0.1" }
+greentic-desktop-workflow = { path = "crates/greentic-desktop-workflow", version = "0.1" }
 greentic-desktop-extension = { path = "crates/greentic-desktop-extension", version = "0.1" }
 greentic-distributor-client = { path = "crates/greentic-distributor-client", version = "0.1" }
 greentic-desktop-web = { path = "crates/greentic-desktop-web", version = "0.1" }
@@ -94,3 +96,5 @@ greentic-desktop-runtime = { path = "crates/greentic-desktop-runtime", version =
 greentic-desktop-telemetry = { path = "crates/greentic-desktop-telemetry", version = "0.1" }
 greentic-desktop-gui-assets = { path = "crates/greentic-desktop-gui-assets", version = "0.1" }
 greentic-desktop-gui = { path = "crates/greentic-desktop-gui", version = "0.1" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
