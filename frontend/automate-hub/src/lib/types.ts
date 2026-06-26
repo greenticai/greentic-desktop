@@ -93,6 +93,8 @@ export interface RunnerSummaryDto {
   lastTest: string;
   updated?: string;
   adapters?: string[];
+  inputs?: string[];
+  outputs?: string[];
   published?: boolean;
   evidenceRefs?: string[];
 }

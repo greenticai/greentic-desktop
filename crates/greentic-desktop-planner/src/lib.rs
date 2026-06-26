@@ -540,10 +540,16 @@ fn infer_inputs(prompt: &str) -> Vec<String> {
     for name in extract_named_fields(prompt, &["using", "with", "from"]) {
         inputs.push(format!("inputs.{name}"));
     }
-    if prompt.contains("number 1") || prompt.contains("number one") {
+    if prompt.contains("number 1")
+        || prompt.contains("number one")
+        || prompt.contains("two numbers")
+    {
         inputs.push("inputs.number_1".to_owned());
     }
-    if prompt.contains("number 2") || prompt.contains("number two") {
+    if prompt.contains("number 2")
+        || prompt.contains("number two")
+        || prompt.contains("two numbers")
+    {
         inputs.push("inputs.number_2".to_owned());
     }
     if prompt.contains("operation") {
@@ -852,6 +858,22 @@ mod tests {
             .outputs
             .contains(&"outputs.confirmation_number".to_owned()));
         assert!(draft.render_yaml().contains("web.extract_text"));
+    }
+
+    #[test]
+    fn calculator_prompt_with_two_numbers_derives_inputs_and_result() {
+        let draft = plan_prompt(
+            "Open the calculator app. Take three inputs: two numbers and one operation plus, minus, divide or multiply. Return the result.",
+            &context(),
+        );
+
+        assert!(draft.package.inputs.contains(&"inputs.number_1".to_owned()));
+        assert!(draft.package.inputs.contains(&"inputs.number_2".to_owned()));
+        assert!(draft
+            .package
+            .inputs
+            .contains(&"inputs.operation".to_owned()));
+        assert_eq!(draft.package.outputs, vec!["outputs.result"]);
     }
 
     #[test]

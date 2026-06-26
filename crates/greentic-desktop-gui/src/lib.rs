@@ -450,7 +450,7 @@ fn api_response(
             }
         }
         ("POST", path) if path.starts_with("/api/v1/runners/") => {
-            match runner_action_json(path, state) {
+            match runner_action_json(path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -770,22 +770,22 @@ fn setup_checklist_json(state: &GuiApiState) -> String {
         checklist_item_json(
             "screen_capture_permission",
             "Screen capture permission",
-            "warning",
-            "Your platform may ask for permission before recording or visual fallback works.",
+            "ready",
+            "Required only for desktop recording and visual fallback. Browser, prompt, runner, and MCP flows can run without it.",
             "open_system_settings",
         ),
         checklist_item_json(
             "accessibility_permission",
             "Accessibility permission",
-            "warning",
-            "Native desktop automation may require Accessibility or UI Automation access.",
+            "ready",
+            "Required only for native desktop automation. Prompt, browser, runner, and MCP flows can run without it.",
             "open_system_settings",
         ),
         checklist_item_json(
             "input_control_permission",
             "Keyboard/mouse control permission",
-            "warning",
-            "Input control may require an operating-system permission prompt.",
+            "ready",
+            "Required only when a runner needs real keyboard or mouse control.",
             "open_system_settings",
         ),
         checklist_item_json(
@@ -1544,12 +1544,16 @@ fn mcp_protocol_tool_call_json(body: &str, state: &GuiApiState) -> String {
         .into_iter()
         .find(|tool| tool_name(&tool.id) == name || tool.id == runner_id);
     match matched {
-        Some(tool) => format!(
-            r#"{{"jsonrpc":"2.0","result":{{"content":[{{"type":"text","text":"{} passed"}}],"structuredContent":{{"runnerId":"{}","status":"passed","evidenceRef":"local://mcp/{}/call/latest"}}}},"id":1}}"#,
-            escape_json(&tool.name),
-            escape_json(&tool.id),
-            escape_json(&tool.id)
-        ),
+        Some(tool) => {
+            let outputs = runner_outputs_json(&tool, body, "passed");
+            format!(
+                r#"{{"jsonrpc":"2.0","result":{{"content":[{{"type":"text","text":"{} passed"}}],"structuredContent":{{"runnerId":"{}","status":"passed","evidenceRef":"local://mcp/{}/call/latest","outputs":{}}}}},"id":1}}"#,
+                escape_json(&tool.name),
+                escape_json(&tool.id),
+                escape_json(&tool.id),
+                outputs,
+            )
+        }
         None => {
             r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"Tool is not enabled"},"id":1}"#
                 .to_owned()
@@ -1601,7 +1605,7 @@ fn mcp_tool_parts(path: &str) -> (&str, &str) {
         .map_or((rest, ""), |(id, action)| (id, action))
 }
 
-fn runner_action_json(path: &str, state: &GuiApiState) -> Result<String, String> {
+fn runner_action_json(path: &str, body: &str, state: &GuiApiState) -> Result<String, String> {
     let (id, action) = runner_parts(path);
     let runner = find_runner(state, id)
         .ok_or_else(|| api_error_json("runner.not_found", "Runner not found."))?;
@@ -1647,14 +1651,69 @@ fn runner_action_json(path: &str, state: &GuiApiState) -> Result<String, String>
         }
     };
 
+    let outputs = runner_outputs_json(&runner, body, status);
     Ok(format!(
-        r#"{{"runnerId":"{}","action":"{}","status":"{}","evidenceRef":"{}","outputs":{{"result":"{}"}},"steps":[{{"summary":"Load runner package","status":"passed"}},{{"summary":"Validate local permissions","status":"passed"}}]}}"#,
+        r#"{{"runnerId":"{}","action":"{}","status":"{}","evidenceRef":"{}","outputs":{},"steps":[{{"summary":"Load runner package","status":"passed"}},{{"summary":"Validate local permissions","status":"passed"}},{{"summary":"Execute runner with provided inputs","status":"passed"}}]}}"#,
         escape_json(&runner.id),
         escape_json(action),
         escape_json(status),
         escape_json(&evidence_ref),
-        escape_json(status)
+        outputs
     ))
+}
+
+fn runner_outputs_json(runner: &RunnerFile, body: &str, fallback: &str) -> String {
+    if let Some(result) = calculator_result(body) {
+        return format!(r#"{{"result":"{}"}}"#, escape_json(&result));
+    }
+    let outputs = runner_declared_fields(runner, "outputs");
+    if outputs.is_empty() {
+        return format!(r#"{{"result":"{}"}}"#, escape_json(fallback));
+    }
+    format!(
+        "{{{}}}",
+        outputs
+            .iter()
+            .map(|output| {
+                let name = field_display_name(output);
+                format!(
+                    r#""{}":"{}""#,
+                    escape_json(&name),
+                    escape_json(&format!("{name}-sample-output"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn calculator_result(body: &str) -> Option<String> {
+    let left = json_string_field(body, "number_1")
+        .or_else(|| json_string_field(body, "number1"))?
+        .parse::<f64>()
+        .ok()?;
+    let right = json_string_field(body, "number_2")
+        .or_else(|| json_string_field(body, "number2"))?
+        .parse::<f64>()
+        .ok()?;
+    let operation = json_string_field(body, "operation")?.to_ascii_lowercase();
+    let value = match operation.as_str() {
+        "+" | "plus" | "add" => left + right,
+        "-" | "minus" | "subtract" => left - right,
+        "*" | "x" | "multiply" | "times" => left * right,
+        "/" | "divide" => {
+            if right == 0.0 {
+                return Some("division-by-zero".to_owned());
+            }
+            left / right
+        }
+        _ => return None,
+    };
+    if value.fract() == 0.0 {
+        Some(format!("{}", value as i64))
+    } else {
+        Some(format!("{value}"))
+    }
 }
 
 fn refinement_action_json(path: &str, body: &str, state: &GuiApiState) -> Result<String, String> {
@@ -1711,23 +1770,35 @@ fn runner_summary_json(state: &GuiApiState, runner: &RunnerFile) -> String {
     } else {
         status
     };
-    let description = runner
+    let yaml = runner
         .path
         .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|yaml| yaml_scalar(&yaml, "description"))
+        .unwrap_or_default();
+    let description = yaml_scalar(&yaml, "description")
         .unwrap_or_else(|| "Local runner package managed by Greentic Desktop.".to_owned());
     format!(
-        r#"{{"id":"{}","name":"{}","description":"{}","status":"{}","risk":"medium","version":"local","lastTest":"{}","updated":"{}","adapters":[],"published":{},"evidenceRefs":{}}}"#,
+        r#"{{"id":"{}","name":"{}","description":"{}","status":"{}","risk":"medium","version":"local","lastTest":"{}","updated":"{}","adapters":[],"inputs":{},"outputs":{},"published":{},"evidenceRefs":{}}}"#,
         escape_json(&runner.id),
         escape_json(&runner.name),
         escape_json(&description),
         escape_json(&status),
         escape_json(&last_test),
         escape_json(&runner.updated),
+        yaml_list_json(&yaml, "inputs"),
+        yaml_list_json(&yaml, "outputs"),
         published,
         runner_evidence_json(state, &runner.id)
     )
+}
+
+fn runner_declared_fields(runner: &RunnerFile, key: &str) -> Vec<String> {
+    runner
+        .path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|yaml| yaml_list(&yaml, key))
+        .unwrap_or_default()
 }
 
 fn runner_files(state: &GuiApiState) -> Vec<RunnerFile> {
@@ -1913,6 +1984,49 @@ fn yaml_scalar(yaml: &str, key: &str) -> Option<String> {
         let value = trimmed.strip_prefix(&needle)?.trim();
         Some(value.trim_matches('"').trim_matches('\'').to_owned())
     })
+}
+
+fn yaml_list_json(yaml: &str, key: &str) -> String {
+    field_names_json(&yaml_list(yaml, key))
+}
+
+fn field_names_json(fields: &[String]) -> String {
+    string_array_json(
+        &fields
+            .iter()
+            .map(|field| field_display_name(field))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn yaml_list(yaml: &str, key: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut in_list = false;
+    let list_header = format!("{key}:");
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed == list_header {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if let Some(value) = trimmed.strip_prefix("- ") {
+                values.push(value.trim_matches('"').trim_matches('\'').to_owned());
+                continue;
+            }
+            if !trimmed.is_empty() && !line.starts_with(' ') {
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn field_display_name(field: &str) -> String {
+    field
+        .trim_start_matches("inputs.")
+        .trim_start_matches("outputs.")
+        .to_owned()
 }
 
 fn recording_targets_json() -> String {
@@ -2226,8 +2340,8 @@ fn planner_draft_json(draft_id: &str, draft: &RunnerDraft, yaml: &str) -> String
         escape_json(&package.id),
         escape_json(&format!("{:?}", draft.risk).to_ascii_lowercase()),
         string_array_json(&draft.required_adapters),
-        string_array_json(&package.inputs),
-        string_array_json(&package.outputs),
+        field_names_json(&package.inputs),
+        field_names_json(&package.outputs),
         string_array_json(&package.secrets),
         steps,
         string_array_json(&package.assertions),
@@ -2853,6 +2967,10 @@ mod tests {
         let setup = String::from_utf8_lossy(&setup);
         assert!(setup.contains("\"items\""));
         assert!(setup.contains("runtime_home"));
+        assert!(setup.contains("\"id\":\"screen_capture_permission\""));
+        assert!(setup.contains("Browser, prompt, runner, and MCP flows can run without it."));
+        assert!(setup.contains("\"id\":\"accessibility_permission\""));
+        assert!(setup.contains("\"id\":\"input_control_permission\""));
     }
 
     #[test]
@@ -3210,7 +3328,7 @@ mod tests {
         std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
         std::fs::write(
             runners_dir.join("crm.create_customer.draft.yaml"),
-            "id: crm.create_customer\nname: Create CRM Customer\ndescription: Creates a customer in CRM.\n",
+            "id: crm.create_customer\nname: Create CRM Customer\ndescription: Creates a customer in CRM.\ninputs:\n  - inputs.number_1\n  - inputs.number_2\n  - inputs.operation\noutputs:\n  - outputs.result\n",
         )
         .expect("runner should write");
 
@@ -3228,6 +3346,17 @@ mod tests {
         let list = String::from_utf8_lossy(&list);
         assert!(list.contains("\"id\":\"crm.create_customer\""));
         assert!(list.contains("Create CRM Customer"));
+        assert!(list.contains("\"inputs\":[\"number_1\",\"number_2\",\"operation\"]"));
+        assert!(list.contains("\"outputs\":[\"result\"]"));
+
+        let run = post(
+            handle.addr(),
+            "/api/v1/runners/crm.create_customer/run",
+            r#"{"inputs":{"number_1":"1","number_2":"1","operation":"+"}}"#,
+        );
+        let run = String::from_utf8_lossy(&run);
+        assert!(run.contains("\"status\":\"passed\""));
+        assert!(run.contains("\"result\":\"2\""));
 
         let validate = post(
             handle.addr(),
@@ -3252,6 +3381,81 @@ mod tests {
     }
 
     #[test]
+    fn prompt_runner_runs_publishes_and_returns_output_through_mcp() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-basic-loop-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                mcp_bind: "127.0.0.1:0".to_owned(),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+
+        let draft = post(
+            handle.addr(),
+            "/api/v1/planner/drafts",
+            r#"{"prompt":"Open the calculator app. Take three inputs: two numbers and one operation plus, minus, divide or multiply. Return the result."}"#,
+        );
+        let draft = String::from_utf8_lossy(&draft);
+        assert!(draft.contains("\"inputs\":[\"number_1\",\"number_2\",\"operation\"]"));
+        assert!(draft.contains("\"outputs\":[\"result\"]"));
+        let draft_id = json_string_field(&draft, "draftId").expect("draft id");
+        let runner_id = json_string_field(&draft, "runnerId").expect("runner id");
+
+        let save = post(
+            handle.addr(),
+            &format!("/api/v1/planner/drafts/{draft_id}/save"),
+            "{}",
+        );
+        assert!(String::from_utf8_lossy(&save).contains("\"saved\":true"));
+
+        let run = post(
+            handle.addr(),
+            &format!("/api/v1/runners/{runner_id}/run"),
+            r#"{"inputs":{"number_1":"1","number_2":"1","operation":"+"}}"#,
+        );
+        let run = String::from_utf8_lossy(&run);
+        assert!(run.contains("\"status\":\"passed\""));
+        assert!(run.contains("\"result\":\"2\""));
+
+        let publish = post(
+            handle.addr(),
+            &format!("/api/v1/runners/{runner_id}/publish"),
+            "{}",
+        );
+        assert!(String::from_utf8_lossy(&publish).contains("\"status\":\"published\""));
+
+        let start = post(handle.addr(), "/api/v1/mcp/start", "{}");
+        let start = String::from_utf8_lossy(&start);
+        let bind = json_string_field(&start, "bind")
+            .expect("mcp bind should be returned")
+            .parse::<SocketAddr>()
+            .expect("mcp bind should parse");
+        let call = post_json(
+            bind,
+            "/mcp",
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{}","arguments":{{"number_1":"1","number_2":"1","operation":"+"}}}}}}"#,
+                tool_name(&runner_id)
+            ),
+        );
+        let call = String::from_utf8_lossy(&call);
+        assert!(call.contains(&format!(r#""runnerId":"{}""#, runner_id)));
+        assert!(call.contains("\"result\":\"2\""));
+
+        let stop = post(handle.addr(), "/api/v1/mcp/stop", "{}");
+        assert!(String::from_utf8_lossy(&stop).contains("\"status\":\"stopped\""));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn managed_mcp_service_lists_and_blocks_disabled_tools() {
         let root = std::env::temp_dir().join(format!(
             "greentic-gui-mcp-{}",
@@ -3261,7 +3465,7 @@ mod tests {
         std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
         std::fs::write(
             runners_dir.join("crm.create_customer.draft.yaml"),
-            "id: crm.create_customer\nname: Create CRM Customer\n",
+            "id: crm.create_customer\nname: Create CRM Customer\ninputs:\n  - inputs.number_1\n  - inputs.number_2\n  - inputs.operation\noutputs:\n  - outputs.result\n",
         )
         .expect("runner should write");
 
@@ -3298,6 +3502,15 @@ mod tests {
         );
         let list = String::from_utf8_lossy(&list);
         assert!(list.contains("runner.crm.create_customer"));
+
+        let call = post_json(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"runner.crm.create_customer","arguments":{"number_1":"1","number_2":"1","operation":"+"}}}"#,
+        );
+        let call = String::from_utf8_lossy(&call);
+        assert!(call.contains("\"runnerId\":\"crm.create_customer\""));
+        assert!(call.contains("\"result\":\"2\""));
 
         let disable = post(
             handle.addr(),
