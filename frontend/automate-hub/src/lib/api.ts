@@ -65,12 +65,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     const token = guiToken();
     response = await fetch(`${API_BASE}${path}`, {
+      ...init,
       headers: {
+        ...(init?.headers ?? {}),
         accept: "application/json",
         ...(token ? { "x-greentic-gui-token": token } : {}),
-        ...(init?.headers ?? {}),
       },
-      ...init,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "The local GUI API is unavailable.";
