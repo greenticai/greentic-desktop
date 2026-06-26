@@ -4,8 +4,13 @@ use greentic_desktop_extension::{
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
 };
 use greentic_desktop_gui_assets::{asset, spa_asset, GuiAsset};
-use greentic_desktop_llm::{provider_profile, supported_provider_profiles, LlmProviderProfile};
-use greentic_desktop_planner::{plan_prompt, PlanningContext, RunnerDraft};
+use greentic_desktop_llm::{
+    provider_profile, supported_provider_profiles, GreenticLlmClient, HeuristicLlmClient, LlmError,
+    LlmProviderProfile, LlmRequestEnvelope, LlmResponse,
+};
+use greentic_desktop_planner::{
+    plan_prompt_with_llm, PlannerOptions, PlanningContext, RunnerDraft,
+};
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
     load_recording_session, normalise_recording, pause_recording_session, resume_recording_session,
@@ -2521,7 +2526,16 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
         security_policies: vec!["unsigned drafts allowed locally".to_owned()],
         desktop_observations: Vec::new(),
     };
-    let draft = plan_prompt(&prompt, &context);
+    let llm_settings = load_llm_settings(state);
+    let planner_options = PlannerOptions::default();
+    let draft = if llm_settings.provider == "local" {
+        plan_prompt_with_llm(&prompt, &context, &planner_options, &HeuristicLlmClient)
+    } else {
+        let client = ConfiguredGuiLlmClient::new(state, &llm_settings)?;
+        plan_prompt_with_llm(&prompt, &context, &planner_options, &client)
+    }
+    .map_err(|err| api_error_json(&err.code, &err.message))?
+    .draft;
     let draft_id = format!("draft-{:016x}", fnv1a64(prompt.as_bytes()));
     let draft_dir = planner_drafts_dir(state).join(&draft_id);
     std::fs::create_dir_all(&draft_dir).map_err(|err| {
@@ -3060,6 +3074,22 @@ fn secret_exists(state: &GuiApiState, secret_ref: &str) -> bool {
     block_on_ready(store.read(secret_ref)).is_ok()
 }
 
+fn read_gui_secret(state: &GuiApiState, secret_ref: &str) -> Result<String, String> {
+    let store = GuiSecretsStore::new(state);
+    let bytes = block_on_ready(store.read(secret_ref)).map_err(|err| {
+        api_error_json(
+            "secrets.read_failed",
+            &format!("Could not read secret via Greentic secrets API: {err}"),
+        )
+    })?;
+    String::from_utf8(bytes).map_err(|err| {
+        api_error_json(
+            "secrets.invalid_utf8",
+            &format!("Secret {secret_ref} is not valid UTF-8: {err}"),
+        )
+    })
+}
+
 fn write_gui_secret(state: &GuiApiState, secret_ref: &str, value: &str) -> Result<(), String> {
     let store = GuiSecretsStore::new(state);
     block_on_ready(store.write(secret_ref, value.as_bytes())).map_err(|err| {
@@ -3148,6 +3178,196 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
             Poll::Pending => thread::yield_now(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ConfiguredGuiLlmClient {
+    provider: String,
+    model: String,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+}
+
+impl ConfiguredGuiLlmClient {
+    fn new(state: &GuiApiState, settings: &LlmSettings) -> Result<Self, String> {
+        let profile = provider_profile(&settings.provider).ok_or_else(|| {
+            api_error_json(
+                "llm.provider_unsupported",
+                &format!("LLM provider '{}' is not supported.", settings.provider),
+            )
+        })?;
+        let api_key = if profile.requires_api_key {
+            Some(
+                read_gui_secret(state, &llm_secret_ref(&settings.provider)).map_err(|_| {
+                    api_error_json(
+                        "llm.api_key_missing",
+                        &format!(
+                            "{} requires an API key in Settings before planning.",
+                            profile.label
+                        ),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            provider: settings.provider.clone(),
+            model: settings.model.clone(),
+            endpoint: settings.endpoint.clone(),
+            api_key,
+        })
+    }
+
+    fn endpoint(&self, fallback: &str) -> String {
+        self.endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(fallback)
+            .trim_end_matches('/')
+            .to_owned()
+    }
+}
+
+impl GreenticLlmClient for ConfiguredGuiLlmClient {
+    fn complete(&self, request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError> {
+        if let Ok(mock) = std::env::var("GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON") {
+            return Ok(LlmResponse { content: mock });
+        }
+        let (url, mut headers, body) = provider_http_request(self, request)?;
+        let mut args = vec![
+            "-fsS".to_owned(),
+            "-X".to_owned(),
+            "POST".to_owned(),
+            url,
+            "-H".to_owned(),
+            "content-type: application/json".to_owned(),
+        ];
+        for header in headers.drain(..) {
+            args.push("-H".to_owned());
+            args.push(header);
+        }
+        args.push("--data".to_owned());
+        args.push(body);
+        let command = std::env::var("GREENTIC_DESKTOP_LLM_CURL").unwrap_or_else(|_| "curl".into());
+        let output = Command::new(command).args(&args).output().map_err(|err| {
+            LlmError::Unavailable(format!("could not start provider request: {err}"))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(LlmError::Unavailable(format!(
+                "provider request failed: {stderr}"
+            )));
+        }
+        let json = String::from_utf8(output.stdout)
+            .map_err(|err| LlmError::Unavailable(format!("provider returned non-UTF-8: {err}")))?;
+        let content = provider_response_content(&json).ok_or_else(|| {
+            LlmError::Unavailable("provider response did not include message content".to_owned())
+        })?;
+        Ok(LlmResponse { content })
+    }
+}
+
+fn provider_http_request(
+    client: &ConfiguredGuiLlmClient,
+    request: &LlmRequestEnvelope,
+) -> Result<(String, Vec<String>, String), LlmError> {
+    let instruction = llm_planner_instruction();
+    let prompt = request.render_json();
+    match client.provider.as_str() {
+        "openai" | "mistral" | "azure_openai" => {
+            let endpoint = client.endpoint(match client.provider.as_str() {
+                "mistral" => "https://api.mistral.ai/v1",
+                _ => "https://api.openai.com/v1",
+            });
+            let url = if endpoint.ends_with("/chat/completions") {
+                endpoint
+            } else {
+                format!("{endpoint}/chat/completions")
+            };
+            let mut headers = Vec::new();
+            if let Some(api_key) = &client.api_key {
+                if client.provider == "azure_openai" {
+                    headers.push(format!("api-key: {api_key}"));
+                } else {
+                    headers.push(format!("authorization: Bearer {api_key}"));
+                }
+            }
+            let body = format!(
+                r#"{{"model":"{}","temperature":0.1,"messages":[{{"role":"system","content":"{}"}},{{"role":"user","content":"{}"}}]}}"#,
+                escape_json(&client.model),
+                escape_json(instruction),
+                escape_json(&prompt)
+            );
+            Ok((url, headers, body))
+        }
+        "anthropic" => {
+            let endpoint = client.endpoint("https://api.anthropic.com");
+            let mut headers = vec!["anthropic-version: 2023-06-01".to_owned()];
+            if let Some(api_key) = &client.api_key {
+                headers.push(format!("x-api-key: {api_key}"));
+            }
+            let body = format!(
+                r#"{{"model":"{}","max_tokens":4096,"system":"{}","messages":[{{"role":"user","content":"{}"}}]}}"#,
+                escape_json(&client.model),
+                escape_json(instruction),
+                escape_json(&prompt)
+            );
+            Ok((format!("{endpoint}/v1/messages"), headers, body))
+        }
+        "google" => {
+            let endpoint = client.endpoint("https://generativelanguage.googleapis.com");
+            let api_key = client.api_key.as_deref().unwrap_or_default();
+            let body = format!(
+                r#"{{"contents":[{{"parts":[{{"text":"{}\n\n{}"}}]}}],"generationConfig":{{"temperature":0.1}}}}"#,
+                escape_json(instruction),
+                escape_json(&prompt)
+            );
+            Ok((
+                format!(
+                    "{endpoint}/v1beta/models/{}:generateContent?key={}",
+                    client.model, api_key
+                ),
+                Vec::new(),
+                body,
+            ))
+        }
+        "ollama" => {
+            let endpoint = client.endpoint("http://127.0.0.1:11434");
+            let body = format!(
+                r#"{{"model":"{}","prompt":"{}\n\n{}","stream":false}}"#,
+                escape_json(&client.model),
+                escape_json(instruction),
+                escape_json(&prompt)
+            );
+            Ok((format!("{endpoint}/api/generate"), Vec::new(), body))
+        }
+        other => Err(LlmError::Unavailable(format!(
+            "unsupported LLM provider '{other}'"
+        ))),
+    }
+}
+
+fn llm_planner_instruction() -> &'static str {
+    "Convert the user desktop automation request into exactly one JSON object matching the Greentic runner draft schema. Return only JSON. Required fields: runner_id, version, summary, risk_level, required_capabilities, inputs, outputs, steps, assertions, open_questions. Use input/output maps where each field has type and required."
+}
+
+fn provider_response_content(json: &str) -> Option<String> {
+    json_string_field(json, "content")
+        .or_else(|| json_string_field(json, "text"))
+        .or_else(|| json_string_field(json, "response"))
+        .map(strip_json_code_fence)
+}
+
+fn strip_json_code_fence(value: String) -> String {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("```json") {
+        return rest.trim_start().trim_end_matches("```").trim().to_owned();
+    }
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        return rest.trim_start().trim_end_matches("```").trim().to_owned();
+    }
+    value
 }
 
 fn optional_string_json(value: Option<&str>) -> String {
@@ -3618,6 +3838,41 @@ mod tests {
             .expect("llm settings should clear API key");
         assert!(cleared.contains("\"hasApiKey\":false"));
         assert!(llm_test_json(&state).contains("requires an API key"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn planner_draft_uses_configured_llm_provider() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-configured-llm-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let state = GuiApiState {
+            runtime_home: root.clone(),
+            evidence_store: root.join("evidence"),
+            ..GuiApiState::default()
+        };
+        save_llm_settings_json(
+            r#"{"provider":"openai","model":"gpt-4.1-mini","apiKey":"sk-test-secret"}"#,
+            &state,
+        )
+        .expect("llm settings should save");
+        std::env::set_var(
+            "GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON",
+            r#"{"runner_id":"crm.llm_customer","version":"0.1.0-draft","summary":"Create a CRM customer with LLM","risk_level":"medium","required_capabilities":["web.goto"],"inputs":{"company_name":{"type":"string","required":true}},"outputs":{"customer_id":{"type":"string"}},"steps":[{"id":"open","action":"goto","required_capability":"web.goto"}],"assertions":["customer created"],"open_questions":[]}"#,
+        );
+
+        let draft = create_planner_draft_json(
+            r#"{"prompt":"Create the customer using the configured LLM.","profile":"default"}"#,
+            &state,
+        )
+        .expect("configured LLM should generate draft");
+
+        std::env::remove_var("GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON");
+        assert!(draft.contains("\"runnerId\":\"crm.llm_customer\""));
+        assert!(draft.contains("company_name"));
+        assert!(draft.contains("customer_id"));
 
         let _ = std::fs::remove_dir_all(root);
     }
