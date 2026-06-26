@@ -299,6 +299,7 @@ dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-extension",
  "greentic-desktop-gui-assets",
+ "greentic-desktop-llm",
  "greentic-desktop-planner",
  "greentic-desktop-recorder",
  "greentic-distributor-client",

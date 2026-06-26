@@ -4,6 +4,7 @@ use greentic_desktop_extension::{
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
 };
 use greentic_desktop_gui_assets::{asset, spa_asset, GuiAsset};
+use greentic_desktop_llm::{known_providers, provider_by_id, LlmProvider};
 use greentic_desktop_planner::{plan_prompt, PlanningContext, RunnerDraft};
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
@@ -381,7 +382,9 @@ fn api_response(
         ("GET" | "HEAD", "/api/v1/mcp/status") => mcp_status_json(state),
         ("GET" | "HEAD", "/api/v1/mcp/tools") => mcp_tools_json(state),
         ("GET" | "HEAD", "/api/v1/mcp/client-config") => mcp_client_config_json(state),
-        ("GET" | "HEAD", "/api/v1/settings/llm") => llm_settings_json(),
+        ("GET" | "HEAD", "/api/v1/settings/llm") => {
+            llm_settings_json_for_provider("local").expect("local provider is built in")
+        }
         ("POST", "/api/v1/planner/drafts") => match create_planner_draft_json(body, state) {
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
@@ -423,7 +426,10 @@ fn api_response(
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
         },
-        ("PUT", "/api/v1/settings/llm") => llm_settings_json(),
+        ("PUT", "/api/v1/settings/llm") => match save_llm_settings_json(body) {
+            Ok(json) => json,
+            Err(error) => return json_response(400, "Bad Request", &error, head_only),
+        },
         ("POST", "/api/v1/settings/llm/test") => {
             r#"{"status":"ok","message":"Heuristic planner is available."}"#.to_owned()
         }
@@ -2462,9 +2468,63 @@ fn extension_action_json(path: &str, state: &GuiApiState) -> Result<String, Stri
     ))
 }
 
-fn llm_settings_json() -> String {
-    r#"{"provider":"local","model":"heuristic-planner","endpoint":null,"secretRef":null,"mode":"heuristic"}"#
-        .to_owned()
+fn save_llm_settings_json(body: &str) -> Result<String, String> {
+    let provider_id = json_string_field(body, "provider").ok_or_else(|| {
+        api_error_json("settings.invalid_llm_provider", "LLM provider is required.")
+    })?;
+    llm_settings_json_for_provider(&provider_id)
+}
+
+fn llm_settings_json_for_provider(provider_id: &str) -> Result<String, String> {
+    let provider = provider_by_id(provider_id).ok_or_else(|| {
+        api_error_json(
+            "settings.unknown_llm_provider",
+            &format!("Unknown LLM provider '{provider_id}'."),
+        )
+    })?;
+    Ok(format!(
+        r#"{{"provider":"{}","model":"{}","endpoint":{},"secretRef":{},"mode":"{}","providers":{}}}"#,
+        escape_json(provider.id),
+        escape_json(provider.default_model),
+        json_option(provider.endpoint),
+        json_option(
+            provider
+                .secret_name
+                .map(|secret_name| format!("secret://{secret_name}"))
+                .as_deref()
+        ),
+        escape_json(provider.mode),
+        llm_providers_json(),
+    ))
+}
+
+fn llm_providers_json() -> String {
+    format!(
+        "[{}]",
+        known_providers()
+            .iter()
+            .map(llm_provider_json)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn llm_provider_json(provider: &LlmProvider) -> String {
+    format!(
+        r#"{{"id":"{}","name":"{}","defaultModel":"{}","mode":"{}","endpoint":{},"secretName":{}}}"#,
+        escape_json(provider.id),
+        escape_json(provider.name),
+        escape_json(provider.default_model),
+        escape_json(provider.mode),
+        json_option(provider.endpoint),
+        json_option(provider.secret_name),
+    )
+}
+
+fn json_option(value: Option<&str>) -> String {
+    value
+        .map(|value| format!(r#""{}""#, escape_json(value)))
+        .unwrap_or_else(|| "null".to_owned())
 }
 
 fn string_array_json(values: &[String]) -> String {
@@ -2831,6 +2891,23 @@ mod tests {
         assert!(response.contains("\"id\":\"accessibility_permission\""));
         assert!(response.contains("\"status\":\"manual\""));
         assert!(response.contains("not supported by the setup opener"));
+    }
+
+    #[test]
+    fn llm_settings_include_provider_catalog() {
+        let response = llm_settings_json_for_provider("local").expect("local settings");
+
+        assert!(response.contains(r#""provider":"local""#));
+        assert!(response.contains(r#""providers":["#));
+        assert!(response.contains(r#""id":"deepseek""#));
+        assert!(response.contains(r#""defaultModel":"deepseek-chat""#));
+        assert!(response.contains(r#""secretName":"DEEPSEEK_API_KEY""#));
+
+        let saved = save_llm_settings_json(r#"{"provider":"deepseek"}"#)
+            .expect("deepseek settings should save");
+        assert!(saved.contains(r#""provider":"deepseek""#));
+        assert!(saved.contains(r#""model":"deepseek-chat""#));
+        assert!(saved.contains(r#""secretRef":"secret://DEEPSEEK_API_KEY""#));
     }
 
     #[test]

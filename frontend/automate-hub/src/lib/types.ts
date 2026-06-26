@@ -282,6 +282,16 @@ export interface LlmSettingsDto {
   endpoint: string | null;
   secretRef: string | null;
   mode: "heuristic" | "remote" | string;
+  providers: LlmProviderDto[];
+}
+
+export interface LlmProviderDto {
+  id: string;
+  name: string;
+  defaultModel: string;
+  endpoint: string | null;
+  mode: "heuristic" | "remote" | string;
+  secretName: string | null;
 }
 
 export interface LlmTestResultDto {

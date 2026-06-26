@@ -15,6 +15,81 @@ impl Default for ModelPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmProvider {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub default_model: &'static str,
+    pub mode: &'static str,
+    pub endpoint: Option<&'static str>,
+    pub secret_name: Option<&'static str>,
+}
+
+pub fn known_providers() -> &'static [LlmProvider] {
+    &[
+        LlmProvider {
+            id: "local",
+            name: "Local heuristic",
+            default_model: "heuristic-planner",
+            mode: "heuristic",
+            endpoint: None,
+            secret_name: None,
+        },
+        LlmProvider {
+            id: "openai",
+            name: "OpenAI",
+            default_model: "gpt-4.1-mini",
+            mode: "remote",
+            endpoint: Some("https://api.openai.com/v1"),
+            secret_name: Some("OPENAI_API_KEY"),
+        },
+        LlmProvider {
+            id: "anthropic",
+            name: "Anthropic",
+            default_model: "claude-3-5-sonnet-latest",
+            mode: "remote",
+            endpoint: Some("https://api.anthropic.com"),
+            secret_name: Some("ANTHROPIC_API_KEY"),
+        },
+        LlmProvider {
+            id: "deepseek",
+            name: "DeepSeek",
+            default_model: "deepseek-chat",
+            mode: "remote",
+            endpoint: Some("https://api.deepseek.com"),
+            secret_name: Some("DEEPSEEK_API_KEY"),
+        },
+        LlmProvider {
+            id: "google",
+            name: "Google Gemini",
+            default_model: "gemini-1.5-flash",
+            mode: "remote",
+            endpoint: Some("https://generativelanguage.googleapis.com"),
+            secret_name: Some("GOOGLE_API_KEY"),
+        },
+        LlmProvider {
+            id: "mistral",
+            name: "Mistral",
+            default_model: "mistral-small-latest",
+            mode: "remote",
+            endpoint: Some("https://api.mistral.ai"),
+            secret_name: Some("MISTRAL_API_KEY"),
+        },
+        LlmProvider {
+            id: "ollama",
+            name: "Ollama",
+            default_model: "llama3.1",
+            mode: "remote",
+            endpoint: Some("http://127.0.0.1:11434"),
+            secret_name: None,
+        },
+    ]
+}
+
+pub fn provider_by_id(id: &str) -> Option<&'static LlmProvider> {
+    known_providers().iter().find(|provider| provider.id == id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LlmPlanningContext {
     pub available_adapters: Vec<String>,
@@ -243,5 +318,20 @@ mod tests {
             .content
             .contains("\"runner_id\":\"crm.create_customer\""));
         assert!(response.content.contains("company_name"));
+    }
+
+    #[test]
+    fn known_providers_include_remote_defaults() {
+        let providers = known_providers();
+
+        assert!(providers.iter().any(
+            |provider| provider.id == "local" && provider.default_model == "heuristic-planner"
+        ));
+        assert!(providers.iter().any(|provider| provider.id == "deepseek"
+            && provider.secret_name == Some("DEEPSEEK_API_KEY")));
+        assert_eq!(
+            provider_by_id("openai").map(|provider| provider.default_model),
+            Some("gpt-4.1-mini")
+        );
     }
 }

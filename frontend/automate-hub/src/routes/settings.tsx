@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import type { ExtensionDto, SetupChecklistItemDto } from "@/lib/types";
+import type { ExtensionDto, LlmSettingsDto, SetupChecklistItemDto } from "@/lib/types";
 import {
   Select,
   SelectContent,
@@ -99,6 +99,13 @@ function SettingsPage() {
     queryFn: api.installedExtensions,
   });
   const llm = useQuery({ queryKey: ["llm-settings"], queryFn: api.llmSettings });
+  const [llmDraft, setLlmDraft] = useState<LlmSettingsDto | null>(null);
+
+  useEffect(() => {
+    if (llm.data) {
+      setLlmDraft(llm.data);
+    }
+  }, [llm.data]);
 
   const extensionAction = useMutation({
     mutationFn: ({ extension, action }: { extension: ExtensionDto; action: string }) =>
@@ -119,8 +126,11 @@ function SettingsPage() {
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Setup failed"),
   });
   const saveLlm = useMutation({
-    mutationFn: () => api.saveLlmSettings(llm.data!),
-    onSuccess: () => setActionStatus("LLM settings saved"),
+    mutationFn: () => api.saveLlmSettings(llmDraft!),
+    onSuccess: (settings) => {
+      setLlmDraft(settings);
+      setActionStatus("LLM settings saved");
+    },
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Save failed"),
   });
 
@@ -130,6 +140,8 @@ function SettingsPage() {
     ...extension,
     installed: extension.installed || installedIds.has(extension.id),
   }));
+  const llmProviders = llmDraft?.providers ?? [];
+  const selectedProvider = llmProviders.find((provider) => provider.id === llmDraft?.provider);
 
   return (
     <div className="p-8 md:p-12 max-w-4xl mx-auto space-y-6">
@@ -212,22 +224,51 @@ function SettingsPage() {
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <Label>Provider</Label>
-            <Select value={llm.data?.provider ?? "local"}>
+            <Select
+              value={llmDraft?.provider ?? ""}
+              disabled={!llmDraft || llmProviders.length === 0}
+              onValueChange={(providerId) => {
+                const provider = llmProviders.find((candidate) => candidate.id === providerId);
+                if (!provider || !llmDraft) {
+                  return;
+                }
+                setLlmDraft({
+                  ...llmDraft,
+                  provider: provider.id,
+                  model: provider.defaultModel,
+                  endpoint: provider.endpoint,
+                  secretRef: provider.secretName ? `secret://${provider.secretName}` : null,
+                  mode: provider.mode,
+                });
+              }}
+            >
               <SelectTrigger className="mt-1.5">
-                <SelectValue />
+                <SelectValue placeholder="Select provider" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="local">Local heuristic</SelectItem>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="anthropic">Anthropic</SelectItem>
+                {llmProviders.map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {provider.name}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
+            {!llm.isLoading && llmProviders.length === 0 && (
+              <div className="mt-1.5 text-xs text-destructive">
+                No LLM providers were returned by the runtime.
+              </div>
+            )}
           </div>
           <div>
             <Label>Model</Label>
-            <Input className="mt-1.5" readOnly value={llm.data?.model ?? "heuristic-planner"} />
+            <Input className="mt-1.5" readOnly value={llmDraft?.model ?? ""} />
           </div>
         </div>
+        {selectedProvider?.secretName && (
+          <div className="mt-3 text-xs text-muted-foreground">
+            API key is read from {selectedProvider.secretName}.
+          </div>
+        )}
         <div className="mt-4 flex gap-2">
           <Button
             variant="outline"
@@ -240,7 +281,7 @@ function SettingsPage() {
           <Button
             variant="outline"
             size="sm"
-            disabled={!llm.data || saveLlm.isPending}
+            disabled={!llmDraft || saveLlm.isPending}
             onClick={() => saveLlm.mutate()}
           >
             Save
