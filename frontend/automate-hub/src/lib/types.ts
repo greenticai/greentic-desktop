@@ -39,6 +39,12 @@ export interface SetupChecklistItemDto {
   action?: string;
 }
 
+export interface SetupFixResultDto {
+  id: string;
+  status: "opened" | "created" | "noop" | "manual" | "unsupported" | string;
+  message: string;
+}
+
 export interface ActivityEventDto {
   id: string;
   kind: string;

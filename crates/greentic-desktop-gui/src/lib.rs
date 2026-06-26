@@ -410,7 +410,10 @@ fn api_response(
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
         }
-        ("POST", "/api/v1/setup/fix") => r#"{"status":"queued"}"#.to_owned(),
+        ("POST", "/api/v1/setup/fix") => match setup_fix_json(body, state) {
+            Ok(json) => json,
+            Err(error) => return json_response(400, "Bad Request", &error, head_only),
+        },
         ("POST", "/api/v1/mcp/start") => match start_mcp_service(state) {
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
@@ -791,6 +794,169 @@ fn setup_checklist_json(state: &GuiApiState) -> String {
             "start_mcp",
         ),
     )
+}
+
+fn setup_fix_json(body: &str, state: &GuiApiState) -> Result<String, String> {
+    let id = json_string_field(body, "id")
+        .or_else(|| json_string_field(body, "itemId"))
+        .ok_or_else(|| api_error_json("setup.missing_id", "Setup item id is required."))?;
+    let result = match id.as_str() {
+        "runtime_home" => {
+            std::fs::create_dir_all(&state.runtime_home).map_err(|err| {
+                api_error_json(
+                    "setup.runtime_home_failed",
+                    &format!("Could not create runtime home: {err}"),
+                )
+            })?;
+            std::fs::create_dir_all(&state.evidence_store).map_err(|err| {
+                api_error_json(
+                    "setup.evidence_store_failed",
+                    &format!("Could not create evidence store: {err}"),
+                )
+            })?;
+            setup_fix_result_json(
+                &id,
+                "created",
+                &format!(
+                    "Runtime folders are ready at {}.",
+                    state.runtime_home.display()
+                ),
+            )
+        }
+        "browser_automation" => setup_fix_result_json(
+            &id,
+            "manual",
+            "Install the browser automation extension from Extensions, then retry web recording.",
+        ),
+        "screen_capture_permission" => open_permission_settings(
+            state,
+            &id,
+            "screen_capture",
+            "Open the screen capture or screen recording permission page and grant access to the terminal or Greentic Desktop app you are running.",
+        ),
+        "accessibility_permission" => open_permission_settings(
+            state,
+            &id,
+            "accessibility",
+            "Open the accessibility permission page and grant access to the terminal or Greentic Desktop app you are running.",
+        ),
+        "input_control_permission" => open_permission_settings(
+            state,
+            &id,
+            "input_control",
+            "Open the keyboard, mouse, or input monitoring permission page and grant access to the terminal or Greentic Desktop app you are running.",
+        ),
+        "mcp_server" => setup_fix_result_json(
+            &id,
+            "manual",
+            &format!("Start or configure the local MCP endpoint at {}.", state.mcp_bind),
+        ),
+        _ => {
+            return Err(api_error_json(
+                "setup.unknown_item",
+                &format!("Unknown setup item '{id}'."),
+            ));
+        }
+    };
+    Ok(result)
+}
+
+fn setup_fix_result_json(id: &str, status: &str, message: &str) -> String {
+    format!(
+        r#"{{"id":"{}","status":"{}","message":"{}"}}"#,
+        escape_json(id),
+        escape_json(status),
+        escape_json(message)
+    )
+}
+
+fn open_permission_settings(
+    state: &GuiApiState,
+    id: &str,
+    permission: &str,
+    manual_message: &str,
+) -> String {
+    match open_platform_settings(&state.platform, permission) {
+        Ok(()) => setup_fix_result_json(id, "opened", "Opened the relevant operating-system settings page. Grant the permission, then restart Greentic Desktop if the OS asks you to."),
+        Err(reason) => setup_fix_result_json(
+            id,
+            "manual",
+            &format!("{manual_message} Automatic opening was not available: {reason}."),
+        ),
+    }
+}
+
+fn open_platform_settings(platform: &str, permission: &str) -> Result<(), String> {
+    match platform {
+        "macos" => open_macos_settings(permission),
+        "windows" => open_windows_settings(permission),
+        "linux" => open_linux_settings(permission),
+        other => Err(format!("{other} is not supported by the setup opener")),
+    }
+}
+
+fn open_macos_settings(permission: &str) -> Result<(), String> {
+    let pane = match permission {
+        "screen_capture" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        "accessibility" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+        "input_control" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        }
+        _ => "x-apple.systempreferences:com.apple.preference.security",
+    };
+    spawn_detached("open", &[pane])
+}
+
+fn open_windows_settings(permission: &str) -> Result<(), String> {
+    let page = match permission {
+        "screen_capture" => "ms-settings:privacy",
+        "accessibility" => "ms-settings:easeofaccess",
+        "input_control" => "ms-settings:keyboard",
+        _ => "ms-settings:",
+    };
+    spawn_detached("cmd", &["/C", "start", "", page])
+}
+
+fn open_linux_settings(permission: &str) -> Result<(), String> {
+    let gnome_panel = match permission {
+        "screen_capture" => "privacy",
+        "accessibility" => "universal-access",
+        "input_control" => "keyboard",
+        _ => "privacy",
+    };
+    let kde_panel = match permission {
+        "screen_capture" => "kcm_kwin_virtualdesktops",
+        "accessibility" => "kcm_access",
+        "input_control" => "kcm_keyboard",
+        _ => "kcm_access",
+    };
+
+    let attempts: [(&str, &[&str]); 4] = [
+        ("gnome-control-center", &[gnome_panel]),
+        ("systemsettings", &[kde_panel]),
+        ("kcmshell5", &[kde_panel]),
+        ("xdg-open", &["settings://privacy"]),
+    ];
+    let mut errors = Vec::new();
+    for (command, args) in attempts {
+        match spawn_detached(command, args) {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(format!("{command}: {error}")),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+fn spawn_detached(command: &str, args: &[&str]) -> Result<(), String> {
+    Command::new(command)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| err.to_string())
 }
 
 fn checklist_item_json(id: &str, label: &str, status: &str, help: &str, action: &str) -> String {
@@ -2627,6 +2793,44 @@ mod tests {
         let setup = String::from_utf8_lossy(&setup);
         assert!(setup.contains("\"items\""));
         assert!(setup.contains("runtime_home"));
+    }
+
+    #[test]
+    fn setup_fix_creates_runtime_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-setup-fix-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let state = GuiApiState {
+            runtime_home: root.clone(),
+            evidence_store: root.join("evidence"),
+            ..GuiApiState::default()
+        };
+
+        let response = setup_fix_json(r#"{"id":"runtime_home"}"#, &state)
+            .expect("setup fix should create runtime folders");
+
+        assert!(response.contains("\"id\":\"runtime_home\""));
+        assert!(response.contains("\"status\":\"created\""));
+        assert!(state.runtime_home.is_dir());
+        assert!(state.evidence_store.is_dir());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn setup_fix_returns_manual_message_when_platform_opener_is_unavailable() {
+        let state = GuiApiState {
+            platform: "plan9".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let response = setup_fix_json(r#"{"id":"accessibility_permission"}"#, &state)
+            .expect("unsupported platform should return a manual setup result");
+
+        assert!(response.contains("\"id\":\"accessibility_permission\""));
+        assert!(response.contains("\"status\":\"manual\""));
+        assert!(response.contains("not supported by the setup opener"));
     }
 
     #[test]

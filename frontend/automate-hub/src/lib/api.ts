@@ -27,6 +27,7 @@ import type {
   RunnersDto,
   RuntimeInfoDto,
   SetupChecklistDto,
+  SetupFixResultDto,
 } from "./types";
 
 const API_BASE = "/api/v1";
@@ -127,6 +128,8 @@ export const api = {
         },
       ],
     })),
+  setupFix: (itemId: string, action?: string) =>
+    request<SetupFixResultDto>("/setup/fix", jsonInit("POST", { id: itemId, action })),
   activity: () => request<ActivityDto>("/activity"),
   evidence: () => request<EvidenceBundlesDto>("/evidence"),
   evidenceBundle: (bundleId: string) =>
