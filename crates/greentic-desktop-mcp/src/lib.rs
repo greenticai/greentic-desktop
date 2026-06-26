@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn generic_fixture_builders_cover_all_runner_technologies() {
-        let tools = vec![
+        let tools = [
             published_runner_tool_for_web_form(),
             published_runner_tool_for_native_app(),
             published_runner_tool_for_java_form(),
