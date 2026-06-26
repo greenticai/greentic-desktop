@@ -177,7 +177,7 @@ function RunnersPage() {
           </p>
         </div>
         <Button asChild className="gap-2">
-          <Link to="/create">
+          <Link to="/create" search={{ mode: undefined }}>
             <Plus className="h-4 w-4" /> New runner
           </Link>
         </Button>
@@ -380,7 +380,7 @@ function RunnersPage() {
                 {activeAction?.id === r.id && activeAction.action === "test" ? "Testing" : "Test"}
               </Button>
               <Button size="sm" variant="outline" className="gap-1.5" asChild>
-                <Link to="/create">
+                <Link to="/create" search={{ mode: undefined }}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Link>
               </Button>

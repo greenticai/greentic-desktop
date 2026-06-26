@@ -28,15 +28,23 @@ import {
   Save,
 } from "lucide-react";
 
+type Mode = null | "prompt" | "record";
+type CreateMode = Exclude<Mode, null>;
+
 export const Route = createFileRoute("/create")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    mode:
+      search.mode === "prompt" || search.mode === "record"
+        ? (search.mode as CreateMode)
+        : undefined,
+  }),
   head: () => ({ meta: [{ title: "Create Runner · Greentic Desktop" }] }),
   component: CreatePage,
 });
 
-type Mode = null | "prompt" | "record";
-
 function CreatePage() {
-  const [mode, setMode] = useState<Mode>(null);
+  const search = Route.useSearch();
+  const [mode, setMode] = useState<Mode>(() => search.mode ?? null);
   return (
     <div className="p-8 md:p-12 max-w-5xl mx-auto">
       {mode === null && <ChooseMode onPick={setMode} />}
