@@ -20,36 +20,6 @@ is_publishable() {
   ! sed -n '/^\[package\]/,/^\[/p' "$1" | grep -Eq '^[[:space:]]*publish[[:space:]]*=[[:space:]]*false([[:space:]]|$)'
 }
 
-publishable_crates() {
-  for crate in \
-    greentic-desktop-core \
-    greentic-desktop-config \
-    greentic-desktop-adapter \
-    greentic-desktop-extension \
-    greentic-desktop-recorder \
-    greentic-desktop-llm \
-    greentic-desktop-runner-schema \
-    greentic-desktop-policy \
-    greentic-desktop-planner \
-    greentic-desktop-evidence \
-    greentic-desktop-registry \
-    greentic-desktop-session \
-    greentic-desktop-telemetry \
-    greentic-desktop-gui-assets \
-    greentic-desktop-gui \
-    greentic-desktop-security \
-    greentic-desktop-replay \
-    greentic-desktop-mcp \
-    greentic-desktop-runtime \
-    greentic-desktop
-  do
-    if cargo metadata --no-deps --format-version 1 \
-      | grep -q "\"name\":\"$crate\""; then
-      printf '%s\n' "$crate"
-    fi
-  done
-}
-
 locally_packageable_crates() {
   # Before the first release, crates.io cannot resolve workspace-internal
   # dependencies for downstream crates. Full ordered publish dry-runs happen in
@@ -57,15 +27,15 @@ locally_packageable_crates() {
   for crate in \
     greentic-desktop-core \
     greentic-desktop-config \
-    greentic-desktop-evidence \
-    greentic-desktop-registry \
+    greentic-desktop-llm \
     greentic-desktop-session \
     greentic-desktop-telemetry \
-    greentic-desktop-llm \
-    greentic-desktop-gui-assets
+    greentic-desktop-gui-assets \
+    greentic-desktop-evidence \
+    greentic-desktop-registry
   do
-    if cargo metadata --no-deps --format-version 1 \
-      | grep -q "\"name\":\"$crate\""; then
+    manifest="$(crate_manifest_path "$crate" || true)"
+    if [ -n "$manifest" ] && is_publishable "$manifest"; then
       printf '%s\n' "$crate"
     fi
   done
@@ -73,6 +43,12 @@ locally_packageable_crates() {
 
 ROOT="$(workspace_root)"
 cd "$ROOT"
+
+# shellcheck source=ci/crate_publish_order.sh
+source ci/crate_publish_order.sh
+
+header "publish crate order"
+validate_publish_crate_order
 
 header "cargo fmt"
 cargo fmt --all -- --check

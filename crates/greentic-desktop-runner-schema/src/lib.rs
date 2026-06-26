@@ -782,7 +782,7 @@ mod tests {
         let draft = parse_runner_draft_json(
             r#"{
                 "runner_id": "web.search",
-                "version": "0.1.2",
+                "version": "0.1.3",
                 "summary": "Search",
                 "risk_level": "low",
                 "required_capabilities": ["web.fill"],
@@ -860,7 +860,7 @@ mod tests {
             outputs: vec![WorkflowOutput {
                 name: "confirmation".to_owned(),
                 value_type: WorkflowValueType::String,
-                extractor: WorkflowOutputExtractor::TargetText(LocatorTarget::default()),
+                extractor: WorkflowOutputExtractor::TargetText(Box::default()),
                 required: true,
                 expected: None,
             }],
@@ -870,7 +870,7 @@ mod tests {
 
         let runner = RunnerDefinition::from_workflow(
             "sample.native",
-            "0.1.2",
+            "0.1.3",
             "Fill sample native form",
             "Submit a record and return confirmation",
             RunnerRisk::Medium,
@@ -927,7 +927,7 @@ mod tests {
             outputs: vec![WorkflowOutput {
                 name: "result".to_owned(),
                 value_type: WorkflowValueType::String,
-                extractor: WorkflowOutputExtractor::TargetText(LocatorTarget::default()),
+                extractor: WorkflowOutputExtractor::TargetText(Box::default()),
                 required: true,
                 expected: None,
             }],
@@ -937,7 +937,7 @@ mod tests {
 
         let runner = RunnerDefinition::from_workflow(
             "web.search",
-            "0.1.2",
+            "0.1.3",
             "Search",
             "Search and return result text",
             RunnerRisk::Low,

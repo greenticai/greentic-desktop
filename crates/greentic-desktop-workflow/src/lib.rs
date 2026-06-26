@@ -108,8 +108,9 @@ pub struct WorkflowInput {
     pub value_template: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WorkflowValueType {
+    #[default]
     String,
     Number,
     Boolean,
@@ -117,12 +118,6 @@ pub enum WorkflowValueType {
     Enum(Vec<String>),
     File,
     Json,
-}
-
-impl Default for WorkflowValueType {
-    fn default() -> Self {
-        Self::String
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,17 +147,12 @@ pub enum WorkflowActionKind {
     AdapterCapability(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WorkflowRisk {
+    #[default]
     Low,
     Medium,
     High,
-}
-
-impl Default for WorkflowRisk {
-    fn default() -> Self {
-        Self::Low
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +166,7 @@ pub struct WorkflowOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowOutputExtractor {
-    TargetText(LocatorTarget),
+    TargetText(Box<LocatorTarget>),
     VisibleText(String),
     Regex(String),
     TerminalField(TerminalField),
@@ -723,7 +713,7 @@ fn compile_outputs(
 
 fn output_target(output: &WorkflowOutput) -> WorkflowCompileOutcome<LocatorTarget> {
     match &output.extractor {
-        WorkflowOutputExtractor::TargetText(target) => Ok(target.clone()),
+        WorkflowOutputExtractor::TargetText(target) => Ok(target.as_ref().clone()),
         _ => Err(WorkflowCompileError::MissingOutputExtractor(
             output.name.clone(),
         )),
@@ -826,7 +816,7 @@ mod tests {
             outputs: vec![WorkflowOutput {
                 name: "result".to_owned(),
                 value_type: WorkflowValueType::Number,
-                extractor: WorkflowOutputExtractor::TargetText(target("Result")),
+                extractor: WorkflowOutputExtractor::TargetText(Box::new(target("Result"))),
                 required: true,
                 expected: Some("2".to_owned()),
             }],

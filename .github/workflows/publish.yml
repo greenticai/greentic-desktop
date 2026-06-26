@@ -324,6 +324,19 @@ jobs:
           version="${{ needs.verify.outputs.version }}"
           user_agent="greentic-desktop-publish/${version}"
 
+          package_name() {
+            sed -n '/^\[package\]/,/^\[/ s/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$1" \
+              | head -n 1
+          }
+
+          is_publishable() {
+            ! sed -n '/^\[package\]/,/^\[/p' "$1" | grep -Eq '^[[:space:]]*publish[[:space:]]*=[[:space:]]*false([[:space:]]|$)'
+          }
+
+          # shellcheck source=ci/crate_publish_order.sh
+          source ci/crate_publish_order.sh
+          validate_publish_crate_order
+
           crate_version_status() {
             local crate="$1"
             curl -L -sS -o /dev/null -w "%{http_code}" \
@@ -394,30 +407,6 @@ jobs:
             return 1
           }
 
-          crates=(
-            greentic-desktop-core
-            greentic-desktop-config
-            greentic-desktop-adapter
-            greentic-distributor-client
-            greentic-desktop-extension
-            greentic-desktop-recorder
-            greentic-desktop-llm
-            greentic-desktop-runner-schema
-            greentic-desktop-policy
-            greentic-desktop-planner
-            greentic-desktop-evidence
-            greentic-desktop-registry
-            greentic-desktop-session
-            greentic-desktop-telemetry
-            greentic-desktop-gui-assets
-            greentic-desktop-gui
-            greentic-desktop-security
-            greentic-desktop-replay
-            greentic-desktop-mcp
-            greentic-desktop-runtime
-            greentic-desktop
-          )
-
-          for crate in "${crates[@]}"; do
+          while IFS= read -r crate; do
             publish_crate "$crate"
-          done
+          done < <(publishable_crates)

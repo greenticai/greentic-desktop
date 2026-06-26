@@ -9,7 +9,6 @@ documentation.workspace = true
 description = "Generic desktop workflow model and compiler for Greentic Desktop."
 keywords.workspace = true
 categories.workspace = true
-publish = false
 include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 
 [lib]
