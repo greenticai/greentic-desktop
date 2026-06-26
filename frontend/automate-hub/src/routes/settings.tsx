@@ -85,6 +85,7 @@ function Card({
 function SettingsPage() {
   const [advanced, setAdvanced] = useState(false);
   const [query, setQuery] = useState("");
+  const [setupStatus, setSetupStatus] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
 
   const runtime = useQuery({ queryKey: ["runtime-info"], queryFn: api.runtimeInfo });
@@ -115,8 +116,8 @@ function SettingsPage() {
   });
   const setupAction = useMutation({
     mutationFn: ({ id, action }: { id: string; action?: string }) => api.setupFix(id, action),
-    onSuccess: (result) => setActionStatus(result.message),
-    onError: (error) => setActionStatus(error instanceof Error ? error.message : "Setup failed"),
+    onSuccess: (result) => setSetupStatus(result.message),
+    onError: (error) => setSetupStatus(error instanceof Error ? error.message : "Setup failed"),
   });
   const saveLlm = useMutation({
     mutationFn: () => api.saveLlmSettings(llm.data!),
@@ -176,6 +177,7 @@ function SettingsPage() {
             </li>
           ))}
         </ul>
+        {setupStatus && <div className="mt-3 text-xs text-muted-foreground">{setupStatus}</div>}
       </Card>
 
       <Card title="Extensions" description="Add support for the apps you want to automate.">
