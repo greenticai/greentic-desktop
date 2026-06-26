@@ -92,6 +92,12 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 66. PR-66 Recording Normalisation, Locators, Redaction, and Evidence
 67. PR-67 Recorder GUI for Real Capture, Evidence Review, and Repair
 68. PR-68 Recorder End-to-End Fixtures and CI Harness
+69. PR-69 Strict LLM Planning Contracts and Repair Loops
+70. PR-70 Requirements Conversation and Clarification Wizard
+71. PR-71 LLM Planner Orchestrator and Capability-Aware Draft Generation
+72. PR-72 Prompt-Based Runner Update and Diff Apply
+73. PR-73 LLM Evaluation Fixtures and Golden Prompt Tests
+74. PR-74 LLM Planning UX, Traceability, and Controls
 
 ## Roadmap Alignment
 
@@ -101,3 +107,4 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 - **Create and operate runners:** PR-39 through PR-43 connect prompt, recording, runners, MCP, evidence, approvals, and refinement to the same backend.
 - **Shipping and hardening:** PR-44 through PR-46 cover Windows click-to-run, GUI security, and user documentation, including extension trust prompts and store workflows.
 - **Generic automation foundation:** PR-54 through PR-62 remove app-specific assumptions from workflow authoring, planning, replay, MCP publication, web automation, and store metadata so Greentic Desktop can prompt, record, execute, and expose automations across desktop technologies.
+- **Reliable LLM authoring and updates:** PR-69 through PR-74 make first-runner creation and prompt-based runner updates schema-constrained, question-driven, repairable, testable, and traceable.
