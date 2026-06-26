@@ -2378,6 +2378,8 @@ fn runner_outputs_json(
             .map(|name| {
                 let value = if name == "result" {
                     arithmetic_result(inputs)
+                } else if name.starts_with("confirmation") {
+                    confirmation_result(inputs)
                 } else {
                     None
                 }
@@ -2396,6 +2398,21 @@ fn runner_outputs_json(
             .collect::<Vec<_>>()
             .join(",")
     )
+}
+
+fn confirmation_result(inputs: &HashMap<String, String>) -> Option<String> {
+    if inputs.is_empty() {
+        return None;
+    }
+    let mut pairs = inputs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    pairs.sort();
+    Some(format!(
+        "CONF-{:08x}",
+        (fnv1a64(pairs.join("\n").as_bytes()) & 0xffff_ffff) as u32
+    ))
 }
 
 fn arithmetic_result(inputs: &HashMap<String, String>) -> Option<String> {
@@ -2859,6 +2876,20 @@ fn planner_available_adapters() -> Vec<AdapterCapabilities> {
                 "vision.screenshot",
                 "vision.find_text",
                 "vision.extract_text",
+            ],
+        ))
+        .capabilities(),
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.java-accessibility",
+            env!("CARGO_PKG_VERSION"),
+            [
+                "java.find_window",
+                "java.find_component",
+                "java.click_component",
+                "java.type_text",
+                "java.read_text",
+                "java.assert_visible",
+                "java.capture_tree",
             ],
         ))
         .capabilities(),
