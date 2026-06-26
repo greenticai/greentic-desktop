@@ -233,6 +233,52 @@ impl StoreIndex {
                     permissions: vec!["screen_capture".to_owned(), "keyboard_mouse".to_owned()],
                 },
                 StoreExtension {
+                    id: "greentic.desktop.linux.x11".to_owned(),
+                    aliases: vec!["linux-x11".to_owned(), "x11".to_owned()],
+                    name: "Linux X11 Desktop Adapter".to_owned(),
+                    description: "Drive native Linux X11 apps through AT-SPI and XTest.".to_owned(),
+                    latest: "1.0.0".to_owned(),
+                    versions: vec!["1.0.0".to_owned()],
+                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/linux-x11:1.0.0"
+                        .to_owned(),
+                    publisher: "greenticai".to_owned(),
+                    platforms: vec!["linux".to_owned()],
+                    capabilities: vec![
+                        "linux.find_window".to_owned(),
+                        "linux.activate_window".to_owned(),
+                        "linux.find_element".to_owned(),
+                        "linux.type_text".to_owned(),
+                        "linux.click_element".to_owned(),
+                        "linux.read_text".to_owned(),
+                    ],
+                    permissions: vec![
+                        "desktop.x11".to_owned(),
+                        "screen_capture".to_owned(),
+                        "keyboard_mouse".to_owned(),
+                    ],
+                },
+                StoreExtension {
+                    id: "greentic.desktop.windows-ui".to_owned(),
+                    aliases: vec!["windows".to_owned(), "windows-ui".to_owned()],
+                    name: "Windows UI Automation Adapter".to_owned(),
+                    description: "Drive native Windows apps through UI Automation.".to_owned(),
+                    latest: "1.0.0".to_owned(),
+                    versions: vec!["1.0.0".to_owned()],
+                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/windows-ui:1.0.0"
+                        .to_owned(),
+                    publisher: "greenticai".to_owned(),
+                    platforms: vec!["windows".to_owned()],
+                    capabilities: vec![
+                        "windows.open_app".to_owned(),
+                        "windows.find_window".to_owned(),
+                        "windows.find_element".to_owned(),
+                        "windows.type_text".to_owned(),
+                        "windows.click_element".to_owned(),
+                        "windows.read_text".to_owned(),
+                    ],
+                    permissions: vec!["desktop.ui_automation".to_owned()],
+                },
+                StoreExtension {
                     id: "greentic.desktop.terminal-tn3270".to_owned(),
                     aliases: vec!["terminal".to_owned(), "tn3270".to_owned()],
                     name: "Terminal TN3270 Adapter".to_owned(),
@@ -365,6 +411,16 @@ mod tests {
             macos.resolved_uri,
             "oci://ghcr.io/greenticai/greentic-desktop/extensions/macos-ax:1.0.0"
         );
+
+        let linux = client
+            .resolve("linux-x11")
+            .expect("linux x11 alias should resolve to Linux X11 adapter");
+        assert_eq!(linux.extension_id, "greentic.desktop.linux.x11");
+
+        let windows = client
+            .resolve("windows")
+            .expect("windows alias should resolve to Windows adapter");
+        assert_eq!(windows.extension_id, "greentic.desktop.windows-ui");
     }
 
     #[test]
