@@ -209,12 +209,6 @@ impl DesktopAdapter for PlaywrightWebAdapter {
                     .fields
                     .insert(field, step.value.clone().unwrap_or_default());
             }
-            "web.click" if target_key(&step.target).contains("submit") => {
-                state.visible_text.push("Customer created".to_owned());
-                state
-                    .identifiers
-                    .insert("customer_id".to_owned(), "CUST-1001".to_owned());
-            }
             "web.click" => {}
             "web.screenshot" => state.visible_text.push("screenshot captured".to_owned()),
             "web.download_file" => state.visible_text.push("download completed".to_owned()),
@@ -340,7 +334,7 @@ mod tests {
     #[test]
     fn selector_strategy_prefers_data_testid() {
         let selector = stable_selector_target(&WebElementMetadata {
-            data_testid: Some("save-customer".to_owned()),
+            data_testid: Some("save-record".to_owned()),
             role: Some("button".to_owned()),
             name: Some("Save".to_owned()),
             label: None,
@@ -351,22 +345,24 @@ mod tests {
         });
 
         let preferred = selector.preferred.expect("preferred selector");
-        assert_eq!(preferred.data_testid, Some("save-customer".to_owned()));
+        assert_eq!(preferred.data_testid, Some("save-record".to_owned()));
         assert_eq!(
             preferred.css,
-            Some("[data-testid='save-customer']".to_owned())
+            Some("[data-testid='save-record']".to_owned())
         );
     }
 
     #[test]
-    fn can_open_fill_submit_and_extract_identifier() {
+    fn can_open_fill_submit_and_extract_seeded_output() {
         let adapter = PlaywrightWebAdapter::new();
+        adapter.insert_visible_text("Record saved");
+        adapter.insert_identifier("confirmation_id", "REC-1001");
         let steps = vec![
             RunnerStep {
                 id: "open".to_owned(),
                 action: "goto".to_owned(),
                 target: LocatorTarget::default(),
-                value: Some("https://example.test/customers/new".to_owned()),
+                value: Some("https://example.test/records/new".to_owned()),
                 required_capability: "web.goto".to_owned(),
             },
             RunnerStep {
@@ -393,17 +389,17 @@ mod tests {
                 id: "created".to_owned(),
                 required_capability: "web.assert_visible".to_owned(),
                 target: target("body"),
-                expected: "Customer created".to_owned(),
+                expected: "Record saved".to_owned(),
             })
             .expect("visible assertion should run");
         assert!(visible.passed);
 
         let id = adapter
             .validate(Assertion {
-                id: "customer_id".to_owned(),
+                id: "confirmation_id".to_owned(),
                 required_capability: "web.extract_text".to_owned(),
-                target: target("Customer ID"),
-                expected: "customer_id".to_owned(),
+                target: target("Confirmation ID"),
+                expected: "confirmation_id".to_owned(),
             })
             .expect("identifier assertion should run");
         assert!(id.passed);

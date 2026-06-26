@@ -127,6 +127,70 @@ pub struct RunnerPackage {
     pub steps: Vec<RunnerStep>,
     pub assertions: Vec<String>,
     pub outputs: Vec<String>,
+    pub open_questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedInputCandidate {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub value: Option<String>,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedSecretCandidate {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedOutputCandidate {
+    pub name: String,
+    pub extractor: OutputExtractorCandidate,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedAssertionCandidate {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub expected: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionRule {
+    pub name: String,
+    pub pattern: String,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputExtractorCandidate {
+    VisibleText(String),
+    TargetText(LocatorTarget),
+    TerminalField { row: usize, col: usize, len: usize },
+    Regex(String),
+    VisionRegion(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenQuestion {
+    pub id: String,
+    pub question: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecordingAnnotations {
+    pub inputs: Vec<RecordedInputCandidate>,
+    pub secrets: Vec<RecordedSecretCandidate>,
+    pub outputs: Vec<RecordedOutputCandidate>,
+    pub assertions: Vec<RecordedAssertionCandidate>,
+    pub redaction_rules: Vec<RedactionRule>,
+    pub submit_actions: Vec<String>,
+    pub open_questions: Vec<OpenQuestion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -244,6 +308,7 @@ pub struct RecordingSession {
     mode: RecordingMode,
     actions: Vec<RecordedAction>,
     prompt_steps: Vec<RunnerStep>,
+    annotations: RecordingAnnotations,
 }
 
 impl RecordingSession {
@@ -253,6 +318,7 @@ impl RecordingSession {
             mode,
             actions: Vec::new(),
             prompt_steps: Vec::new(),
+            annotations: RecordingAnnotations::default(),
         }
     }
 
@@ -275,6 +341,81 @@ impl RecordingSession {
 
     pub fn add_prompt_step(&mut self, step: RunnerStep) {
         self.prompt_steps.push(step);
+    }
+
+    pub fn mark_input(
+        &mut self,
+        name: impl Into<String>,
+        target: LocatorTarget,
+        value: Option<String>,
+    ) {
+        self.annotations.inputs.push(RecordedInputCandidate {
+            name: normalize_field_name(name.into()),
+            target,
+            value,
+            required: true,
+        });
+    }
+
+    pub fn mark_secret(&mut self, name: impl Into<String>, target: LocatorTarget) {
+        self.annotations.secrets.push(RecordedSecretCandidate {
+            name: normalize_field_name(name.into()),
+            target,
+            required: true,
+        });
+    }
+
+    pub fn mark_output(&mut self, name: impl Into<String>, extractor: OutputExtractorCandidate) {
+        self.annotations.outputs.push(RecordedOutputCandidate {
+            name: normalize_field_name(name.into()),
+            extractor,
+            required: true,
+        });
+    }
+
+    pub fn mark_assertion(
+        &mut self,
+        name: impl Into<String>,
+        target: LocatorTarget,
+        expected: impl Into<String>,
+    ) {
+        self.annotations
+            .assertions
+            .push(RecordedAssertionCandidate {
+                name: normalize_field_name(name.into()),
+                target,
+                expected: expected.into(),
+            });
+    }
+
+    pub fn mark_submit_action(&mut self, action_name: impl Into<String>) {
+        self.annotations.submit_actions.push(action_name.into());
+    }
+
+    pub fn add_redaction_rule(
+        &mut self,
+        name: impl Into<String>,
+        pattern: impl Into<String>,
+        replacement: impl Into<String>,
+    ) {
+        self.annotations.redaction_rules.push(RedactionRule {
+            name: normalize_field_name(name.into()),
+            pattern: pattern.into(),
+            replacement: replacement.into(),
+        });
+    }
+
+    pub fn add_open_question(
+        &mut self,
+        id: impl Into<String>,
+        question: impl Into<String>,
+        reason: impl Into<String>,
+    ) {
+        self.annotations.open_questions.push(OpenQuestion {
+            id: normalize_field_name(id.into()),
+            question: question.into(),
+            reason: reason.into(),
+        });
     }
 
     pub fn normalize(&mut self) {
@@ -300,16 +441,38 @@ impl RecordingSession {
                 required_capability,
             }
         }));
+        let derived = derive_recording_candidates(&self.actions, &self.annotations);
 
         RunnerPackage {
             id: self.id,
             version: version.into(),
             mode: self.mode,
-            inputs: vec!["inputs.customer_id".to_owned()],
-            secrets: vec!["secrets.password".to_owned()],
+            inputs: derived
+                .inputs
+                .iter()
+                .map(|input| format!("inputs.{}", input.name))
+                .collect(),
+            secrets: derived
+                .secrets
+                .iter()
+                .map(|secret| format!("secrets.{}", secret.name))
+                .collect(),
             steps,
-            assertions: Vec::new(),
-            outputs: Vec::new(),
+            assertions: derived
+                .assertions
+                .iter()
+                .map(|assertion| assertion.name.clone())
+                .collect(),
+            outputs: derived
+                .outputs
+                .iter()
+                .map(|output| format!("outputs.{}", output.name))
+                .collect(),
+            open_questions: derived
+                .open_questions
+                .iter()
+                .map(|question| question.question.clone())
+                .collect(),
         }
     }
 }
@@ -526,11 +689,15 @@ pub fn normalise_recording(
         id: runner_id,
         version: "0.1.0-draft".to_owned(),
         mode: RecordingMode::HumanDemonstration,
-        inputs: vec!["inputs.recorded_value".to_owned()],
-        secrets: vec!["secrets.password".to_owned()],
+        inputs: derive_raw_event_inputs(&steps),
+        secrets: derive_raw_event_secrets(&steps),
         steps,
         assertions: vec!["recording completed".to_owned()],
-        outputs: Vec::new(),
+        outputs: derive_raw_event_outputs(&contents),
+        open_questions: vec![
+            "Mark the reusable inputs, secrets, and outputs before publishing this recording."
+                .to_owned(),
+        ],
     };
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
@@ -599,9 +766,15 @@ fn transition(
 impl RunnerPackage {
     pub fn render_yaml(&self) -> String {
         let mut output = format!(
-            "id: {}\nversion: {}\nmode: {:?}\nsteps:\n",
+            "id: {}\nversion: {}\nmode: {:?}\n",
             self.id, self.version, self.mode
         );
+        render_string_list(&mut output, "inputs", &self.inputs);
+        render_string_list(&mut output, "secrets", &self.secrets);
+        render_string_list(&mut output, "outputs", &self.outputs);
+        render_string_list(&mut output, "assertions", &self.assertions);
+        render_string_list(&mut output, "open_questions", &self.open_questions);
+        output.push_str("steps:\n");
 
         for step in &self.steps {
             output.push_str(&format!(
@@ -718,13 +891,187 @@ pub fn merge_prompt_and_recorded_steps(
     merged
 }
 
+fn derive_recording_candidates(
+    actions: &[RecordedAction],
+    annotations: &RecordingAnnotations,
+) -> RecordingAnnotations {
+    let mut derived = annotations.clone();
+
+    for action in actions {
+        let target_name = target_label(&action.target);
+        if let Some(value) = &action.value {
+            if value == "{{secret}}" || looks_secretish(&target_name) || looks_secretish(value) {
+                if value == "{{secret}}" && !derived.secrets.is_empty() {
+                    continue;
+                }
+                let name = if value == "{{secret}}" && !looks_secretish(&target_name) {
+                    "recorded_secret".to_owned()
+                } else {
+                    normalize_field_name(if target_name.is_empty() {
+                        "secret"
+                    } else {
+                        &target_name
+                    })
+                };
+                if !derived.secrets.iter().any(|secret| secret.name == name) {
+                    derived.secrets.push(RecordedSecretCandidate {
+                        name,
+                        target: action.target.clone(),
+                        required: true,
+                    });
+                }
+            } else if value.contains("{{inputs.") {
+                let name = value
+                    .trim_matches('{')
+                    .trim_matches('}')
+                    .strip_prefix("inputs.")
+                    .unwrap_or("recorded_input");
+                let name = normalize_field_name(name);
+                if !derived.inputs.iter().any(|input| input.name == name) {
+                    derived.inputs.push(RecordedInputCandidate {
+                        name,
+                        target: action.target.clone(),
+                        value: None,
+                        required: true,
+                    });
+                }
+            }
+        }
+
+        if matches!(action.event_type.as_str(), "copy" | "read_text" | "observe") {
+            if let Some(value) = &action.value {
+                if !value.trim().is_empty() && value != "{{secret}}" {
+                    let name = normalize_field_name(if target_name.is_empty() {
+                        "recorded_output"
+                    } else {
+                        &target_name
+                    });
+                    if !derived.outputs.iter().any(|output| output.name == name) {
+                        derived.outputs.push(RecordedOutputCandidate {
+                            name,
+                            extractor: OutputExtractorCandidate::VisibleText(value.clone()),
+                            required: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if derived.outputs.is_empty() && derived.assertions.is_empty() {
+        derived.open_questions.push(OpenQuestion {
+            id: "missing_output".to_owned(),
+            question: "Which visible value should this runner return as output?".to_owned(),
+            reason: "recording did not mark an output or assertion".to_owned(),
+        });
+    }
+
+    derived
+}
+
+fn derive_raw_event_inputs(steps: &[RunnerStep]) -> Vec<String> {
+    let mut inputs = Vec::new();
+    for step in steps {
+        if let Some(value) = &step.value {
+            if value.contains("{{inputs.") {
+                inputs.push(value.trim_matches('{').trim_matches('}').to_owned());
+            }
+        }
+    }
+    inputs.sort();
+    inputs.dedup();
+    inputs
+}
+
+fn derive_raw_event_secrets(steps: &[RunnerStep]) -> Vec<String> {
+    let mut secrets = Vec::new();
+    for step in steps {
+        if step.value.as_deref() == Some("{{secret}}") {
+            secrets.push("secrets.recorded_secret".to_owned());
+        }
+    }
+    secrets.sort();
+    secrets.dedup();
+    secrets
+}
+
+fn derive_raw_event_outputs(contents: &str) -> Vec<String> {
+    let mut outputs = Vec::new();
+    for line in contents.lines() {
+        let action = json_string_value(line, "type").unwrap_or_default();
+        if matches!(action.as_str(), "copy" | "read_text" | "observe") {
+            if let Some(value) = json_string_value(line, "value") {
+                if !value.trim().is_empty() && !looks_secretish(&value) {
+                    outputs.push("outputs.recorded_output".to_owned());
+                }
+            }
+        }
+    }
+    outputs.sort();
+    outputs.dedup();
+    outputs
+}
+
+fn render_string_list(output: &mut String, name: &str, values: &[String]) {
+    output.push_str(name);
+    output.push_str(":\n");
+    for value in values {
+        output.push_str(&format!("  - {value}\n"));
+    }
+}
+
 pub fn redact_sensitive_value(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
-    if lower.contains("password=") || lower.contains("token=") || lower.contains("secret=") {
+    if looks_secretish(&lower) {
         "{{secret}}".to_owned()
     } else {
         value.to_owned()
     }
+}
+
+fn looks_secretish(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("password")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+}
+
+fn normalize_field_name(value: impl AsRef<str>) -> String {
+    let rendered = value
+        .as_ref()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_owned();
+    if rendered.is_empty() {
+        "value".to_owned()
+    } else {
+        rendered
+    }
+}
+
+fn target_label(target: &LocatorTarget) -> String {
+    target
+        .preferred
+        .as_ref()
+        .and_then(|strategy| {
+            strategy
+                .label
+                .clone()
+                .or_else(|| strategy.name.clone())
+                .or_else(|| strategy.text.clone())
+                .or_else(|| strategy.automation_id.clone())
+        })
+        .unwrap_or_default()
 }
 
 fn normalize_action(action: &RecordedAction) -> String {
@@ -964,6 +1311,7 @@ mod tests {
                 steps: Vec::new(),
                 assertions: Vec::new(),
                 outputs: Vec::new(),
+                open_questions: Vec::new(),
             },
             platforms: PortablePlatformSupport {
                 supported: vec![
@@ -1048,18 +1396,58 @@ mod tests {
 
     #[test]
     fn converts_recording_into_runner_yaml() {
-        let mut session = RecordingSession::new("customer_create", RecordingMode::Hybrid);
+        let mut session = RecordingSession::new("generic_form", RecordingMode::Hybrid);
+        session.mark_input("account number", locator("Account"), None);
+        session.mark_secret("access token", locator("Token"));
+        session.mark_output(
+            "confirmation",
+            OutputExtractorCandidate::TargetText(locator("Confirmation")),
+        );
         session.capture_human_event(
             "greentic.desktop.playwright",
-            event("fill", Some("password=swordfish")),
+            event("fill", Some("token=swordfish")),
             None,
         );
 
         let package = session.into_package("0.1.0");
         let yaml = package.render_yaml();
 
-        assert!(yaml.contains("id: customer_create"));
+        assert!(yaml.contains("id: generic_form"));
+        assert_eq!(package.inputs, vec!["inputs.account_number"]);
+        assert_eq!(package.secrets, vec!["secrets.access_token"]);
+        assert_eq!(package.outputs, vec!["outputs.confirmation"]);
         assert!(yaml.contains("{{secret}}"));
+        assert!(!yaml.contains("customer_id"));
+        assert!(!yaml.contains("secrets.password"));
+    }
+
+    #[test]
+    fn recording_without_marked_output_emits_open_question() {
+        let mut session = RecordingSession::new("generic_click", RecordingMode::HumanDemonstration);
+        session.capture_human_event("greentic.desktop.macos.ax", event("click", None), None);
+
+        let package = session.into_package("0.1.0");
+
+        assert!(package.inputs.is_empty());
+        assert!(package.secrets.is_empty());
+        assert!(package.outputs.is_empty());
+        assert_eq!(package.open_questions.len(), 1);
+        assert!(package.open_questions[0].contains("Which visible value"));
+    }
+
+    #[test]
+    fn recording_can_derive_output_from_read_event() {
+        let mut session = RecordingSession::new("generic_read", RecordingMode::HumanDemonstration);
+        session.capture_human_event(
+            "greentic.desktop.java-accessibility",
+            event("read_text", Some("Completed")),
+            None,
+        );
+
+        let package = session.into_package("0.1.0");
+
+        assert_eq!(package.outputs, vec!["outputs.save"]);
+        assert!(package.open_questions.is_empty());
     }
 
     #[test]
@@ -1209,6 +1597,10 @@ mod tests {
 
         assert_eq!(package.mode, RecordingMode::HumanDemonstration);
         assert!(yaml.contains("{{secret}}"));
+        assert_eq!(package.secrets, vec!["secrets.recorded_secret"]);
+        assert!(package.inputs.is_empty());
+        assert!(!yaml.contains("customer_id"));
+        assert!(!yaml.contains("secrets.password"));
     }
 
     #[test]

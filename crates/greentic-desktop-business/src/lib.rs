@@ -269,11 +269,15 @@ mod tests {
         let mut crm = example_runner_tool();
         crm.package.id = "crm.create_customer".to_owned();
         crm.package.inputs = vec!["email".to_owned(), "company_name".to_owned()];
+        crm.package.secrets = Vec::new();
+        crm.package.steps[0].value = Some("{{email}}".to_owned());
         crm.package.outputs = vec!["customer_id".to_owned()];
 
         let mut billing = example_runner_tool();
         billing.package.id = "billing.create_account".to_owned();
         billing.package.inputs = vec!["customer_id".to_owned()];
+        billing.package.secrets = Vec::new();
+        billing.package.steps[0].value = Some("{{customer_id}}".to_owned());
         billing.package.outputs = vec!["billing_account_id".to_owned()];
 
         vec![crm, billing]
@@ -308,7 +312,7 @@ mod tests {
             .expect("billing step");
         assert_eq!(
             billing.resolved_inputs.get("customer_id"),
-            Some(&"resolved".to_owned())
+            Some(&"buyer@example.test".to_owned())
         );
     }
 

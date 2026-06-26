@@ -22,6 +22,9 @@ include = [
 name = "greentic_desktop_core"
 path = "src/lib.rs"
 
+[dependencies]
+serde.workspace = true
+
 [[bench]]
 name = "perf"
 harness = false

@@ -20,5 +20,7 @@ greentic-desktop-adapter.workspace = true
 greentic-desktop-core.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-replay.workspace = true
+greentic-desktop-runner-schema.workspace = true
 greentic-desktop-security.workspace = true
 greentic-desktop-session.workspace = true
+greentic-desktop-workflow.workspace = true

@@ -237,6 +237,7 @@ name = "greentic-desktop-adapter"
 version = "0.1.2"
 dependencies = [
  "greentic-desktop-core",
+ "serde",
 ]
 
 [[package]]
@@ -255,6 +256,7 @@ name = "greentic-desktop-core"
 version = "0.1.2"
 dependencies = [
  "criterion",
+ "serde",
 ]
 
 [[package]]
@@ -319,6 +321,7 @@ name = "greentic-desktop-java"
 version = "0.1.2"
 dependencies = [
  "greentic-desktop-adapter",
+ "greentic-desktop-workflow",
 ]
 
 [[package]]
@@ -327,6 +330,7 @@ version = "0.1.2"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-platform",
+ "greentic-desktop-workflow",
 ]
 
 [[package]]
@@ -346,6 +350,7 @@ version = "0.1.2"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-platform",
+ "greentic-desktop-workflow",
 ]
 
 [[package]]
@@ -356,8 +361,10 @@ dependencies = [
  "greentic-desktop-core",
  "greentic-desktop-recorder",
  "greentic-desktop-replay",
+ "greentic-desktop-runner-schema",
  "greentic-desktop-security",
  "greentic-desktop-session",
+ "greentic-desktop-workflow",
 ]
 
 [[package]]
@@ -448,6 +455,9 @@ dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-core",
  "greentic-desktop-recorder",
+ "greentic-desktop-workflow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -486,6 +496,7 @@ name = "greentic-desktop-terminal"
 version = "0.1.2"
 dependencies = [
  "greentic-desktop-adapter",
+ "greentic-desktop-workflow",
 ]
 
 [[package]]
@@ -530,6 +541,15 @@ name = "greentic-desktop-windows"
 version = "0.1.2"
 dependencies = [
  "greentic-desktop-adapter",
+ "greentic-desktop-workflow",
+]
+
+[[package]]
+name = "greentic-desktop-workflow"
+version = "0.1.2"
+dependencies = [
+ "greentic-desktop-adapter",
+ "serde",
 ]
 
 [[package]]
@@ -544,6 +564,9 @@ dependencies = [
 [[package]]
 name = "greentic-distributor-client"
 version = "0.1.2"
+dependencies = [
+ "greentic-desktop-extension",
+]
 
 [[package]]
 name = "half"

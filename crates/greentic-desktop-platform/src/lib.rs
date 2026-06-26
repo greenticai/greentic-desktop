@@ -403,6 +403,7 @@ mod tests {
                 .collect(),
             assertions: Vec::new(),
             outputs: Vec::new(),
+            open_questions: Vec::new(),
         }
     }
 

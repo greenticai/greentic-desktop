@@ -77,6 +77,15 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 51. PR-51 Extension Build and Publish Pipeline to GHCR
 52. PR-52 Extension Signing, Verification and Trust Policy
 53. PR-53 Extension Manager API for Web UI
+54. PR-54 Generic DesktopWorkflow Model and Adapter Compilation
+55. PR-55 Higher-Level Runner Schema and Semantic Actions
+56. PR-56 Recorder-Derived Inputs, Secrets, Outputs and Questions
+57. PR-57 Capability-Router Planner
+58. PR-58 Serde Runner Schema and JSON Schema Export
+59. PR-59 Real Replay Dispatch, Assertions and Output Extraction
+60. PR-60 Generic Web Adapter Semantics
+61. PR-61 Generic MCP Published Runner Fixtures
+62. PR-62 Store Index Generation from Extension Manifests
 
 ## Roadmap Alignment
 
@@ -85,3 +94,4 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 - **Remote extension backend:** PR-47 through PR-53 define package format, distributor resolution, local store, friendly index, GHCR publishing, signing/trust, and the web API.
 - **Create and operate runners:** PR-39 through PR-43 connect prompt, recording, runners, MCP, evidence, approvals, and refinement to the same backend.
 - **Shipping and hardening:** PR-44 through PR-46 cover Windows click-to-run, GUI security, and user documentation, including extension trust prompts and store workflows.
+- **Generic automation foundation:** PR-54 through PR-62 remove app-specific assumptions from workflow authoring, planning, replay, MCP publication, web automation, and store metadata so Greentic Desktop can prompt, record, execute, and expose automations across desktop technologies.

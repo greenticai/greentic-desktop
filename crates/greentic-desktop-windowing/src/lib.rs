@@ -304,6 +304,7 @@ mod tests {
             }],
             assertions: Vec::new(),
             outputs: Vec::new(),
+            open_questions: Vec::new(),
         }
     }
 

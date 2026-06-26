@@ -13,3 +13,6 @@ categories.workspace = true
 [lib]
 name = "greentic_distributor_client"
 path = "src/lib.rs"
+
+[dependencies]
+greentic-desktop-extension.workspace = true

@@ -1,4 +1,5 @@
 use greentic_desktop_core::{Capability, RiskLevel};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -60,20 +61,20 @@ impl AdapterCapabilities {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObserveContext {
     pub session_id: String,
     pub target: Option<LocatorTarget>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
     pub adapter_id: String,
     pub summary: String,
     pub visible_text: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerStep {
     pub id: String,
     pub action: String,
@@ -89,7 +90,7 @@ pub struct StepResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assertion {
     pub id: String,
     pub required_capability: String,
@@ -111,14 +112,14 @@ pub struct RecordedEvent {
     pub value: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LocatorTarget {
     pub preferred: Option<LocatorStrategy>,
     pub fallback: Option<LocatorStrategy>,
     pub visual_fallback: Option<VisualLocator>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LocatorStrategy {
     pub data_testid: Option<String>,
     pub role: Option<String>,
@@ -135,7 +136,7 @@ pub struct LocatorStrategy {
     pub keyboard_shortcut: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisualLocator {
     pub image: String,
     pub region: Option<String>,

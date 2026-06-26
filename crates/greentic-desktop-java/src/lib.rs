@@ -3,6 +3,11 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_workflow::{
+    compile_workflow, workflow_id_component, DesktopWorkflow, WorkflowAction, WorkflowActionKind,
+    WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput, WorkflowOutputExtractor, WorkflowRisk,
+    WorkflowTarget, WorkflowValueType,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -279,62 +284,15 @@ pub fn run_java_app_workflow(
     adapter: &JavaDesktopAdapter,
     workflow: JavaAppWorkflow,
 ) -> AdapterResult<JavaAppWorkflowOutcome> {
-    let mut steps = vec![RunnerStep {
-        id: "find-window".to_owned(),
-        action: "find_window".to_owned(),
-        target: LocatorTarget::default(),
-        value: Some(workflow.window_title.clone()),
-        required_capability: "java.find_window".to_owned(),
-    }];
-
-    for input in &workflow.inputs {
-        let step_id = workflow_id_component(&input.name);
-        steps.push(RunnerStep {
-            id: format!("find-input-{step_id}"),
-            action: "find_component".to_owned(),
-            target: input.target.clone(),
-            value: None,
-            required_capability: "java.find_component".to_owned(),
-        });
-        steps.push(RunnerStep {
-            id: format!("type-input-{step_id}"),
-            action: "type_text".to_owned(),
-            target: input.target.clone(),
-            value: Some(input.value.clone()),
-            required_capability: "java.type_text".to_owned(),
-        });
-    }
-
-    if let Some(submit) = &workflow.submit {
-        steps.push(RunnerStep {
-            id: format!("submit-{}", workflow_id_component(&submit.name)),
-            action: "click_component".to_owned(),
-            target: submit.target.clone(),
-            value: None,
-            required_capability: "java.click_component".to_owned(),
-        });
-    }
-
-    for output in &workflow.outputs {
-        let step_id = workflow_id_component(&output.name);
-        steps.push(RunnerStep {
-            id: format!("find-output-{step_id}"),
-            action: "find_component".to_owned(),
-            target: output.target.clone(),
-            value: None,
-            required_capability: "java.find_component".to_owned(),
-        });
-        steps.push(RunnerStep {
-            id: format!("read-output-{step_id}"),
-            action: "read_text".to_owned(),
-            target: output.target.clone(),
-            value: None,
-            required_capability: "java.read_text".to_owned(),
-        });
-    }
+    let prompt = workflow.prompt.clone();
+    let window_title = workflow.window_title.clone();
+    let output_specs = workflow.outputs.clone();
+    let compiled = compile_workflow(&java_desktop_workflow(&workflow))
+        .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
+    let steps = compiled.steps;
 
     let results = adapter.replay(&steps)?;
-    for output in &workflow.outputs {
+    for output in &output_specs {
         if let Some(expected) = &output.expected {
             adapter
                 .state
@@ -346,16 +304,13 @@ pub fn run_java_app_workflow(
     }
     let visible = adapter
         .observe(ObserveContext {
-            session_id: format!(
-                "java-app-workflow-{}",
-                workflow_id_component(&workflow.window_title)
-            ),
-            target: workflow.outputs.first().map(|output| output.target.clone()),
+            session_id: format!("java-app-workflow-{}", workflow_id_component(&window_title)),
+            target: output_specs.first().map(|output| output.target.clone()),
         })?
         .visible_text;
 
     let mut outputs = BTreeMap::new();
-    for output in workflow.outputs {
+    for output in output_specs {
         let value = output
             .expected
             .or_else(|| {
@@ -377,29 +332,56 @@ pub fn run_java_app_workflow(
     }
 
     Ok(JavaAppWorkflowOutcome {
-        prompt: workflow.prompt,
+        prompt,
         outputs,
         steps: results,
     })
 }
 
-fn workflow_id_component(value: &str) -> String {
-    let rendered = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned();
-    if rendered.is_empty() {
-        "item".to_owned()
-    } else {
-        rendered
+fn java_desktop_workflow(workflow: &JavaAppWorkflow) -> DesktopWorkflow {
+    DesktopWorkflow {
+        id: format!(
+            "java-app-workflow-{}",
+            workflow_id_component(&workflow.window_title)
+        ),
+        summary: workflow.prompt.clone(),
+        target: WorkflowTarget::java_app(workflow.window_title.clone()),
+        inputs: workflow
+            .inputs
+            .iter()
+            .map(|input| WorkflowInput {
+                name: input.name.clone(),
+                value_type: WorkflowValueType::String,
+                required: true,
+                secret: false,
+                target: input.target.clone(),
+                value_template: input.value.clone(),
+            })
+            .collect(),
+        actions: workflow
+            .submit
+            .iter()
+            .map(|submit| WorkflowAction {
+                name: submit.name.clone(),
+                kind: WorkflowActionKind::Click,
+                target: submit.target.clone(),
+                value_template: None,
+                risk: WorkflowRisk::Low,
+            })
+            .collect(),
+        outputs: workflow
+            .outputs
+            .iter()
+            .map(|output| WorkflowOutput {
+                name: output.name.clone(),
+                value_type: WorkflowValueType::String,
+                extractor: WorkflowOutputExtractor::TargetText(output.target.clone()),
+                required: true,
+                expected: output.expected.clone(),
+            })
+            .collect(),
+        assertions: Vec::new(),
+        evidence_policy: WorkflowEvidencePolicy::default(),
     }
 }
 
