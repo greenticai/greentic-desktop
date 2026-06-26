@@ -42,7 +42,9 @@ function approvalForExtension(extension: ExtensionDto) {
 
   const requiresApproval =
     permissions.has("screen_capture") ||
+    permissions.has("desktop.screenshot") ||
     permissions.has("keyboard_mouse") ||
+    permissions.has("desktop.input") ||
     permissions.has("filesystem.write");
   if (!requiresApproval) {
     return {};
@@ -56,8 +58,8 @@ function approvalForExtension(extension: ExtensionDto) {
   }
 
   return {
-    approveScreenCapture: permissions.has("screen_capture"),
-    approveKeyboardMouse: permissions.has("keyboard_mouse"),
+    approveScreenCapture: permissions.has("screen_capture") || permissions.has("desktop.screenshot"),
+    approveKeyboardMouse: permissions.has("keyboard_mouse") || permissions.has("desktop.input"),
     approveFilesystemWrite: permissions.has("filesystem.write"),
   };
 }

@@ -513,6 +513,15 @@ fn api_error_json(code: &str, message: &str) -> String {
     )
 }
 
+fn api_error_json_with_details(code: &str, message: &str, details: &str) -> String {
+    format!(
+        r#"{{"ok":false,"error":{{"code":"{}","message":"{}","details":{}}}}}"#,
+        escape_json(code),
+        escape_json(message),
+        details
+    )
+}
+
 fn runtime_info_json(addr: SocketAddr, state: &GuiApiState) -> String {
     format!(
         r#"{{"appVersion":"{}","platform":"{}","runtimeHome":"{}","evidenceStore":"{}","guiUrl":"http://{}/","config":{{"mcpBind":"{}"}},"installedCoreAdapterIds":{}}}"#,
@@ -3083,6 +3092,26 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
         &approval,
     );
     if !verification.allowed {
+        let approval_permissions = missing_extension_approval_permissions(&metadata, &approval);
+        if !approval_permissions.is_empty() {
+            let prompts = approval_permissions
+                .iter()
+                .map(|permission| permission_prompt_label(permission))
+                .collect::<Vec<_>>();
+            return Err(api_error_json_with_details(
+                "extension.permission_approval_required",
+                &format!(
+                    "Installing {} requires approval for: {}.",
+                    metadata.name,
+                    prompts.join(", ")
+                ),
+                &format!(
+                    r#"{{"permissions":{},"permissionPrompts":{}}}"#,
+                    string_array_json(&approval_permissions),
+                    string_array_json(&prompts)
+                ),
+            ));
+        }
         return Err(api_error_json(
             "extension.trust_policy_blocked",
             &verification.reasons.join("; "),
@@ -3146,6 +3175,23 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
         string_array_json(&metadata.capabilities),
         phases
     ))
+}
+
+fn missing_extension_approval_permissions(
+    metadata: &ExtensionPackageMetadata,
+    approval: &PermissionApproval,
+) -> Vec<String> {
+    let mut permissions = Vec::new();
+    if metadata.permissions.screen_capture && !approval.screen_capture {
+        permissions.push("screen_capture".to_owned());
+    }
+    if metadata.permissions.keyboard_mouse && !approval.keyboard_mouse {
+        permissions.push("keyboard_mouse".to_owned());
+    }
+    if metadata.permissions.filesystem == "write" && !approval.filesystem_write {
+        permissions.push("filesystem.write".to_owned());
+    }
+    permissions
 }
 
 fn extension_action_json(path: &str, state: &GuiApiState) -> Result<String, String> {
@@ -4443,8 +4489,10 @@ mod tests {
         );
         let blocked = String::from_utf8_lossy(&blocked);
         assert!(blocked.contains("HTTP/1.1 400 Bad Request"));
-        assert!(blocked.contains("extension.trust_policy_blocked"));
-        assert!(blocked.contains("screen capture permission requires approval"));
+        assert!(blocked.contains("extension.permission_approval_required"));
+        assert!(blocked.contains("requires approval for: Screen capture"));
+        assert!(blocked.contains("\"permissions\":[\"screen_capture\"]"));
+        assert!(blocked.contains("\"permissionPrompts\":[\"Screen capture\"]"));
 
         let installed = get(handle.addr(), "/api/v1/extensions/installed");
         assert!(!String::from_utf8_lossy(&installed).contains("greentic.desktop.vision"));
