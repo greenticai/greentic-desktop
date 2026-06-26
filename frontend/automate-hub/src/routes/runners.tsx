@@ -304,6 +304,7 @@ function RunnersPage() {
         {items.map((r) => (
           <div
             key={r.id}
+            data-testid={`runner-${r.id}`}
             className="rounded-2xl border bg-card p-6 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-elegant)] transition-shadow flex flex-col"
           >
             <div className="flex items-start justify-between gap-3 mb-2">
@@ -385,6 +386,7 @@ function RunnersPage() {
                 <Button
                   size="sm"
                   className="gap-1.5"
+                  data-testid={`runner-${r.id}-run`}
                   disabled={busy}
                   onClick={() => startExecution(r)}
                 >
@@ -425,6 +427,7 @@ function RunnersPage() {
                     <div key={field}>
                       <label className="text-xs text-muted-foreground">{field}</label>
                       <Input
+                        data-testid={`runner-${r.id}-input-${field}`}
                         className="mt-1"
                         value={runnerInputs[r.id]?.[field] ?? ""}
                         onChange={(event) => updateRunnerInput(r.id, field, event.target.value)}
@@ -435,6 +438,7 @@ function RunnersPage() {
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button
                     size="sm"
+                    data-testid={`runner-${r.id}-run-confirm`}
                     disabled={busy}
                     onClick={() => runAction(r, execution.action, runnerInputs[r.id] ?? {})}
                   >

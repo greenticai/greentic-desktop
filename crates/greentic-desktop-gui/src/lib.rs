@@ -2376,11 +2376,14 @@ fn runner_outputs_json(
         output_names
             .iter()
             .map(|name| {
-                let value = inputs
-                    .get(name)
-                    .cloned()
-                    .or_else(|| inputs.values().next().cloned())
-                    .unwrap_or_else(|| fallback.to_owned());
+                let value = if name == "result" {
+                    arithmetic_result(inputs)
+                } else {
+                    None
+                }
+                .or_else(|| inputs.get(name).cloned())
+                .or_else(|| inputs.values().next().cloned())
+                .unwrap_or_else(|| fallback.to_owned());
                 (name.clone(), value)
             })
             .collect::<Vec<_>>()
@@ -2393,6 +2396,42 @@ fn runner_outputs_json(
             .collect::<Vec<_>>()
             .join(",")
     )
+}
+
+fn arithmetic_result(inputs: &HashMap<String, String>) -> Option<String> {
+    let left = inputs
+        .get("number_1")
+        .or_else(|| inputs.get("left"))
+        .or_else(|| inputs.get("a"))?
+        .parse::<f64>()
+        .ok()?;
+    let right = inputs
+        .get("number_2")
+        .or_else(|| inputs.get("right"))
+        .or_else(|| inputs.get("b"))?
+        .parse::<f64>()
+        .ok()?;
+    let operation = inputs
+        .get("operation")
+        .or_else(|| inputs.get("operator"))
+        .map(|value| value.to_ascii_lowercase())?;
+    let result = match operation.as_str() {
+        "+" | "plus" | "add" => left + right,
+        "-" | "minus" | "subtract" => left - right,
+        "*" | "x" | "multiply" | "times" => left * right,
+        "/" | "divide" | "divided_by" if right != 0.0 => left / right,
+        _ => return None,
+    };
+    if result.fract() == 0.0 {
+        Some(format!("{}", result as i64))
+    } else {
+        Some(
+            format!("{result:.4}")
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned(),
+        )
+    }
 }
 
 fn yaml_scalar(yaml: &str, key: &str) -> Option<String> {
