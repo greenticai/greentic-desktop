@@ -70,6 +70,60 @@ pub struct PlannerResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerOrchestrationResult {
+    pub requirements: RunnerRequirements,
+    pub route: CapabilityRoute,
+    pub draft: Option<RunnerDraft>,
+    pub request_json: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequirementsStatus {
+    NeedsClarification,
+    ReadyToPlan,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannerQuestionKind {
+    FreeText,
+    SingleChoice(Vec<String>),
+    FieldDefinition,
+    Secret,
+    RiskConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerQuestion {
+    pub id: String,
+    pub question: String,
+    pub reason: String,
+    pub kind: PlannerQuestionKind,
+    pub blocking: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequirementField {
+    pub name: String,
+    pub required: bool,
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerRequirements {
+    pub id: String,
+    pub task: String,
+    pub status: RequirementsStatus,
+    pub target_app: Option<String>,
+    pub target_technology: Option<PlannedTechnology>,
+    pub inputs: Vec<RequirementField>,
+    pub outputs: Vec<RequirementField>,
+    pub assumptions: Vec<String>,
+    pub open_questions: Vec<PlannerQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannerDiagnostic {
     pub code: String,
     pub message: String,
@@ -105,15 +159,40 @@ pub fn plan_prompt_with_llm(
     }
 
     let llm_context = llm_context(context);
-    let request = LlmRequestEnvelope::prompt_to_runner(prompt, llm_context);
+    let request = LlmRequestEnvelope::prompt_to_runner(prompt, llm_context.clone());
     let request_json = request.render_json();
-    let response = client
-        .complete(&request)
-        .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
-    let document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
-    validate_capabilities(context, &document.required_capabilities)?;
-    validate_planned_runner(&document, &options.policy)
-        .map_err(|err| diagnostic(&err.code, &err.message))?;
+    let mut current_request = request;
+    let max_attempts = usize::from(current_request.model_policy.max_retries) + 1;
+    let mut document = None;
+    let mut last_diagnostic = None;
+    for _ in 0..max_attempts {
+        let response = client
+            .complete(&current_request)
+            .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
+        match validate_llm_runner_document(&response.content, context, &options.policy) {
+            Ok(valid) => {
+                document = Some(valid);
+                break;
+            }
+            Err(err) => {
+                current_request = LlmRequestEnvelope::repair_prompt_to_runner(
+                    prompt,
+                    llm_context.clone(),
+                    &response.content,
+                    format!("{}: {}", err.code, err.message),
+                );
+                last_diagnostic = Some(err);
+            }
+        }
+    }
+    let document = document.ok_or_else(|| {
+        last_diagnostic.unwrap_or_else(|| {
+            diagnostic(
+                "planner.invalid_json",
+                "LLM did not return a valid runner draft",
+            )
+        })
+    })?;
 
     let required_adapters = adapters_for_capabilities(context, &document.required_capabilities);
     let risk = document.risk_level;
@@ -140,11 +219,140 @@ pub fn plan_prompt_with_llm(
     })
 }
 
+pub fn orchestrate_prompt_with_llm(
+    prompt: &str,
+    context: &PlanningContext,
+    options: &PlannerOptions,
+    client: &impl GreenticLlmClient,
+) -> Result<PlannerOrchestrationResult, PlannerDiagnostic> {
+    let requirements = analyze_prompt_requirements(prompt, context);
+    let route = route_capabilities(prompt, context);
+    if requirements.status != RequirementsStatus::ReadyToPlan {
+        return Ok(PlannerOrchestrationResult {
+            requirements,
+            route,
+            draft: None,
+            request_json: None,
+            warnings: vec!["requirements need clarification before planning".to_owned()],
+        });
+    }
+    let planned = plan_prompt_with_llm(prompt, context, options, client)?;
+    Ok(PlannerOrchestrationResult {
+        requirements,
+        route,
+        draft: Some(planned.draft),
+        request_json: Some(planned.request_json),
+        warnings: Vec::new(),
+    })
+}
+
+fn validate_llm_runner_document(
+    content: &str,
+    context: &PlanningContext,
+    policy: &PlannerPolicy,
+) -> Result<greentic_desktop_runner_schema::RunnerDraftDocument, PlannerDiagnostic> {
+    let document = parse_runner_draft_json(content).map_err(from_schema)?;
+    validate_capabilities(context, &document.required_capabilities)?;
+    validate_planned_runner(&document, policy)
+        .map_err(|err| diagnostic(&err.code, &err.message))?;
+    Ok(document)
+}
+
 pub fn save_draft_runner(draft: &RunnerDraft, path: &Path) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, draft.render_yaml())
+}
+
+pub fn analyze_prompt_requirements(prompt: &str, context: &PlanningContext) -> RunnerRequirements {
+    let lower = prompt.to_ascii_lowercase();
+    let route = route_capabilities(prompt, context);
+    let inputs = infer_inputs(&lower)
+        .into_iter()
+        .map(|name| RequirementField {
+            name: name.trim_start_matches("inputs.").to_owned(),
+            required: true,
+            secret: false,
+        })
+        .collect::<Vec<_>>();
+    let outputs = infer_outputs(&lower)
+        .into_iter()
+        .map(|name| RequirementField {
+            name: name.trim_start_matches("outputs.").to_owned(),
+            required: true,
+            secret: false,
+        })
+        .collect::<Vec<_>>();
+    let mut questions = Vec::new();
+    if prompt.trim().is_empty() {
+        questions.push(PlannerQuestion {
+            id: "task".to_owned(),
+            question: "What desktop task should this runner perform?".to_owned(),
+            reason: "A task description is required before planning.".to_owned(),
+            kind: PlannerQuestionKind::FreeText,
+            blocking: true,
+        });
+    }
+    if route.confidence < 50 {
+        questions.push(PlannerQuestion {
+            id: "target_technology".to_owned(),
+            question: "Which application or technology should Greentic automate?".to_owned(),
+            reason: "The prompt does not identify a reliable automation surface.".to_owned(),
+            kind: PlannerQuestionKind::SingleChoice(vec![
+                "web".to_owned(),
+                "native desktop".to_owned(),
+                "java".to_owned(),
+                "terminal".to_owned(),
+                "remote visual".to_owned(),
+            ]),
+            blocking: true,
+        });
+    }
+    if lower.contains("login") && !lower.contains("service account") {
+        questions.push(PlannerQuestion {
+            id: "credentials".to_owned(),
+            question: "Which credentials or service account should be used?".to_owned(),
+            reason: "Login automation must not guess credential handling.".to_owned(),
+            kind: PlannerQuestionKind::Secret,
+            blocking: true,
+        });
+    }
+    if outputs.is_empty() {
+        questions.push(PlannerQuestion {
+            id: "outputs".to_owned(),
+            question: "Which output should this runner return?".to_owned(),
+            reason: "Reusable runners need an explicit success value or extracted output."
+                .to_owned(),
+            kind: PlannerQuestionKind::FieldDefinition,
+            blocking: true,
+        });
+    }
+    if lower.contains("delete") || lower.contains("payment") {
+        questions.push(PlannerQuestion {
+            id: "risk_confirmation".to_owned(),
+            question: "Should this high-risk action require approval before execution?".to_owned(),
+            reason: "Destructive or payment actions require explicit risk handling.".to_owned(),
+            kind: PlannerQuestionKind::RiskConfirmation,
+            blocking: true,
+        });
+    }
+    let status = if questions.iter().any(|question| question.blocking) {
+        RequirementsStatus::NeedsClarification
+    } else {
+        RequirementsStatus::ReadyToPlan
+    };
+    RunnerRequirements {
+        id: format!("req_{:016x}", stable_hash(prompt.as_bytes())),
+        task: prompt.to_owned(),
+        status,
+        target_app: infer_url(prompt),
+        target_technology: Some(route.technology),
+        inputs,
+        outputs,
+        assumptions: Vec::new(),
+        open_questions: questions,
+    }
 }
 
 pub fn plan_prompt(prompt: &str, context: &PlanningContext) -> RunnerDraft {
@@ -798,10 +1006,19 @@ fn runner_id(prompt: &str) -> String {
         .join("_")
 }
 
+fn stable_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_desktop_llm::StaticLlmClient;
+    use greentic_desktop_llm::{SequenceLlmClient, StaticLlmClient};
 
     fn context() -> PlanningContext {
         PlanningContext {
@@ -985,6 +1202,68 @@ mod tests {
         assert!(!draft.open_questions.is_empty());
     }
 
+    #[test]
+    fn vague_prompt_returns_structured_requirement_questions() {
+        let requirements = analyze_prompt_requirements("", &context());
+
+        assert_eq!(requirements.status, RequirementsStatus::NeedsClarification);
+        assert!(requirements
+            .open_questions
+            .iter()
+            .any(|question| question.id == "task" && question.blocking));
+    }
+
+    #[test]
+    fn login_prompt_asks_credentials_question() {
+        let requirements = analyze_prompt_requirements(
+            "Open https://example.test and login and return status",
+            &context(),
+        );
+
+        assert_eq!(requirements.status, RequirementsStatus::NeedsClarification);
+        assert!(requirements
+            .open_questions
+            .iter()
+            .any(|question| question.id == "credentials"));
+    }
+
+    #[test]
+    fn calculator_prompt_derives_inputs_outputs_without_questions() {
+        let requirements = analyze_prompt_requirements(
+            "Open calculator with number 1, number 2 and operation and return result",
+            &context_with(
+                vec![AdapterCapabilities::new(
+                    "greentic.desktop.windows-ui",
+                    "1.0.0",
+                    [
+                        "windows.open_app",
+                        "windows.find_element",
+                        "windows.read_text",
+                    ],
+                )],
+                vec!["desktop app calculator"],
+            ),
+        );
+
+        assert_eq!(requirements.status, RequirementsStatus::ReadyToPlan);
+        assert!(requirements
+            .inputs
+            .iter()
+            .any(|field| field.name == "number_1"));
+        assert!(requirements
+            .inputs
+            .iter()
+            .any(|field| field.name == "number_2"));
+        assert!(requirements
+            .inputs
+            .iter()
+            .any(|field| field.name == "operation"));
+        assert!(requirements
+            .outputs
+            .iter()
+            .any(|field| field.name == "result"));
+    }
+
     fn valid_llm() -> StaticLlmClient {
         StaticLlmClient::ok(
             r#"{
@@ -1021,6 +1300,36 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_returns_questions_before_planning() {
+        let result =
+            orchestrate_prompt_with_llm("", &context(), &PlannerOptions::default(), &valid_llm())
+                .expect("orchestrator");
+
+        assert!(result.draft.is_none());
+        assert_eq!(
+            result.requirements.status,
+            RequirementsStatus::NeedsClarification
+        );
+        assert!(!result.requirements.open_questions.is_empty());
+    }
+
+    #[test]
+    fn orchestrator_generates_draft_when_requirements_are_ready() {
+        let result = orchestrate_prompt_with_llm(
+            "Open https://example.test with company name and email and return customer id",
+            &context(),
+            &PlannerOptions::default(),
+            &valid_llm(),
+        )
+        .expect("orchestrator");
+
+        assert_eq!(result.route.technology, PlannedTechnology::Web);
+        assert!(result.draft.is_some());
+        assert!(result.request_json.is_some());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
     fn invalid_json_response_returns_diagnostic() {
         let err = plan_prompt_with_llm(
             "Create CRM customer",
@@ -1034,6 +1343,35 @@ mod tests {
     }
 
     #[test]
+    fn invalid_json_response_can_be_repaired() {
+        let client = SequenceLlmClient::new([
+            "not json",
+            r#"{
+                "runner_id": "crm.create_customer",
+                "version": "0.1.0-draft",
+                "summary": "Create a customer",
+                "risk_level": "medium",
+                "required_capabilities": ["web.goto"],
+                "inputs": {"company_name": {"type": "string", "required": true}},
+                "outputs": {"customer_id": {"type": "string"}},
+                "steps": [{"id": "open", "action": "goto", "required_capability": "web.goto"}],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        ]);
+
+        let result = plan_prompt_with_llm(
+            "Create CRM customer",
+            &context(),
+            &PlannerOptions::default(),
+            &client,
+        )
+        .expect("repair succeeds");
+
+        assert_eq!(result.draft.package.id, "crm.create_customer");
+    }
+
+    #[test]
     fn schema_invalid_response_returns_diagnostic() {
         let err = plan_prompt_with_llm(
             "Create CRM customer",
@@ -1044,6 +1382,35 @@ mod tests {
         .expect_err("schema invalid");
 
         assert_eq!(err.code, "planner.schema_mismatch");
+    }
+
+    #[test]
+    fn schema_invalid_response_can_be_repaired() {
+        let client = SequenceLlmClient::new([
+            r#"{"runner_id": ""}"#,
+            r#"{
+                "runner_id": "crm.create_customer",
+                "version": "0.1.0-draft",
+                "summary": "Create a customer",
+                "risk_level": "medium",
+                "required_capabilities": ["web.goto"],
+                "inputs": {"company_name": {"type": "string", "required": true}},
+                "outputs": {"customer_id": {"type": "string"}},
+                "steps": [{"id": "open", "action": "goto", "required_capability": "web.goto"}],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        ]);
+
+        let result = plan_prompt_with_llm(
+            "Create CRM customer",
+            &context(),
+            &PlannerOptions::default(),
+            &client,
+        )
+        .expect("repair succeeds");
+
+        assert_eq!(result.draft.package.outputs, vec!["outputs.customer_id"]);
     }
 
     #[test]

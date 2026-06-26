@@ -44,6 +44,25 @@ impl LlmRequestEnvelope {
         }
     }
 
+    pub fn repair_prompt_to_runner(
+        prompt: impl AsRef<str>,
+        context: LlmPlanningContext,
+        previous_output: impl AsRef<str>,
+        diagnostics: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            task: "desktop.prompt_to_runner.repair".to_owned(),
+            model_policy: ModelPolicy::default(),
+            context,
+            user_prompt: format!(
+                "Original request:\n{}\n\nPrevious invalid JSON:\n{}\n\nValidation diagnostics:\n{}\n\nReturn a complete corrected JSON object matching the Greentic runner draft schema.",
+                prompt.as_ref(),
+                previous_output.as_ref(),
+                diagnostics.as_ref()
+            ),
+        }
+    }
+
     pub fn render_json(&self) -> String {
         format!(
             "{{\"task\":\"{}\",\"model_policy\":{{\"temperature\":0.{},\"response_format\":\"{}\",\"max_retries\":{}}},\"context\":{{\"available_adapters\":{},\"available_mcp_tools\":{},\"session_profiles\":{},\"existing_runners\":{},\"ltm_examples\":{},\"security_policy\":{},\"desktop_observation\":{}}},\"user_prompt\":\"{}\"}}",
@@ -170,6 +189,40 @@ impl StaticLlmClient {
 impl GreenticLlmClient for StaticLlmClient {
     fn complete(&self, _request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError> {
         self.response.clone()
+    }
+}
+
+#[derive(Debug)]
+pub struct SequenceLlmClient {
+    responses: std::sync::Mutex<Vec<Result<LlmResponse, LlmError>>>,
+}
+
+impl SequenceLlmClient {
+    pub fn new(contents: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(
+                contents
+                    .into_iter()
+                    .map(|content| {
+                        Ok(LlmResponse {
+                            content: content.into(),
+                        })
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl GreenticLlmClient for SequenceLlmClient {
+    fn complete(&self, _request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError> {
+        let mut responses = self.responses.lock().expect("sequence llm mutex poisoned");
+        if responses.is_empty() {
+            return Err(LlmError::Unavailable(
+                "sequence LLM has no responses left".to_owned(),
+            ));
+        }
+        responses.remove(0)
     }
 }
 

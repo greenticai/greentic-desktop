@@ -173,6 +173,12 @@ export interface RecordingSummaryDto {
   elapsedSeconds: number;
   profile: string;
   adapter: string;
+  captureState?: string;
+  captureBackend?: string;
+  captureBlockedReasons?: string[];
+  realEvents?: number;
+  screenshots?: number;
+  lastEventAt?: number | null;
   activeApp: string | null;
   rawEvents: number;
   markers: number;
@@ -195,6 +201,25 @@ export interface RecordingTargetDto {
 
 export interface RecordingTargetsDto {
   targets: RecordingTargetDto[];
+}
+
+export interface RecordingEventDto {
+  index: number;
+  type: string;
+  summary: string;
+  value?: string | null;
+}
+
+export interface RecordingEventsDto {
+  sessionId: string;
+  events: RecordingEventDto[];
+}
+
+export interface RecordingEvidenceDto {
+  sessionId: string;
+  manifestPath: string;
+  manifest: unknown | null;
+  screenshotsPath: string;
 }
 
 export interface RecordingNormaliseResultDto {
@@ -306,6 +331,7 @@ export interface LlmTestResultDto {
 
 export interface PlannerDraftDto {
   draftId: string;
+  traceId?: string | null;
   runnerId: string;
   name: string;
   description: string;

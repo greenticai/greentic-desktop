@@ -4,6 +4,10 @@ use greentic_desktop_adapter::{
     StepResult, VisualLocator,
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_recorder::{
+    RawRecordingEvent, RecordingBackend, RecordingCaptureState, RecordingContext, RecordingHandle,
+    RecordingLifecycleError, RecordingProbe, RecordingStopSummary,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
@@ -126,6 +130,90 @@ pub fn first_run_permission_check(info: &PlatformInfo) -> MacOsPermissionDiagnos
 pub struct MacOsAccessibilityAdapter {
     platform: PlatformInfo,
     state: Arc<Mutex<MacOsState>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MacOsRecordingBackend {
+    platform: PlatformInfo,
+}
+
+impl MacOsRecordingBackend {
+    pub fn new(platform: PlatformInfo) -> Self {
+        Self { platform }
+    }
+}
+
+impl RecordingBackend for MacOsRecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        MACOS_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "macos.record.accessibility".to_owned(),
+            "macos.record.input_monitoring".to_owned(),
+            "macos.record.screenshot".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        let diagnostics = first_run_permission_check(&self.platform);
+        if diagnostics.ready_for_ax() && diagnostics.ready_for_screenshots() {
+            RecordingProbe::active()
+        } else {
+            RecordingProbe {
+                capture_state: RecordingCaptureState::Blocked,
+                blocked_reasons: diagnostics.messages,
+            }
+        }
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(MacOsRecordingHandle {
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MacOsRecordingHandle {
+    emitted: bool,
+    paused: bool,
+    session_id: String,
+}
+
+impl RecordingHandle for MacOsRecordingHandle {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = false;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+        if self.paused || self.emitted {
+            return Ok(Vec::new());
+        }
+        self.emitted = true;
+        Ok(vec![RawRecordingEvent::AppActivated {
+            sequence: 0,
+            timestamp: 0,
+            adapter: MACOS_ADAPTER_ID.to_owned(),
+            app: format!("macOS session {}", self.session_id),
+        }])
+    }
+
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+        Ok(RecordingStopSummary { events_drained: 0 })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -564,6 +652,35 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.contains("Screen Recording")));
+    }
+
+    #[test]
+    fn macos_recording_backend_reports_missing_permissions() {
+        let backend = MacOsRecordingBackend::new(platform(vec![]));
+        let probe = backend.probe();
+
+        assert_eq!(probe.capture_state, RecordingCaptureState::Blocked);
+        assert!(probe
+            .blocked_reasons
+            .iter()
+            .any(|message| message.contains("Accessibility")));
+    }
+
+    #[test]
+    fn macos_recording_backend_emits_startup_event_when_ready() {
+        let backend = MacOsRecordingBackend::new(platform(full_permissions()));
+        let probe = backend.probe();
+        assert_eq!(probe.capture_state, RecordingCaptureState::Active);
+
+        let mut handle = backend
+            .start(RecordingContext {
+                session_id: "rec_test".to_owned(),
+                profile: "desktop".to_owned(),
+                root: std::path::PathBuf::new(),
+            })
+            .expect("handle");
+        let events = handle.poll().expect("events");
+        assert!(matches!(events[0], RawRecordingEvent::AppActivated { .. }));
     }
 
     #[test]

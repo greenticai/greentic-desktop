@@ -9,11 +9,14 @@ use greentic_desktop_macos::{
     first_run_permission_check, run_macos_app_workflow, MacOsAccessibilityAdapter,
     MacOsAppWorkflow, MacOsAppWorkflowOutcome,
 };
+use greentic_desktop_planner::{plan_prompt_with_llm, PlannerOptions, PlanningContext};
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_refinement::{apply_update_plan, plan_runner_update};
 use greentic_desktop_runtime::DesktopRuntime;
 use greentic_desktop_terminal::{
     run_terminal_workflow, TerminalAdapter, TerminalWorkflow, TerminalWorkflowOutcome,
 };
+use greentic_desktop_web::WebRecordingBackend;
 use greentic_desktop_windows::{
     run_windows_app_workflow, WindowsAppWorkflow, WindowsAppWorkflowOutcome, WindowsUiAdapter,
 };
@@ -345,6 +348,131 @@ pub fn ubuntu_wayland_harness_detects_limitations() -> Vec<String> {
         permissions: vec![PlatformPermission::KeyboardInput],
     };
     detect_wayland_support(&info, WaylandCompositor::GnomeMutter, false, false).diagnostics
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecorderFixtureOutcome {
+    pub runner_id: String,
+    pub step_count: usize,
+    pub outputs: Vec<String>,
+    pub evidence_manifest_exists: bool,
+}
+
+pub fn recorder_fixture_record_normalize_result() -> Result<RecorderFixtureOutcome, String> {
+    let root =
+        std::env::temp_dir().join(format!("greentic-recorder-fixture-{}", std::process::id()));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|err| err.to_string())?;
+    }
+    let runtime_home = root.join("home");
+    let recording_root = root.join("recording");
+    let manifest = greentic_desktop_recorder::start_recording_session(
+        greentic_desktop_recorder::RecordingStartRequest {
+            name: "web.fixture".to_owned(),
+            profile: "web".to_owned(),
+            adapter: "greentic.desktop.playwright".to_owned(),
+            out: recording_root.clone(),
+            runtime_home,
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    let backend = WebRecordingBackend;
+    let mut runtime =
+        greentic_desktop_recorder::RecordingRuntime::start(manifest.clone(), &backend)
+            .map_err(|err| err.to_string())?;
+    runtime.poll_once().map_err(|err| err.to_string())?;
+    let out = recording_root.join("runner.draft.yaml");
+    let package = greentic_desktop_recorder::normalise_recording(&manifest.raw_events, &out)
+        .map_err(|err| err.to_string())?;
+    let outcome = RecorderFixtureOutcome {
+        runner_id: package.id,
+        step_count: package.steps.len(),
+        outputs: package.outputs,
+        evidence_manifest_exists: recording_root.join("evidence/manifest.json").is_file(),
+    };
+    let _ = std::fs::remove_dir_all(root);
+    Ok(outcome)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmGoldenCreateOutcome {
+    pub runner_id: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+pub fn llm_golden_create_fixture_result() -> Result<LlmGoldenCreateOutcome, String> {
+    let context = PlanningContext {
+        available_adapters: vec![greentic_desktop_adapter::AdapterCapabilities::new(
+            "greentic.desktop.playwright",
+            "1.0.0",
+            ["web.goto", "web.fill", "web.click", "web.extract_text"],
+        )],
+        available_mcp_tools: Vec::new(),
+        application_metadata: vec!["browser CRM".to_owned()],
+        existing_runners: Vec::new(),
+        ltm_examples: Vec::new(),
+        security_policies: Vec::new(),
+        desktop_observations: Vec::new(),
+    };
+    let llm = greentic_desktop_llm::StaticLlmClient::ok(
+        r#"{
+            "runner_id": "crm.create_customer",
+            "version": "0.1.0-draft",
+            "summary": "Create a customer",
+            "risk_level": "medium",
+            "required_capabilities": ["web.goto", "web.fill", "web.click", "web.extract_text"],
+            "inputs": {"company_name": {"type": "string", "required": true}, "email": {"type": "string", "required": true}},
+            "outputs": {"customer_id": {"type": "string"}},
+            "steps": [{"id": "open", "action": "goto", "required_capability": "web.goto"}],
+            "assertions": ["customer created"],
+            "open_questions": []
+        }"#,
+    );
+    let result = plan_prompt_with_llm(
+        "Create CRM customer with company name and email and return customer id",
+        &context,
+        &PlannerOptions::default(),
+        &llm,
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(LlmGoldenCreateOutcome {
+        runner_id: result.draft.package.id,
+        inputs: result.draft.package.inputs,
+        outputs: result.draft.package.outputs,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmGoldenUpdateOutcome {
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub diff_count: usize,
+}
+
+pub fn llm_golden_update_fixture_result() -> LlmGoldenUpdateOutcome {
+    let mut package = greentic_desktop_recorder::RunnerPackage {
+        id: "crm.create_customer".to_owned(),
+        version: "0.1.0".to_owned(),
+        mode: greentic_desktop_recorder::RecordingMode::AssistedPrompt,
+        inputs: vec!["inputs.company_name".to_owned()],
+        secrets: Vec::new(),
+        steps: Vec::new(),
+        assertions: Vec::new(),
+        outputs: vec!["outputs.customer_id".to_owned()],
+        open_questions: Vec::new(),
+    };
+    let input_plan = plan_runner_update(&package, "Add phone number as an input");
+    let mut diffs = apply_update_plan(&mut package, &input_plan);
+    let output_plan = plan_runner_update(&package, "Return confirmation number as an output");
+    diffs.extend(apply_update_plan(&mut package, &output_plan));
+    LlmGoldenUpdateOutcome {
+        inputs: package.inputs,
+        outputs: package.outputs,
+        diff_count: diffs.len(),
+    }
 }
 
 #[cfg(test)]
@@ -740,5 +868,40 @@ mod tests {
         assert_eq!(outcome.outputs.get("result"), Some(&"2".to_owned()));
         assert!(outcome.prompt.contains("Open Calculator"));
         assert!(outcome.steps.iter().all(|step| step.success));
+    }
+
+    #[test]
+    fn recorder_fixture_record_normalize_returns_output() {
+        let outcome =
+            recorder_fixture_record_normalize_result().expect("recorder fixture should normalize");
+
+        assert!(!outcome.runner_id.trim().is_empty());
+        assert!(outcome.step_count >= 2);
+        assert!(outcome
+            .outputs
+            .contains(&"outputs.web_fixture_output".to_owned()));
+        assert!(outcome.evidence_manifest_exists);
+    }
+
+    #[test]
+    fn llm_golden_create_fixture_produces_runner_schema() {
+        let outcome =
+            llm_golden_create_fixture_result().expect("golden create fixture should plan");
+
+        assert_eq!(outcome.runner_id, "crm.create_customer");
+        assert!(outcome.inputs.contains(&"inputs.company_name".to_owned()));
+        assert!(outcome.inputs.contains(&"inputs.email".to_owned()));
+        assert!(outcome.outputs.contains(&"outputs.customer_id".to_owned()));
+    }
+
+    #[test]
+    fn llm_golden_update_fixture_patches_runner_schema() {
+        let outcome = llm_golden_update_fixture_result();
+
+        assert!(outcome.inputs.contains(&"inputs.phone_number".to_owned()));
+        assert!(outcome
+            .outputs
+            .contains(&"outputs.confirmation_number".to_owned()));
+        assert_eq!(outcome.diff_count, 2);
     }
 }

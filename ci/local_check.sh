@@ -56,6 +56,12 @@ cargo fmt --all -- --check
 header "cargo clippy"
 cargo clippy --all-targets --all-features -- -D warnings
 
+header "recorder fixture"
+cargo test -p greentic-desktop-test-harness recorder_fixture_record_normalize_returns_output
+
+header "llm golden fixtures"
+cargo test -p greentic-desktop-test-harness llm_golden
+
 header "cargo test"
 cargo test --all-features
 

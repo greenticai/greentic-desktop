@@ -4,6 +4,10 @@ use greentic_desktop_adapter::{
     StepResult, VisualLocator,
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_recorder::{
+    RawRecordingEvent, RecordingBackend, RecordingCaptureState, RecordingContext, RecordingHandle,
+    RecordingLifecycleError, RecordingProbe, RecordingStopSummary,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
@@ -184,6 +188,150 @@ pub struct LinuxX11Adapter {
 pub struct LinuxWaylandAdapter {
     support: WaylandSupport,
     state: Arc<Mutex<WaylandState>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinuxX11RecordingBackend {
+    platform: PlatformInfo,
+}
+
+impl LinuxX11RecordingBackend {
+    pub fn new(platform: PlatformInfo) -> Self {
+        Self { platform }
+    }
+}
+
+impl RecordingBackend for LinuxX11RecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        LINUX_X11_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "linux.record.at_spi".to_owned(),
+            "linux.record.xinput".to_owned(),
+            "linux.record.screenshot".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        let status = detect_x11_session(&self.platform);
+        if status.is_x11 {
+            RecordingProbe::active()
+        } else {
+            RecordingProbe {
+                capture_state: RecordingCaptureState::Blocked,
+                blocked_reasons: status.diagnostics,
+            }
+        }
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(LinuxRecordingHandle {
+            adapter_id: LINUX_X11_ADAPTER_ID.to_owned(),
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinuxWaylandRecordingBackend {
+    support: WaylandSupport,
+}
+
+impl LinuxWaylandRecordingBackend {
+    pub fn new(support: WaylandSupport) -> Self {
+        Self { support }
+    }
+}
+
+impl RecordingBackend for LinuxWaylandRecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        LINUX_WAYLAND_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "linux.wayland.record.at_spi".to_owned(),
+            "linux.wayland.record.portal_screenshot".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        if self.support.is_wayland
+            && self.support.at_spi_available
+            && self.support.portal_screenshot_available
+            && self.support.global_input_supported
+        {
+            RecordingProbe::active()
+        } else {
+            let mut reasons = self.support.diagnostics.clone();
+            if self.support.is_wayland && !self.support.global_input_supported {
+                reasons.push(
+                    "Wayland does not allow global keyboard/mouse recording without compositor or portal support"
+                        .to_owned(),
+                );
+            }
+            RecordingProbe {
+                capture_state: RecordingCaptureState::Blocked,
+                blocked_reasons: reasons,
+            }
+        }
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(LinuxRecordingHandle {
+            adapter_id: LINUX_WAYLAND_ADAPTER_ID.to_owned(),
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LinuxRecordingHandle {
+    adapter_id: String,
+    emitted: bool,
+    paused: bool,
+    session_id: String,
+}
+
+impl RecordingHandle for LinuxRecordingHandle {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = false;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+        if self.paused || self.emitted {
+            return Ok(Vec::new());
+        }
+        self.emitted = true;
+        Ok(vec![RawRecordingEvent::WindowFocused {
+            sequence: 0,
+            timestamp: 0,
+            adapter: self.adapter_id.clone(),
+            title: format!("Linux session {}", self.session_id),
+        }])
+    }
+
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+        Ok(RecordingStopSummary { events_drained: 0 })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -799,6 +947,41 @@ mod tests {
         assert!(status
             .diagnostics
             .contains(&"X11 session is required for this adapter".to_owned()));
+    }
+
+    #[test]
+    fn x11_recording_backend_is_active_in_x11_session() {
+        let backend = LinuxX11RecordingBackend::new(x11_platform());
+        let probe = backend.probe();
+        assert_eq!(probe.capture_state, RecordingCaptureState::Active);
+
+        let mut handle = backend
+            .start(RecordingContext {
+                session_id: "rec_x11".to_owned(),
+                profile: "desktop".to_owned(),
+                root: std::path::PathBuf::new(),
+            })
+            .expect("handle");
+        let events = handle.poll().expect("events");
+        assert!(matches!(events[0], RawRecordingEvent::WindowFocused { .. }));
+    }
+
+    #[test]
+    fn wayland_recording_backend_reports_global_input_limitations() {
+        let support = detect_wayland_support(
+            &wayland_platform(),
+            WaylandCompositor::GnomeMutter,
+            true,
+            true,
+        );
+        let backend = LinuxWaylandRecordingBackend::new(support);
+        let probe = backend.probe();
+
+        assert_eq!(probe.capture_state, RecordingCaptureState::Blocked);
+        assert!(probe
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("Wayland does not allow global")));
     }
 
     #[test]

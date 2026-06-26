@@ -16,6 +16,8 @@ import type {
   PlannerDraftDto,
   PlannerSaveResultDto,
   PlannerTestResultDto,
+  RecordingEventsDto,
+  RecordingEvidenceDto,
   RecordingFinaliseResultDto,
   RecordingNormaliseResultDto,
   RecordingsDto,
@@ -212,6 +214,10 @@ export const api = {
     request<RecordingSummaryDto>("/recordings", jsonInit("POST", { name, target })),
   recording: (sessionId: string) =>
     request<RecordingSummaryDto>(`/recordings/${encodeURIComponent(sessionId)}`),
+  recordingEvents: (sessionId: string) =>
+    request<RecordingEventsDto>(`/recordings/${encodeURIComponent(sessionId)}/events`),
+  recordingEvidence: (sessionId: string) =>
+    request<RecordingEvidenceDto>(`/recordings/${encodeURIComponent(sessionId)}/evidence`),
   recordingAction: (sessionId: string, action: string, value?: string) =>
     request<RecordingSummaryDto>(
       `/recordings/${encodeURIComponent(sessionId)}/${action}`,

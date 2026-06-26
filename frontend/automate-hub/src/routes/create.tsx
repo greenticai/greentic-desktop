@@ -753,7 +753,10 @@ function RecordingScreen({
   onAction: (action: string, value?: string) => void;
 }) {
   const needsScreenRecording = target === "desktop" || target === "remote";
-  const noCapturedEvents = (session?.rawEvents ?? 0) === 0;
+  const captureState = session?.captureState ?? "inactive";
+  const realEvents = session?.realEvents ?? 0;
+  const noCapturedEvents = realEvents === 0;
+  const captureBlocked = captureState === "blocked" || captureState === "inactive";
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border-2 border-destructive/30 bg-destructive/5 p-8 text-center">
@@ -768,15 +771,20 @@ function RecordingScreen({
           {noCapturedEvents ? "00:00" : "00:42"}
         </div>
         <div className="text-sm text-muted-foreground mt-2">
-          {session?.sessionId ?? "Starting"} - {session?.state ?? "starting"}
+          {session?.sessionId ?? "Starting"} - {session?.state ?? "starting"} - capture{" "}
+          {captureState}
         </div>
-        {needsScreenRecording && noCapturedEvents && (
+        <div className="mt-3 text-xs text-muted-foreground">
+          {realEvents} captured app events - {session?.screenshots ?? 0} screenshots
+        </div>
+        {needsScreenRecording && (noCapturedEvents || captureBlocked) && (
           <div className="mx-auto mt-4 max-w-xl rounded-xl border border-warning/30 bg-background/80 p-4 text-left text-sm">
-            <div className="font-medium">No desktop events captured yet</div>
+            <div className="font-medium">
+              {captureBlocked ? "Capture backend is not active" : "No desktop events captured yet"}
+            </div>
             <p className="mt-1 text-muted-foreground">
-              This recorder session is running, but it is not seeing screen/desktop events. Grant
-              Screen Recording or Screen Sharing permission for the app that launched Greentic, then
-              restart Greentic Desktop and try again.
+              {(session?.captureBlockedReasons ?? []).join(" ") ||
+                "This recorder session exists, but it is not seeing screen/desktop events. Grant Screen Recording or Screen Sharing permission for the app that launched Greentic, then restart Greentic Desktop and try again."}
             </p>
           </div>
         )}
@@ -831,6 +839,13 @@ function RecordingReview({ normalised }: { normalised: RecordingNormaliseResultD
   }
   return (
     <div className="space-y-3">
+      {normalised.warnings.length > 0 && (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+          {normalised.warnings.map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
+        </div>
+      )}
       {normalised.steps.map((step, index) => (
         <div key={index} className="rounded-lg border p-3 text-sm">
           {step}

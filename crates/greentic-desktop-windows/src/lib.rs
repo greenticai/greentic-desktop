@@ -3,6 +3,10 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_recorder::{
+    RawRecordingEvent, RecordingBackend, RecordingContext, RecordingHandle,
+    RecordingLifecycleError, RecordingProbe, RecordingStopSummary,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
@@ -70,6 +74,74 @@ pub fn stable_windows_target(metadata: &WindowsElementMetadata) -> LocatorTarget
 #[derive(Debug, Clone, Default)]
 pub struct WindowsUiAdapter {
     state: Arc<Mutex<WindowsState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WindowsRecordingBackend;
+
+impl RecordingBackend for WindowsRecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        WINDOWS_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "windows.record.uia".to_owned(),
+            "windows.record.input_hooks".to_owned(),
+            "windows.record.screenshot".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        RecordingProbe::active()
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(WindowsRecordingHandle {
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WindowsRecordingHandle {
+    emitted: bool,
+    paused: bool,
+    session_id: String,
+}
+
+impl RecordingHandle for WindowsRecordingHandle {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = false;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+        if self.paused || self.emitted {
+            return Ok(Vec::new());
+        }
+        self.emitted = true;
+        Ok(vec![RawRecordingEvent::WindowFocused {
+            sequence: 0,
+            timestamp: 0,
+            adapter: WINDOWS_ADAPTER_ID.to_owned(),
+            title: format!("Windows session {}", self.session_id),
+        }])
+    }
+
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+        Ok(RecordingStopSummary { events_drained: 0 })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -409,6 +481,7 @@ fn windows_desktop_workflow(workflow: &WindowsAppWorkflow) -> DesktopWorkflow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use greentic_desktop_recorder::RecordingCaptureState;
 
     fn metadata() -> WindowsElementMetadata {
         WindowsElementMetadata {
@@ -429,6 +502,23 @@ mod tests {
         assert!(capabilities.supports("windows.open_app"));
         assert!(capabilities.supports("windows.close_app"));
         assert_eq!(capabilities.adapter_id, WINDOWS_ADAPTER_ID);
+    }
+
+    #[test]
+    fn windows_recording_backend_emits_focus_event() {
+        let backend = WindowsRecordingBackend;
+        let probe = backend.probe();
+        assert_eq!(probe.capture_state, RecordingCaptureState::Active);
+
+        let mut handle = backend
+            .start(RecordingContext {
+                session_id: "rec_windows".to_owned(),
+                profile: "desktop".to_owned(),
+                root: std::path::PathBuf::new(),
+            })
+            .expect("handle");
+        let events = handle.poll().expect("events");
+        assert!(matches!(events[0], RawRecordingEvent::WindowFocused { .. }));
     }
 
     #[test]

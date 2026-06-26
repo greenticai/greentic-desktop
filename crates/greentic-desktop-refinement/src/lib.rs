@@ -43,6 +43,112 @@ pub struct RunnerDiff {
     pub after: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerPatchOperation {
+    AddInput { name: String },
+    AddOutput { name: String },
+    UpdateLocatorText { step_id: String, text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerUpdatePlan {
+    pub summary: String,
+    pub operations: Vec<RunnerPatchOperation>,
+    pub questions: Vec<String>,
+    pub requires_test: bool,
+}
+
+pub fn plan_runner_update(package: &RunnerPackage, user_prompt: &str) -> RunnerUpdatePlan {
+    let lower = user_prompt.to_ascii_lowercase();
+    let mut operations = Vec::new();
+    if lower.contains("input") {
+        if let Some(name) = extract_after_words(&lower, &["add", "input", "field"]) {
+            let name = normalize_name(&name);
+            if !package.inputs.iter().any(|input| input.ends_with(&name)) {
+                operations.push(RunnerPatchOperation::AddInput { name });
+            }
+        }
+    }
+    if lower.contains("output") || lower.contains("return") {
+        if let Some(name) = extract_after_words(&lower, &["return", "output", "extract"]) {
+            let name = normalize_name(&name);
+            if !package.outputs.iter().any(|output| output.ends_with(&name)) {
+                operations.push(RunnerPatchOperation::AddOutput { name });
+            }
+        }
+    }
+    if lower.contains("called") || lower.contains("named") {
+        if let Some(first_step) = package.steps.first() {
+            let text = extract_quoted(user_prompt)
+                .or_else(|| extract_after_words(user_prompt, &["called", "named"]))
+                .map(|value| value.trim_matches('.').trim().to_owned());
+            if let Some(text) = text.filter(|value| !value.is_empty()) {
+                operations.push(RunnerPatchOperation::UpdateLocatorText {
+                    step_id: first_step.id.clone(),
+                    text,
+                });
+            }
+        }
+    }
+    let questions = if operations.is_empty() {
+        vec!["Which input, output, step, or locator should be changed?".to_owned()]
+    } else {
+        Vec::new()
+    };
+    RunnerUpdatePlan {
+        summary: user_prompt.to_owned(),
+        operations,
+        questions,
+        requires_test: true,
+    }
+}
+
+pub fn apply_update_plan(package: &mut RunnerPackage, plan: &RunnerUpdatePlan) -> Vec<RunnerDiff> {
+    let mut diffs = Vec::new();
+    for operation in &plan.operations {
+        match operation {
+            RunnerPatchOperation::AddInput { name } => {
+                let value = format!("inputs.{name}");
+                if !package.inputs.contains(&value) {
+                    package.inputs.push(value.clone());
+                    diffs.push(RunnerDiff {
+                        step_id: "inputs".to_owned(),
+                        before: "inputs unchanged".to_owned(),
+                        after: format!("added {value}"),
+                    });
+                }
+            }
+            RunnerPatchOperation::AddOutput { name } => {
+                let value = format!("outputs.{name}");
+                if !package.outputs.contains(&value) {
+                    package.outputs.push(value.clone());
+                    diffs.push(RunnerDiff {
+                        step_id: "outputs".to_owned(),
+                        before: "outputs unchanged".to_owned(),
+                        after: format!("added {value}"),
+                    });
+                }
+            }
+            RunnerPatchOperation::UpdateLocatorText { step_id, text } => {
+                if let Some(step) = package.steps.iter_mut().find(|step| &step.id == step_id) {
+                    let before = render_step(step);
+                    let strategy = step
+                        .target
+                        .preferred
+                        .get_or_insert_with(LocatorStrategy::default);
+                    strategy.text = Some(text.clone());
+                    diffs.push(RunnerDiff {
+                        step_id: step_id.clone(),
+                        before,
+                        after: render_step(step),
+                    });
+                }
+            }
+        }
+    }
+    diffs
+}
+
 pub fn parse_correction(step_id: impl Into<String>, user_text: &str) -> Correction {
     let step_id = step_id.into();
     let lower = user_text.to_ascii_lowercase();
@@ -171,6 +277,47 @@ fn extract_quoted(input: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+fn extract_after_words(input: &str, words: &[&str]) -> Option<String> {
+    for word in words {
+        if let Some((_, rest)) = input.split_once(word) {
+            let value = rest
+                .split(['.', ',', ';'])
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .trim_start_matches("as ")
+                .trim_start_matches("the ")
+                .to_owned();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_name(value: &str) -> String {
+    let value = value
+        .trim()
+        .trim_end_matches(" as an input")
+        .trim_end_matches(" as input")
+        .trim_end_matches(" as an output")
+        .trim_end_matches(" as output")
+        .trim();
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +387,47 @@ mod tests {
                 .as_ref()
                 .and_then(|strategy| strategy.name.clone()),
             Some("customer_form".to_owned())
+        );
+    }
+
+    #[test]
+    fn prompt_update_adds_input_to_actual_package() {
+        let mut package = package();
+        let plan = plan_runner_update(&package, "Add phone number as an input");
+
+        let diffs = apply_update_plan(&mut package, &plan);
+
+        assert!(package.inputs.contains(&"inputs.phone_number".to_owned()));
+        assert_eq!(diffs[0].step_id, "inputs");
+    }
+
+    #[test]
+    fn prompt_update_adds_output_to_actual_package() {
+        let mut package = package();
+        let plan = plan_runner_update(&package, "Return confirmation number as an output");
+
+        let _ = apply_update_plan(&mut package, &plan);
+
+        assert!(package
+            .outputs
+            .contains(&"outputs.confirmation_number".to_owned()));
+    }
+
+    #[test]
+    fn prompt_update_changes_locator_text() {
+        let mut package = package();
+        let plan = plan_runner_update(&package, "The button is now called \"Submit\"");
+
+        let diffs = apply_update_plan(&mut package, &plan);
+
+        assert!(!diffs.is_empty());
+        assert_eq!(
+            package.steps[0]
+                .target
+                .preferred
+                .as_ref()
+                .and_then(|strategy| strategy.text.clone()),
+            Some("Submit".to_owned())
         );
     }
 }

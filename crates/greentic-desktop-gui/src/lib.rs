@@ -13,9 +13,9 @@ use greentic_desktop_planner::{
 };
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
-    load_recording_session, normalise_recording, pause_recording_session, resume_recording_session,
-    start_recording_session, stop_recording_session, RecordingSessionManifest,
-    RecordingStartRequest,
+    load_recording_session, load_recording_status, normalise_recording, pause_recording_session,
+    resume_recording_session, start_recording_session, stop_recording_session,
+    RecordingSessionManifest, RecordingStartRequest,
 };
 use greentic_distributor_client::GreenticDistributorClient;
 use greentic_secrets_api::{SecretError, SecretsManager};
@@ -404,6 +404,12 @@ fn api_response(
         },
         ("GET" | "HEAD", path) if path.starts_with("/api/v1/planner/drafts/") => {
             match planner_draft_action_json(method, path, body, state) {
+                Ok(json) => json,
+                Err(error) => return json_response(404, "Not Found", &error, head_only),
+            }
+        }
+        ("GET" | "HEAD", path) if path.starts_with("/api/v1/planner/traces/") => {
+            match planner_trace_json(path, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -2374,6 +2380,12 @@ fn recording_action_json(
     if method == "GET" || method == "HEAD" {
         let manifest = load_recording_session(&state.runtime_home, session_id)
             .map_err(|err| api_error_json("recording.not_found", &err.to_string()))?;
+        if action == "events" {
+            return Ok(recording_events_json(&manifest));
+        }
+        if action == "evidence" {
+            return Ok(recording_evidence_json(&manifest));
+        }
         return Ok(recording_manifest_json(&manifest));
     }
 
@@ -2392,8 +2404,16 @@ fn recording_action_json(
                 .map_err(|err| api_error_json("recording.not_found", &err.to_string()))?;
             let package = normalise_recording(&manifest.raw_events, &manifest.draft_runner)
                 .map_err(|err| api_error_json("recording.invalid_state", &err.to_string()))?;
+            let status = load_recording_status(&manifest).ok();
+            let warnings = if status.as_ref().map(|status| status.event_count).unwrap_or(0) == 0 {
+                string_array_json(&[
+                    "No captured app events were found. The generated draft may only contain an observe fallback.".to_owned(),
+                ])
+            } else {
+                "[]".to_owned()
+            };
             return Ok(format!(
-                r#"{{"sessionId":"{}","runnerId":"{}","steps":{},"inputs":{},"outputs":{},"yamlPreview":"{}","warnings":[]}}"#,
+                r#"{{"sessionId":"{}","runnerId":"{}","steps":{},"inputs":{},"outputs":{},"yamlPreview":"{}","warnings":{}}}"#,
                 escape_json(session_id),
                 escape_json(&package.id),
                 string_array_json(
@@ -2405,7 +2425,8 @@ fn recording_action_json(
                 ),
                 string_array_json(&package.inputs),
                 string_array_json(&package.outputs),
-                escape_json(&std::fs::read_to_string(&manifest.draft_runner).unwrap_or_default())
+                escape_json(&std::fs::read_to_string(&manifest.draft_runner).unwrap_or_default()),
+                warnings
             ));
         }
         "finalise" => {
@@ -2451,7 +2472,83 @@ fn recording_action_json(
     Ok(recording_manifest_json(&manifest))
 }
 
+fn recording_events_json(manifest: &RecordingSessionManifest) -> String {
+    let events = std::fs::read_to_string(&manifest.raw_events)
+        .unwrap_or_default()
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            let event_type =
+                json_string_field(line, "type").unwrap_or_else(|| "unknown".to_owned());
+            let value = json_string_field(line, "value");
+            format!(
+                r#"{{"index":{},"type":"{}","summary":"{}","value":{}}}"#,
+                index + 1,
+                escape_json(&event_type),
+                escape_json(&recording_event_summary(&event_type, value.as_deref())),
+                optional_string_json(value.as_deref())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"sessionId":"{}","events":[{}]}}"#,
+        escape_json(&manifest.session_id),
+        events
+    )
+}
+
+fn recording_evidence_json(manifest: &RecordingSessionManifest) -> String {
+    let manifest_path = manifest.root.join("evidence").join("manifest.json");
+    let evidence_manifest = std::fs::read_to_string(&manifest_path).unwrap_or_default();
+    format!(
+        r#"{{"sessionId":"{}","manifestPath":"{}","manifest":{},"screenshotsPath":"{}"}}"#,
+        escape_json(&manifest.session_id),
+        escape_json(&manifest_path.display().to_string()),
+        if evidence_manifest.trim().is_empty() {
+            "null".to_owned()
+        } else {
+            evidence_manifest
+        },
+        escape_json(&manifest.screenshots.display().to_string())
+    )
+}
+
+fn recording_event_summary(event_type: &str, value: Option<&str>) -> String {
+    match value {
+        Some(value) if !value.trim().is_empty() => format!("{event_type}: {value}"),
+        _ => event_type.replace('_', " "),
+    }
+}
+
 fn recording_manifest_json(manifest: &RecordingSessionManifest) -> String {
+    let status = load_recording_status(manifest).ok();
+    let capture_state = status
+        .as_ref()
+        .map(|status| status.capture_state.as_str())
+        .unwrap_or("inactive");
+    let capture_backend = status
+        .as_ref()
+        .map(|status| status.backend_id.as_str())
+        .unwrap_or_else(|| manifest.adapters.first().map(String::as_str).unwrap_or(""));
+    let real_events = status
+        .as_ref()
+        .map(|status| status.event_count)
+        .unwrap_or_default();
+    let screenshot_count = status
+        .as_ref()
+        .map(|status| status.screenshot_count)
+        .unwrap_or_default();
+    let last_event_at = status
+        .as_ref()
+        .and_then(|status| status.last_event_at)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    let blocked_reasons = status
+        .as_ref()
+        .map(|status| string_array_json(&status.blocked_reasons))
+        .unwrap_or_else(|| "[]".to_owned());
     let markers = std::fs::read_to_string(manifest.root.join("markers.jsonl"))
         .unwrap_or_default()
         .lines()
@@ -2461,12 +2558,18 @@ fn recording_manifest_json(manifest: &RecordingSessionManifest) -> String {
         .lines()
         .count();
     format!(
-        r#"{{"sessionId":"{}","name":"{}","state":"{}","elapsedSeconds":0,"profile":"{}","adapter":"{}","activeApp":null,"rawEvents":{},"markers":{},"draftRunnerPath":"{}","normalizedStepSummaries":[],"evidenceRefs":["{}"]}}"#,
+        r#"{{"sessionId":"{}","name":"{}","state":"{}","elapsedSeconds":0,"profile":"{}","adapter":"{}","captureState":"{}","captureBackend":"{}","captureBlockedReasons":{},"realEvents":{},"screenshots":{},"lastEventAt":{},"activeApp":null,"rawEvents":{},"markers":{},"draftRunnerPath":"{}","normalizedStepSummaries":[],"evidenceRefs":["{}"]}}"#,
         escape_json(&manifest.session_id),
         escape_json(&manifest.name),
         manifest.state.as_str(),
         escape_json(&manifest.profile),
         escape_json(manifest.adapters.first().map(String::as_str).unwrap_or("")),
+        escape_json(capture_state),
+        escape_json(capture_backend),
+        blocked_reasons,
+        real_events,
+        screenshot_count,
+        last_event_at,
         raw_events,
         markers,
         escape_json(&manifest.draft_runner.display().to_string()),
@@ -2544,11 +2647,30 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
             &format!("Could not create planner draft directory: {err}"),
         )
     })?;
+    std::fs::create_dir_all(state.runtime_home.join("planner-traces")).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!("Could not create planner trace directory: {err}"),
+        )
+    })?;
     let yaml = draft.render_yaml();
-    let json = planner_draft_json(&draft_id, &draft, &yaml);
+    let trace_id = format!(
+        "trace-{:016x}",
+        fnv1a64(format!("{draft_id}:{prompt}").as_bytes())
+    );
+    let json = planner_draft_json(&draft_id, Some(&trace_id), &draft, &yaml);
+    let trace_json = planner_trace_document_json(
+        &trace_id,
+        &draft_id,
+        &llm_settings,
+        &prompt,
+        &draft.open_questions,
+        &draft.required_adapters,
+    );
     std::fs::write(draft_dir.join("draft.json"), &json)
         .and_then(|_| std::fs::write(draft_dir.join("runner.yaml"), yaml))
         .and_then(|_| std::fs::write(draft_dir.join("request.json"), body))
+        .and_then(|_| std::fs::write(planner_trace_path(state, &trace_id), trace_json))
         .map_err(|err| api_error_json("runtime.io", &format!("Could not persist draft: {err}")))?;
     Ok(json)
 }
@@ -2668,7 +2790,12 @@ fn delete_planner_draft_json(path: &str, state: &GuiApiState) -> Result<String, 
     ))
 }
 
-fn planner_draft_json(draft_id: &str, draft: &RunnerDraft, yaml: &str) -> String {
+fn planner_draft_json(
+    draft_id: &str,
+    trace_id: Option<&str>,
+    draft: &RunnerDraft,
+    yaml: &str,
+) -> String {
     let package = &draft.package;
     let steps = package
         .steps
@@ -2684,8 +2811,9 @@ fn planner_draft_json(draft_id: &str, draft: &RunnerDraft, yaml: &str) -> String
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"draftId":"{}","runnerId":"{}","name":"{}","description":"Draft generated from prompt","risk":"{}","requiredAdapters":{},"inputs":{},"outputs":{},"secrets":{},"steps":[{}],"assertions":{},"openQuestions":{},"yamlPreview":"{}","policyWarnings":[]}}"#,
+        r#"{{"draftId":"{}","traceId":{},"runnerId":"{}","name":"{}","description":"Draft generated from prompt","risk":"{}","requiredAdapters":{},"inputs":{},"outputs":{},"secrets":{},"steps":[{}],"assertions":{},"openQuestions":{},"yamlPreview":"{}","policyWarnings":[]}}"#,
         escape_json(draft_id),
+        optional_string_json(trace_id),
         escape_json(&package.id),
         escape_json(&package.id),
         escape_json(&format!("{:?}", draft.risk).to_ascii_lowercase()),
@@ -2698,6 +2826,67 @@ fn planner_draft_json(draft_id: &str, draft: &RunnerDraft, yaml: &str) -> String
         string_array_json(&draft.open_questions),
         escape_json(yaml)
     )
+}
+
+fn planner_trace_path(state: &GuiApiState, trace_id: &str) -> PathBuf {
+    state
+        .runtime_home
+        .join("planner-traces")
+        .join(format!("{trace_id}.json"))
+}
+
+fn planner_trace_json(path: &str, state: &GuiApiState) -> Result<String, String> {
+    let trace_id = path.trim_start_matches("/api/v1/planner/traces/");
+    std::fs::read_to_string(planner_trace_path(state, trace_id)).map_err(|_| {
+        api_error_json(
+            "planner.trace_not_found",
+            "Planning trace was not found or has expired.",
+        )
+    })
+}
+
+fn planner_trace_document_json(
+    trace_id: &str,
+    draft_id: &str,
+    settings: &LlmSettings,
+    prompt: &str,
+    open_questions: &[String],
+    required_adapters: &[String],
+) -> String {
+    format!(
+        r#"{{"traceId":"{}","draftId":"{}","provider":"{}","model":"{}","structuredOutputMode":"{}","schemaVersion":"runner-draft-v1","attempts":1,"promptSummary":"{}","openQuestions":{},"requiredAdapters":{},"redacted":true}}"#,
+        escape_json(trace_id),
+        escape_json(draft_id),
+        escape_json(&settings.provider),
+        escape_json(&settings.model),
+        if settings.provider == "local" {
+            "prompt_only_with_repair"
+        } else {
+            "provider_json_or_repair"
+        },
+        escape_json(&redact_prompt_for_trace(prompt)),
+        string_array_json(open_questions),
+        string_array_json(required_adapters),
+    )
+}
+
+fn redact_prompt_for_trace(prompt: &str) -> String {
+    prompt
+        .split_whitespace()
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            if lower.contains("password")
+                || lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("api_key")
+            {
+                "{{redacted}}"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn planner_drafts_dir(state: &GuiApiState) -> PathBuf {
@@ -4187,6 +4376,11 @@ mod tests {
         let response = String::from_utf8_lossy(&response);
         assert!(response.contains("\"ok\":true"));
         let draft_id = json_string_field(&response, "draftId").expect("draft id");
+        let trace_id = json_string_field(&response, "traceId").expect("trace id");
+        let trace = get(handle.addr(), &format!("/api/v1/planner/traces/{trace_id}"));
+        let trace = String::from_utf8_lossy(&trace);
+        assert!(trace.contains("\"provider\":\"local\""));
+        assert!(trace.contains("\"redacted\":true"));
 
         let patched = json_request(
             handle.addr(),
@@ -4248,6 +4442,8 @@ mod tests {
         );
         let response = String::from_utf8_lossy(&response);
         assert!(response.contains("\"state\":\"recording\""));
+        assert!(response.contains("\"captureState\":\"inactive\""));
+        assert!(response.contains("\"realEvents\":0"));
         let session_id = json_string_field(&response, "sessionId").expect("session id");
 
         for action in ["pause", "resume", "stop", "mark-input"] {
@@ -4259,12 +4455,30 @@ mod tests {
             assert!(String::from_utf8_lossy(&response).contains("\"ok\":true"));
         }
 
+        let events = get(
+            handle.addr(),
+            &format!("/api/v1/recordings/{session_id}/events"),
+        );
+        let events = String::from_utf8_lossy(&events);
+        assert!(events.contains("\"events\""));
+        assert!(events.contains("session_started"));
+
         let normalise = post(
             handle.addr(),
             &format!("/api/v1/recordings/{session_id}/normalise"),
             "{}",
         );
-        assert!(String::from_utf8_lossy(&normalise).contains("\"yamlPreview\""));
+        let normalise = String::from_utf8_lossy(&normalise);
+        assert!(normalise.contains("\"yamlPreview\""));
+        assert!(normalise.contains("No captured app events"));
+
+        let evidence = get(
+            handle.addr(),
+            &format!("/api/v1/recordings/{session_id}/evidence"),
+        );
+        let evidence = String::from_utf8_lossy(&evidence);
+        assert!(evidence.contains("\"manifestPath\""));
+        assert!(evidence.contains("\"screenshotsPath\""));
 
         let test = post(
             handle.addr(),

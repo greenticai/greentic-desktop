@@ -17,3 +17,5 @@ path = "src/lib.rs"
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
+serde.workspace = true
+serde_json.workspace = true

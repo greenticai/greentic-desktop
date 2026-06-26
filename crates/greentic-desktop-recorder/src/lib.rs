@@ -1,4 +1,5 @@
 use greentic_desktop_adapter::{LocatorTarget, RecordedEvent, RunnerStep};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -22,6 +23,298 @@ pub enum RecordingSessionState {
     Completed,
     Cancelled,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingCaptureState {
+    Inactive,
+    Starting,
+    Active,
+    Paused,
+    Blocked,
+    Failed,
+    Stopped,
+}
+
+impl RecordingCaptureState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Starting => "starting",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Blocked => "blocked",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStatus {
+    pub capture_state: RecordingCaptureState,
+    pub backend_id: String,
+    pub event_count: usize,
+    pub lifecycle_events: usize,
+    pub screenshot_count: usize,
+    pub last_event_at: Option<u64>,
+    pub blocked_reasons: Vec<String>,
+}
+
+impl RecordingStatus {
+    pub fn new(
+        capture_state: RecordingCaptureState,
+        backend_id: impl Into<String>,
+        blocked_reasons: Vec<String>,
+    ) -> Self {
+        Self {
+            capture_state,
+            backend_id: backend_id.into(),
+            event_count: 0,
+            lifecycle_events: 0,
+            screenshot_count: 0,
+            last_event_at: None,
+            blocked_reasons,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProbe {
+    pub capture_state: RecordingCaptureState,
+    pub blocked_reasons: Vec<String>,
+}
+
+impl RecordingProbe {
+    pub fn active() -> Self {
+        Self {
+            capture_state: RecordingCaptureState::Active,
+            blocked_reasons: Vec::new(),
+        }
+    }
+
+    pub fn blocked(reason: impl Into<String>) -> Self {
+        Self {
+            capture_state: RecordingCaptureState::Blocked,
+            blocked_reasons: vec![reason.into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingContext {
+    pub session_id: String,
+    pub profile: String,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingStopSummary {
+    pub events_drained: usize,
+}
+
+pub trait RecordingHandle: Send {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError>;
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError>;
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError>;
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError>;
+}
+
+pub trait RecordingBackend: Send + Sync {
+    fn backend_id(&self) -> &'static str;
+    fn capabilities(&self) -> Vec<String>;
+    fn probe(&self) -> RecordingProbe;
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError>;
+}
+
+pub struct RecordingRuntime {
+    manifest: RecordingSessionManifest,
+    handle: Box<dyn RecordingHandle>,
+}
+
+impl RecordingRuntime {
+    pub fn start(
+        manifest: RecordingSessionManifest,
+        backend: &impl RecordingBackend,
+    ) -> Result<Self, RecordingLifecycleError> {
+        let probe = backend.probe();
+        if probe.capture_state == RecordingCaptureState::Blocked {
+            let mut status = refreshed_recording_status(&manifest)?;
+            status.capture_state = RecordingCaptureState::Blocked;
+            status.backend_id = backend.backend_id().to_owned();
+            status.blocked_reasons = probe.blocked_reasons;
+            write_recording_status(&manifest, &status)?;
+            return Err(RecordingLifecycleError::InvalidState(
+                "recording backend is blocked".to_owned(),
+            ));
+        }
+        let ctx = RecordingContext {
+            session_id: manifest.session_id.clone(),
+            profile: manifest.profile.clone(),
+            root: manifest.root.clone(),
+        };
+        let handle = backend.start(ctx)?;
+        let mut status = refreshed_recording_status(&manifest)?;
+        status.capture_state = RecordingCaptureState::Active;
+        status.backend_id = backend.backend_id().to_owned();
+        status.blocked_reasons.clear();
+        write_recording_status(&manifest, &status)?;
+        Ok(Self { manifest, handle })
+    }
+
+    pub fn poll_once(&mut self) -> Result<RecordingStatus, RecordingLifecycleError> {
+        for event in self.handle.poll()? {
+            append_recording_event(&self.manifest, &event)?;
+        }
+        let mut status = refreshed_recording_status(&self.manifest)?;
+        status.capture_state = RecordingCaptureState::Active;
+        write_recording_status(&self.manifest, &status)?;
+        Ok(status)
+    }
+
+    pub fn pause(&mut self) -> Result<RecordingStatus, RecordingLifecycleError> {
+        self.handle.pause()?;
+        let mut status = refreshed_recording_status(&self.manifest)?;
+        status.capture_state = RecordingCaptureState::Paused;
+        write_recording_status(&self.manifest, &status)?;
+        Ok(status)
+    }
+
+    pub fn resume(&mut self) -> Result<RecordingStatus, RecordingLifecycleError> {
+        self.handle.resume()?;
+        let mut status = refreshed_recording_status(&self.manifest)?;
+        status.capture_state = RecordingCaptureState::Active;
+        write_recording_status(&self.manifest, &status)?;
+        Ok(status)
+    }
+
+    pub fn stop(mut self) -> Result<RecordingStatus, RecordingLifecycleError> {
+        let _ = self.handle.stop()?;
+        let mut status = refreshed_recording_status(&self.manifest)?;
+        status.capture_state = RecordingCaptureState::Stopped;
+        write_recording_status(&self.manifest, &status)?;
+        Ok(status)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RawRecordingEvent {
+    SessionStarted {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+    },
+    SessionPaused {
+        sequence: u64,
+        timestamp: u64,
+    },
+    SessionResumed {
+        sequence: u64,
+        timestamp: u64,
+    },
+    SessionStopped {
+        sequence: u64,
+        timestamp: u64,
+    },
+    SessionCancelled {
+        sequence: u64,
+        timestamp: u64,
+    },
+    AppActivated {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+        app: String,
+    },
+    WindowFocused {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+        title: String,
+    },
+    Click {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+        target: LocatorTarget,
+        value: Option<String>,
+        evidence_ref: Option<String>,
+    },
+    TextCommitted {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+        target: LocatorTarget,
+        value: Option<String>,
+        evidence_ref: Option<String>,
+    },
+    OutputObserved {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+        target: LocatorTarget,
+        value: Option<String>,
+        evidence_ref: Option<String>,
+    },
+    ScreenshotCaptured {
+        sequence: u64,
+        timestamp: u64,
+        adapter: String,
+        evidence_ref: String,
+    },
+    Marker {
+        sequence: u64,
+        timestamp: u64,
+        marker_type: String,
+        value: String,
+    },
+    Error {
+        sequence: u64,
+        timestamp: u64,
+        backend_id: String,
+        message: String,
+    },
+}
+
+impl RawRecordingEvent {
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Self::SessionStarted { timestamp, .. }
+            | Self::SessionPaused { timestamp, .. }
+            | Self::SessionResumed { timestamp, .. }
+            | Self::SessionStopped { timestamp, .. }
+            | Self::SessionCancelled { timestamp, .. }
+            | Self::AppActivated { timestamp, .. }
+            | Self::WindowFocused { timestamp, .. }
+            | Self::Click { timestamp, .. }
+            | Self::TextCommitted { timestamp, .. }
+            | Self::OutputObserved { timestamp, .. }
+            | Self::ScreenshotCaptured { timestamp, .. }
+            | Self::Marker { timestamp, .. }
+            | Self::Error { timestamp, .. } => *timestamp,
+        }
+    }
+
+    pub fn is_capture_event(&self) -> bool {
+        matches!(
+            self,
+            Self::AppActivated { .. }
+                | Self::WindowFocused { .. }
+                | Self::Click { .. }
+                | Self::TextCommitted { .. }
+                | Self::OutputObserved { .. }
+                | Self::ScreenshotCaptured { .. }
+        )
+    }
+
+    pub fn is_screenshot(&self) -> bool {
+        matches!(self, Self::ScreenshotCaptured { .. })
+    }
 }
 
 impl RecordingSessionState {
@@ -482,6 +775,10 @@ impl RecordingSessionManifest {
         self.root.join("manifest.yaml")
     }
 
+    pub fn status_path(&self) -> PathBuf {
+        self.root.join("capture_status.json")
+    }
+
     pub fn render_yaml(&self) -> String {
         let adapters = self
             .adapters
@@ -551,14 +848,20 @@ pub fn start_recording_session(
         RecordingLifecycleError::InvalidSession("normalised path has no parent".to_owned())
     })?)?;
     manifest.write()?;
-    append_raw_event(
+    append_recording_event(
         &manifest,
-        &format!(
-            "{{\"type\":\"session_started\",\"timestamp\":\"{}\",\"adapter\":\"{}\"}}",
-            unix_timestamp(),
-            json_escape(&request.adapter)
-        ),
+        &RawRecordingEvent::SessionStarted {
+            sequence: next_event_sequence(&manifest),
+            timestamp: unix_timestamp(),
+            adapter: request.adapter.clone(),
+        },
     )?;
+    let status = RecordingStatus::new(
+        RecordingCaptureState::Inactive,
+        request.adapter,
+        vec!["native capture backend has not been attached to this session".to_owned()],
+    );
+    write_recording_status(&manifest, &status)?;
     write_session_index(&request.runtime_home, &session_id, &manifest.root)?;
     Ok(manifest)
 }
@@ -571,7 +874,10 @@ pub fn pause_recording_session(
         runtime_home,
         session,
         RecordingSessionState::Paused,
-        "session_paused",
+        |sequence, timestamp| RawRecordingEvent::SessionPaused {
+            sequence,
+            timestamp,
+        },
     )
 }
 
@@ -583,7 +889,10 @@ pub fn resume_recording_session(
         runtime_home,
         session,
         RecordingSessionState::Recording,
-        "session_resumed",
+        |sequence, timestamp| RawRecordingEvent::SessionResumed {
+            sequence,
+            timestamp,
+        },
     )
 }
 
@@ -595,7 +904,10 @@ pub fn stop_recording_session(
         runtime_home,
         session,
         RecordingSessionState::Completed,
-        "session_stopped",
+        |sequence, timestamp| RawRecordingEvent::SessionStopped {
+            sequence,
+            timestamp,
+        },
     )
 }
 
@@ -607,7 +919,10 @@ pub fn cancel_recording_session(
         runtime_home,
         session,
         RecordingSessionState::Cancelled,
-        "session_cancelled",
+        |sequence, timestamp| RawRecordingEvent::SessionCancelled {
+            sequence,
+            timestamp,
+        },
     )
 }
 
@@ -662,19 +977,17 @@ pub fn normalise_recording(
         .unwrap_or("recorded.runner")
         .to_owned();
     let mut steps = Vec::new();
+    let mut evidence_refs = Vec::new();
     for (index, line) in contents.lines().enumerate() {
-        if line.contains("session_") || line.trim().is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
-        let action = json_string_value(line, "type").unwrap_or_else(|| "recorded".to_owned());
-        let value = json_string_value(line, "value").map(|value| redact_sensitive_value(&value));
-        steps.push(RunnerStep {
-            id: format!("recorded_{}", index + 1),
-            action: action.clone(),
-            target: LocatorTarget::default(),
-            value,
-            required_capability: format!("recording.{action}"),
-        });
+        if let Some((step, evidence_ref)) = normalise_event_line(line, index + 1) {
+            if let Some(evidence_ref) = evidence_ref {
+                evidence_refs.push(evidence_ref);
+            }
+            steps.push(step);
+        }
     }
     if steps.is_empty() {
         steps.push(RunnerStep {
@@ -703,6 +1016,7 @@ pub fn normalise_recording(
         fs::create_dir_all(parent)?;
     }
     fs::write(out, package.render_yaml())?;
+    write_evidence_manifest(&raw_events, &evidence_refs)?;
     Ok(package)
 }
 
@@ -722,22 +1036,24 @@ pub fn append_recording_note(
     value: &str,
 ) -> Result<(), RecordingLifecycleError> {
     let manifest = load_recording_session(runtime_home, session)?;
-    append_raw_event(
+    append_recording_event(
         &manifest,
-        &format!(
-            "{{\"type\":\"{}\",\"timestamp\":\"{}\",\"value\":\"{}\"}}",
-            json_escape(event_type),
-            unix_timestamp(),
-            json_escape(&redact_sensitive_value(value))
-        ),
-    )
+        &RawRecordingEvent::Marker {
+            sequence: next_event_sequence(&manifest),
+            timestamp: unix_timestamp(),
+            marker_type: event_type.to_owned(),
+            value: redact_sensitive_value(value),
+        },
+    )?;
+    refresh_and_write_recording_status(&manifest, manifest_state_capture_state(manifest.state))?;
+    Ok(())
 }
 
 fn transition(
     runtime_home: &Path,
     session: &str,
     state: RecordingSessionState,
-    event: &str,
+    event: impl FnOnce(u64, u64) -> RawRecordingEvent,
 ) -> Result<RecordingSessionManifest, RecordingLifecycleError> {
     let mut manifest = load_recording_session(runtime_home, session)?;
     if matches!(
@@ -752,14 +1068,11 @@ fn transition(
     }
     manifest.state = state;
     manifest.write()?;
-    append_raw_event(
+    append_recording_event(
         &manifest,
-        &format!(
-            "{{\"type\":\"{}\",\"timestamp\":\"{}\"}}",
-            event,
-            unix_timestamp()
-        ),
+        &event(next_event_sequence(&manifest), unix_timestamp()),
     )?;
+    refresh_and_write_recording_status(&manifest, manifest_state_capture_state(state))?;
     Ok(manifest)
 }
 
@@ -969,6 +1282,148 @@ fn derive_recording_candidates(
     derived
 }
 
+fn normalise_event_line(line: &str, index: usize) -> Option<(RunnerStep, Option<String>)> {
+    if let Ok(event) = serde_json::from_str::<RawRecordingEvent>(line) {
+        return typed_event_to_step(event, index);
+    }
+
+    if line.contains("session_") {
+        return None;
+    }
+    let action = json_string_value(line, "type").unwrap_or_else(|| "recorded".to_owned());
+    let value = json_string_value(line, "value").map(|value| redact_sensitive_value(&value));
+    Some((
+        RunnerStep {
+            id: format!("recorded_{index}"),
+            action: action.clone(),
+            target: LocatorTarget::default(),
+            value,
+            required_capability: format!("recording.{action}"),
+        },
+        None,
+    ))
+}
+
+fn typed_event_to_step(
+    event: RawRecordingEvent,
+    index: usize,
+) -> Option<(RunnerStep, Option<String>)> {
+    match event {
+        RawRecordingEvent::SessionStarted { .. }
+        | RawRecordingEvent::SessionPaused { .. }
+        | RawRecordingEvent::SessionResumed { .. }
+        | RawRecordingEvent::SessionStopped { .. }
+        | RawRecordingEvent::SessionCancelled { .. }
+        | RawRecordingEvent::Marker { .. }
+        | RawRecordingEvent::Error { .. } => None,
+        RawRecordingEvent::AppActivated { adapter, app, .. } => Some((
+            RunnerStep {
+                id: format!("recorded_{index}"),
+                action: "activate_app".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some(app),
+                required_capability: format!("{}.activate_app", capability_prefix(&adapter)),
+            },
+            None,
+        )),
+        RawRecordingEvent::WindowFocused { adapter, title, .. } => Some((
+            RunnerStep {
+                id: format!("recorded_{index}"),
+                action: "find_window".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some(title),
+                required_capability: format!("{}.find_window", capability_prefix(&adapter)),
+            },
+            None,
+        )),
+        RawRecordingEvent::Click {
+            adapter,
+            target,
+            value,
+            evidence_ref,
+            ..
+        } => Some((
+            RunnerStep {
+                id: format!("recorded_{index}"),
+                action: "click".to_owned(),
+                target,
+                value: value.map(|value| redact_sensitive_value(&value)),
+                required_capability: format!("{}.click", capability_prefix(&adapter)),
+            },
+            evidence_ref,
+        )),
+        RawRecordingEvent::TextCommitted {
+            adapter,
+            target,
+            value,
+            evidence_ref,
+            ..
+        } => Some((
+            RunnerStep {
+                id: format!("recorded_{index}"),
+                action: "input".to_owned(),
+                target,
+                value: value.map(|value| redact_sensitive_value(&value)),
+                required_capability: format!("{}.type_text", capability_prefix(&adapter)),
+            },
+            evidence_ref,
+        )),
+        RawRecordingEvent::OutputObserved {
+            adapter,
+            target,
+            value,
+            evidence_ref,
+            ..
+        } => Some((
+            RunnerStep {
+                id: format!("recorded_{index}"),
+                action: "extract".to_owned(),
+                target,
+                value: value.map(|value| redact_sensitive_value(&value)),
+                required_capability: format!("{}.read_text", capability_prefix(&adapter)),
+            },
+            evidence_ref,
+        )),
+        RawRecordingEvent::ScreenshotCaptured {
+            adapter,
+            evidence_ref,
+            ..
+        } => Some((
+            RunnerStep {
+                id: format!("recorded_{index}"),
+                action: "screenshot".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some(evidence_ref.clone()),
+                required_capability: format!("{}.screenshot", capability_prefix(&adapter)),
+            },
+            Some(evidence_ref),
+        )),
+    }
+}
+
+fn write_evidence_manifest(
+    raw_events: &Path,
+    evidence_refs: &[String],
+) -> Result<(), RecordingLifecycleError> {
+    let Some(recording_root) = raw_events.parent().and_then(Path::parent) else {
+        return Ok(());
+    };
+    let manifest = recording_root.join("evidence").join("manifest.json");
+    if let Some(parent) = manifest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::json!({
+        "rawEvents": raw_events.display().to_string(),
+        "evidenceRefs": evidence_refs,
+        "redacted": true,
+    });
+    fs::write(
+        manifest,
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    )?;
+    Ok(())
+}
+
 fn derive_raw_event_inputs(steps: &[RunnerStep]) -> Vec<String> {
     let mut inputs = Vec::new();
     for step in steps {
@@ -999,10 +1454,13 @@ fn derive_raw_event_outputs(contents: &str) -> Vec<String> {
     let mut outputs = Vec::new();
     for line in contents.lines() {
         let action = json_string_value(line, "type").unwrap_or_default();
-        if matches!(action.as_str(), "copy" | "read_text" | "observe") {
+        if matches!(
+            action.as_str(),
+            "copy" | "read_text" | "observe" | "output_observed" | "extract"
+        ) {
             if let Some(value) = json_string_value(line, "value") {
                 if !value.trim().is_empty() && !looks_secretish(&value) {
-                    outputs.push("outputs.recorded_output".to_owned());
+                    outputs.push(format!("outputs.{}", normalize_field_name(value)));
                 }
             }
         }
@@ -1083,6 +1541,24 @@ fn normalize_action(action: &RecordedAction) -> String {
 }
 
 fn capability_prefix(adapter: &str) -> &str {
+    if adapter.contains("playwright") {
+        return "web";
+    }
+    if adapter.contains("windows") {
+        return "windows";
+    }
+    if adapter.contains("macos") {
+        return "macos";
+    }
+    if adapter.contains("linux") {
+        return "linux";
+    }
+    if adapter.contains("terminal") {
+        return "terminal";
+    }
+    if adapter.contains("vision") {
+        return "vision";
+    }
     adapter
         .strip_prefix("greentic.desktop.")
         .unwrap_or(adapter)
@@ -1104,6 +1580,102 @@ fn append_raw_event(
         .open(&manifest.raw_events)?;
     writeln!(file, "{line}")?;
     Ok(())
+}
+
+fn append_recording_event(
+    manifest: &RecordingSessionManifest,
+    event: &RawRecordingEvent,
+) -> Result<(), RecordingLifecycleError> {
+    let json = serde_json::to_string(event)
+        .map_err(|err| RecordingLifecycleError::InvalidState(err.to_string()))?;
+    append_raw_event(manifest, &json)
+}
+
+fn next_event_sequence(manifest: &RecordingSessionManifest) -> u64 {
+    fs::read_to_string(&manifest.raw_events)
+        .map(|contents| contents.lines().count() as u64 + 1)
+        .unwrap_or(1)
+}
+
+pub fn load_recording_status(
+    manifest: &RecordingSessionManifest,
+) -> Result<RecordingStatus, RecordingLifecycleError> {
+    let contents = fs::read_to_string(manifest.status_path())?;
+    serde_json::from_str(&contents)
+        .map_err(|err| RecordingLifecycleError::InvalidState(err.to_string()))
+}
+
+pub fn write_recording_status(
+    manifest: &RecordingSessionManifest,
+    status: &RecordingStatus,
+) -> Result<(), RecordingLifecycleError> {
+    let json = serde_json::to_string_pretty(status)
+        .map_err(|err| RecordingLifecycleError::InvalidState(err.to_string()))?;
+    fs::write(manifest.status_path(), json)?;
+    Ok(())
+}
+
+pub fn refreshed_recording_status(
+    manifest: &RecordingSessionManifest,
+) -> Result<RecordingStatus, RecordingLifecycleError> {
+    let mut status = load_recording_status(manifest).unwrap_or_else(|_| {
+        RecordingStatus::new(
+            manifest_state_capture_state(manifest.state),
+            manifest.adapters.first().cloned().unwrap_or_default(),
+            Vec::new(),
+        )
+    });
+    let mut event_count = 0usize;
+    let mut lifecycle_events = 0usize;
+    let mut screenshot_count = 0usize;
+    let mut last_event_at = None;
+    let contents = fs::read_to_string(&manifest.raw_events).unwrap_or_default();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        match serde_json::from_str::<RawRecordingEvent>(line) {
+            Ok(event) => {
+                if event.is_capture_event() {
+                    event_count += 1;
+                } else {
+                    lifecycle_events += 1;
+                }
+                if event.is_screenshot() {
+                    screenshot_count += 1;
+                }
+                last_event_at = Some(event.timestamp());
+            }
+            Err(_) => lifecycle_events += 1,
+        }
+    }
+    status.event_count = event_count;
+    status.lifecycle_events = lifecycle_events;
+    status.screenshot_count = screenshot_count;
+    status.last_event_at = last_event_at;
+    Ok(status)
+}
+
+fn refresh_and_write_recording_status(
+    manifest: &RecordingSessionManifest,
+    capture_state: RecordingCaptureState,
+) -> Result<(), RecordingLifecycleError> {
+    let mut status = refreshed_recording_status(manifest)?;
+    status.capture_state = capture_state;
+    if capture_state != RecordingCaptureState::Blocked {
+        status.blocked_reasons.clear();
+    }
+    write_recording_status(manifest, &status)
+}
+
+fn manifest_state_capture_state(state: RecordingSessionState) -> RecordingCaptureState {
+    match state {
+        RecordingSessionState::Starting => RecordingCaptureState::Starting,
+        RecordingSessionState::Recording => RecordingCaptureState::Inactive,
+        RecordingSessionState::Paused => RecordingCaptureState::Paused,
+        RecordingSessionState::Stopping
+        | RecordingSessionState::Normalising
+        | RecordingSessionState::Completed
+        | RecordingSessionState::Cancelled => RecordingCaptureState::Stopped,
+        RecordingSessionState::Failed => RecordingCaptureState::Failed,
+    }
 }
 
 fn write_session_index(
@@ -1246,10 +1818,6 @@ fn json_string_value(line: &str, key: &str) -> Option<String> {
     Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
 }
 
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1261,6 +1829,65 @@ fn unix_timestamp() -> u64 {
 mod tests {
     use super::*;
     use greentic_desktop_adapter::LocatorStrategy;
+
+    struct FakeBackend {
+        probe: RecordingProbe,
+        events: Vec<RawRecordingEvent>,
+    }
+
+    impl RecordingBackend for FakeBackend {
+        fn backend_id(&self) -> &'static str {
+            "fake.recorder"
+        }
+
+        fn capabilities(&self) -> Vec<String> {
+            vec!["recording.fake".to_owned()]
+        }
+
+        fn probe(&self) -> RecordingProbe {
+            self.probe.clone()
+        }
+
+        fn start(
+            &self,
+            _ctx: RecordingContext,
+        ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+            Ok(Box::new(FakeHandle {
+                events: self.events.clone(),
+                paused: false,
+            }))
+        }
+    }
+
+    struct FakeHandle {
+        events: Vec<RawRecordingEvent>,
+        paused: bool,
+    }
+
+    impl RecordingHandle for FakeHandle {
+        fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+            self.paused = true;
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+            self.paused = false;
+            Ok(())
+        }
+
+        fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+            if self.paused {
+                return Ok(Vec::new());
+            }
+            Ok(std::mem::take(&mut self.events))
+        }
+
+        fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+            Ok(RecordingStopSummary {
+                events_drained: self.events.len(),
+            })
+        }
+    }
 
     fn event(action: &str, value: Option<&str>) -> RecordedEvent {
         RecordedEvent {
@@ -1548,6 +2175,9 @@ mod tests {
         assert_eq!(started.state, RecordingSessionState::Recording);
         assert!(out.join("manifest.yaml").exists());
         assert!(out.join("raw/events.jsonl").exists());
+        let status = load_recording_status(&started).expect("status");
+        assert_eq!(status.capture_state, RecordingCaptureState::Inactive);
+        assert_eq!(status.event_count, 0);
 
         let paused =
             pause_recording_session(&runtime_home, &started.session_id).expect("recording pauses");
@@ -1558,6 +2188,83 @@ mod tests {
         let stopped =
             stop_recording_session(&runtime_home, &started.session_id).expect("recording stops");
         assert_eq!(stopped.state, RecordingSessionState::Completed);
+        let status = load_recording_status(&stopped).expect("status");
+        assert_eq!(status.capture_state, RecordingCaptureState::Stopped);
+    }
+
+    #[test]
+    fn runtime_drains_backend_events_and_updates_status() {
+        let runtime_home = temp_dir("greentic-record-runtime-home");
+        let out = temp_dir("greentic-record-runtime");
+        let started = start_recording_session(RecordingStartRequest {
+            name: "desktop.note".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: "fake.recorder".to_owned(),
+            out,
+            runtime_home,
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        })
+        .expect("recording starts");
+
+        let backend = FakeBackend {
+            probe: RecordingProbe::active(),
+            events: vec![
+                RawRecordingEvent::AppActivated {
+                    sequence: 2,
+                    timestamp: 100,
+                    adapter: "fake.recorder".to_owned(),
+                    app: "Notes".to_owned(),
+                },
+                RawRecordingEvent::ScreenshotCaptured {
+                    sequence: 3,
+                    timestamp: 101,
+                    adapter: "fake.recorder".to_owned(),
+                    evidence_ref: "evidence://shot.png".to_owned(),
+                },
+            ],
+        };
+
+        let mut runtime = RecordingRuntime::start(started.clone(), &backend).expect("runtime");
+        let status = runtime.poll_once().expect("poll");
+
+        assert_eq!(status.capture_state, RecordingCaptureState::Active);
+        assert_eq!(status.backend_id, "fake.recorder");
+        assert_eq!(status.event_count, 2);
+        assert_eq!(status.screenshot_count, 1);
+        assert_eq!(status.last_event_at, Some(101));
+        assert!(fs::read_to_string(&started.raw_events)
+            .expect("events")
+            .contains("\"type\":\"app_activated\""));
+    }
+
+    #[test]
+    fn blocked_backend_writes_blocked_status() {
+        let runtime_home = temp_dir("greentic-record-blocked-home");
+        let out = temp_dir("greentic-record-blocked");
+        let started = start_recording_session(RecordingStartRequest {
+            name: "desktop.blocked".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: "fake.recorder".to_owned(),
+            out,
+            runtime_home,
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        })
+        .expect("recording starts");
+        let backend = FakeBackend {
+            probe: RecordingProbe::blocked("permission missing"),
+            events: Vec::new(),
+        };
+
+        let err = match RecordingRuntime::start(started.clone(), &backend) {
+            Ok(_) => panic!("blocked backend should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("blocked"));
+        let status = load_recording_status(&started).expect("status");
+        assert_eq!(status.capture_state, RecordingCaptureState::Blocked);
+        assert_eq!(status.blocked_reasons, vec!["permission missing"]);
     }
 
     #[test]
@@ -1605,6 +2312,53 @@ mod tests {
         assert!(package.inputs.is_empty());
         assert!(!yaml.contains("customer_id"));
         assert!(!yaml.contains("secrets.password"));
+    }
+
+    #[test]
+    fn normalise_typed_events_into_semantic_steps_and_evidence_manifest() {
+        let root = temp_dir("greentic-normalise-typed");
+        let raw = root.join("raw");
+        fs::create_dir_all(&raw).expect("raw dir");
+        let target = locator("Result");
+        let events = [
+            serde_json::to_string(&RawRecordingEvent::Click {
+                sequence: 1,
+                timestamp: 100,
+                adapter: "greentic.desktop.playwright".to_owned(),
+                target: locator("Submit"),
+                value: None,
+                evidence_ref: Some("evidence://web/click.png".to_owned()),
+            })
+            .expect("click json"),
+            serde_json::to_string(&RawRecordingEvent::OutputObserved {
+                sequence: 2,
+                timestamp: 101,
+                adapter: "greentic.desktop.playwright".to_owned(),
+                target,
+                value: Some("confirmation 123".to_owned()),
+                evidence_ref: Some("evidence://web/output.png".to_owned()),
+            })
+            .expect("output json"),
+            serde_json::to_string(&RawRecordingEvent::ScreenshotCaptured {
+                sequence: 3,
+                timestamp: 102,
+                adapter: "greentic.desktop.playwright".to_owned(),
+                evidence_ref: "evidence://web/screen.png".to_owned(),
+            })
+            .expect("screenshot json"),
+        ];
+        fs::write(raw.join("events.jsonl"), events.join("\n")).expect("raw write");
+        let out = root.join("runner.draft.yaml");
+
+        let package = normalise_recording(&raw, &out).expect("normalise");
+
+        assert_eq!(package.steps[0].action, "click");
+        assert_eq!(package.steps[0].required_capability, "web.click");
+        assert_eq!(package.steps[1].action, "extract");
+        assert_eq!(package.outputs, vec!["outputs.confirmation_123"]);
+        let evidence = fs::read_to_string(root.join("evidence/manifest.json")).expect("evidence");
+        assert!(evidence.contains("evidence://web/output.png"));
+        assert!(evidence.contains("evidence://web/screen.png"));
     }
 
     #[test]

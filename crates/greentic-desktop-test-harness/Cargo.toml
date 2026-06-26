@@ -11,11 +11,17 @@ categories.workspace = true
 publish = false
 
 [dependencies]
+greentic-desktop-adapter.workspace = true
 greentic-desktop-config.workspace = true
 greentic-desktop-java.workspace = true
 greentic-desktop-linux.workspace = true
+greentic-desktop-llm.workspace = true
 greentic-desktop-macos.workspace = true
 greentic-desktop-platform.workspace = true
+greentic-desktop-planner.workspace = true
+greentic-desktop-recorder.workspace = true
+greentic-desktop-refinement.workspace = true
 greentic-desktop-runtime.workspace = true
 greentic-desktop-terminal.workspace = true
+greentic-desktop-web.workspace = true
 greentic-desktop-windows.workspace = true

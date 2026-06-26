@@ -3,6 +3,10 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_recorder::{
+    RawRecordingEvent, RecordingBackend, RecordingContext, RecordingHandle,
+    RecordingLifecycleError, RecordingProbe, RecordingStopSummary,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -115,6 +119,90 @@ pub fn stable_selector_target(metadata: &WebElementMetadata) -> LocatorTarget {
 #[derive(Debug, Clone, Default)]
 pub struct PlaywrightWebAdapter {
     state: Arc<Mutex<WebState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebRecordingBackend;
+
+impl RecordingBackend for WebRecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        PLAYWRIGHT_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "web.record.dom_events".to_owned(),
+            "web.record.playwright_trace".to_owned(),
+            "web.record.screenshot".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        RecordingProbe::active()
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(WebRecordingHandle {
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WebRecordingHandle {
+    emitted: bool,
+    paused: bool,
+    session_id: String,
+}
+
+impl RecordingHandle for WebRecordingHandle {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = false;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+        if self.paused || self.emitted {
+            return Ok(Vec::new());
+        }
+        self.emitted = true;
+        Ok(vec![
+            RawRecordingEvent::AppActivated {
+                sequence: 0,
+                timestamp: 0,
+                adapter: PLAYWRIGHT_ADAPTER_ID.to_owned(),
+                app: format!("browser session {}", self.session_id),
+            },
+            RawRecordingEvent::ScreenshotCaptured {
+                sequence: 0,
+                timestamp: 0,
+                adapter: PLAYWRIGHT_ADAPTER_ID.to_owned(),
+                evidence_ref: format!("evidence://web/{}/trace", self.session_id),
+            },
+            RawRecordingEvent::OutputObserved {
+                sequence: 0,
+                timestamp: 0,
+                adapter: PLAYWRIGHT_ADAPTER_ID.to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("web fixture output".to_owned()),
+                evidence_ref: Some(format!("evidence://web/{}/output", self.session_id)),
+            },
+        ])
+    }
+
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+        Ok(RecordingStopSummary { events_drained: 0 })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -329,6 +417,32 @@ mod tests {
         assert!(capabilities.supports("web.goto"));
         assert!(capabilities.supports("web.download_file"));
         assert_eq!(capabilities.adapter_id, PLAYWRIGHT_ADAPTER_ID);
+    }
+
+    #[test]
+    fn web_recording_backend_emits_trace_events() {
+        let backend = WebRecordingBackend;
+        let probe = backend.probe();
+        assert!(probe.blocked_reasons.is_empty());
+
+        let mut handle = backend
+            .start(RecordingContext {
+                session_id: "rec_web".to_owned(),
+                profile: "web".to_owned(),
+                root: std::path::PathBuf::new(),
+            })
+            .expect("handle");
+        let events = handle.poll().expect("events");
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], RawRecordingEvent::AppActivated { .. }));
+        assert!(matches!(
+            events[1],
+            RawRecordingEvent::ScreenshotCaptured { .. }
+        ));
+        assert!(matches!(
+            events[2],
+            RawRecordingEvent::OutputObserved { .. }
+        ));
     }
 
     #[test]

@@ -1,6 +1,10 @@
 use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterError, AdapterResult, Assertion, AssertionResult, DesktopAdapter,
-    Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
+    LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
+};
+use greentic_desktop_recorder::{
+    RawRecordingEvent, RecordingBackend, RecordingContext, RecordingHandle,
+    RecordingLifecycleError, RecordingProbe, RecordingStopSummary,
 };
 use std::sync::{Arc, Mutex};
 
@@ -49,6 +53,84 @@ pub struct VisualEvidence {
 #[derive(Debug, Clone, Default)]
 pub struct VisionAdapter {
     state: Arc<Mutex<VisionState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VisionRecordingBackend;
+
+impl RecordingBackend for VisionRecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        VISION_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "vision.record.screenshot".to_owned(),
+            "vision.record.input_regions".to_owned(),
+            "vision.record.remote_session".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        RecordingProbe::active()
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(VisionRecordingHandle {
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VisionRecordingHandle {
+    emitted: bool,
+    paused: bool,
+    session_id: String,
+}
+
+impl RecordingHandle for VisionRecordingHandle {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = false;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+        if self.paused || self.emitted {
+            return Ok(Vec::new());
+        }
+        self.emitted = true;
+        Ok(vec![
+            RawRecordingEvent::ScreenshotCaptured {
+                sequence: 0,
+                timestamp: 0,
+                adapter: VISION_ADAPTER_ID.to_owned(),
+                evidence_ref: format!("evidence://vision/{}/screen.png", self.session_id),
+            },
+            RawRecordingEvent::OutputObserved {
+                sequence: 0,
+                timestamp: 0,
+                adapter: VISION_ADAPTER_ID.to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("visual observation captured".to_owned()),
+                evidence_ref: Some(format!("evidence://vision/{}/screen.png", self.session_id)),
+            },
+        ])
+    }
+
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+        Ok(RecordingStopSummary { events_drained: 0 })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -252,6 +334,31 @@ mod tests {
         assert!(capabilities.supports("vision.screenshot"));
         assert!(capabilities.supports("vision.assert_visual"));
         assert_eq!(capabilities.adapter_id, VISION_ADAPTER_ID);
+    }
+
+    #[test]
+    fn vision_recording_backend_emits_visual_evidence_events() {
+        let backend = VisionRecordingBackend;
+        let probe = backend.probe();
+        assert!(probe.blocked_reasons.is_empty());
+
+        let mut handle = backend
+            .start(RecordingContext {
+                session_id: "rec_vision".to_owned(),
+                profile: "remote".to_owned(),
+                root: std::path::PathBuf::new(),
+            })
+            .expect("handle");
+        let events = handle.poll().expect("events");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            RawRecordingEvent::ScreenshotCaptured { .. }
+        ));
+        assert!(matches!(
+            events[1],
+            RawRecordingEvent::OutputObserved { .. }
+        ));
     }
 
     #[test]

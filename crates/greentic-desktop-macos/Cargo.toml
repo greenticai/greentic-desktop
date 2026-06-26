@@ -13,4 +13,5 @@ publish = false
 [dependencies]
 greentic-desktop-adapter.workspace = true
 greentic-desktop-platform.workspace = true
+greentic-desktop-recorder.workspace = true
 greentic-desktop-workflow.workspace = true

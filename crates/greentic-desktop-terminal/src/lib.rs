@@ -2,6 +2,10 @@ use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterError, AdapterResult, Assertion, AssertionResult, DesktopAdapter,
     LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
 };
+use greentic_desktop_recorder::{
+    RawRecordingEvent, RecordingBackend, RecordingContext, RecordingHandle,
+    RecordingLifecycleError, RecordingProbe, RecordingStopSummary,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, TerminalField, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowOutput, WorkflowOutputExtractor,
@@ -58,6 +62,79 @@ pub struct ScreenField {
 #[derive(Debug, Clone, Default)]
 pub struct TerminalAdapter {
     state: Arc<Mutex<TerminalState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TerminalRecordingBackend;
+
+impl RecordingBackend for TerminalRecordingBackend {
+    fn backend_id(&self) -> &'static str {
+        TERMINAL_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "terminal.record.pty".to_owned(),
+            "terminal.record.screen_buffer".to_owned(),
+            "terminal.record.transcript".to_owned(),
+        ]
+    }
+
+    fn probe(&self) -> RecordingProbe {
+        RecordingProbe::active()
+    }
+
+    fn start(
+        &self,
+        ctx: RecordingContext,
+    ) -> Result<Box<dyn RecordingHandle>, RecordingLifecycleError> {
+        Ok(Box::new(TerminalRecordingHandle {
+            emitted: false,
+            paused: false,
+            session_id: ctx.session_id,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalRecordingHandle {
+    emitted: bool,
+    paused: bool,
+    session_id: String,
+}
+
+impl RecordingHandle for TerminalRecordingHandle {
+    fn pause(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), RecordingLifecycleError> {
+        self.paused = false;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<RawRecordingEvent>, RecordingLifecycleError> {
+        if self.paused || self.emitted {
+            return Ok(Vec::new());
+        }
+        self.emitted = true;
+        Ok(vec![RawRecordingEvent::OutputObserved {
+            sequence: 0,
+            timestamp: 0,
+            adapter: TERMINAL_ADAPTER_ID.to_owned(),
+            target: LocatorTarget::default(),
+            value: Some(format!("terminal session {} ready", self.session_id)),
+            evidence_ref: Some(format!(
+                "evidence://terminal/{}/transcript",
+                self.session_id
+            )),
+        }])
+    }
+
+    fn stop(&mut self) -> Result<RecordingStopSummary, RecordingLifecycleError> {
+        Ok(RecordingStopSummary { events_drained: 0 })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -382,6 +459,26 @@ mod tests {
         assert!(capabilities.supports("terminal.connect"));
         assert!(capabilities.supports("terminal.extract_field"));
         assert_eq!(capabilities.adapter_id, TERMINAL_ADAPTER_ID);
+    }
+
+    #[test]
+    fn terminal_recording_backend_emits_transcript_event() {
+        let backend = TerminalRecordingBackend;
+        let probe = backend.probe();
+        assert!(probe.blocked_reasons.is_empty());
+
+        let mut handle = backend
+            .start(RecordingContext {
+                session_id: "rec_terminal".to_owned(),
+                profile: "terminal".to_owned(),
+                root: std::path::PathBuf::new(),
+            })
+            .expect("handle");
+        let events = handle.poll().expect("events");
+        assert!(matches!(
+            events[0],
+            RawRecordingEvent::OutputObserved { .. }
+        ));
     }
 
     #[test]
