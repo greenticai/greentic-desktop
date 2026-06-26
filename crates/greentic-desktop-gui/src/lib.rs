@@ -72,7 +72,11 @@ impl Default for GuiApiState {
             platform: std::env::consts::OS.to_owned(),
             evidence_store: runtime_home.join("evidence"),
             runtime_home,
-            mcp_bind: "127.0.0.1:8799".to_owned(),
+            mcp_bind: if std::env::var("GREENTIC_DESKTOP_E2E").ok().as_deref() == Some("1") {
+                "127.0.0.1:0".to_owned()
+            } else {
+                "127.0.0.1:8799".to_owned()
+            },
             installed_core_adapter_ids: vec!["greentic.desktop.core".to_owned()],
             installed_extension_ids: Vec::new(),
             runner_names: Vec::new(),
@@ -1828,12 +1832,37 @@ fn mcp_protocol_tool_call_json(body: &str, state: &GuiApiState) -> String {
         .into_iter()
         .find(|tool| tool_name(&tool.id) == name || tool.id == runner_id);
     match matched {
-        Some(tool) => format!(
-            r#"{{"jsonrpc":"2.0","result":{{"content":[{{"type":"text","text":"{} passed"}}],"structuredContent":{{"runnerId":"{}","status":"passed","evidenceRef":"local://mcp/{}/call/latest"}}}},"id":1}}"#,
-            escape_json(&tool.name),
-            escape_json(&tool.id),
-            escape_json(&tool.id)
-        ),
+        Some(tool) => {
+            let input_names = runner_input_fields(&tool);
+            let inputs = runner_input_values(body, &input_names);
+            let missing = input_names
+                .iter()
+                .filter(|name| {
+                    inputs
+                        .get(*name)
+                        .map(|value| value.trim().is_empty())
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return format!(
+                    r#"{{"jsonrpc":"2.0","error":{{"code":-32602,"message":"Missing required input: {}","data":{{"runnerId":"{}","missingInputs":{}}}}},"id":1}}"#,
+                    escape_json(&missing.join(", ")),
+                    escape_json(&tool.id),
+                    string_array_json(&missing)
+                );
+            }
+            let output_names = runner_output_fields(&tool);
+            let outputs = runner_outputs_json(&output_names, &inputs, "passed");
+            format!(
+                r#"{{"jsonrpc":"2.0","result":{{"content":[{{"type":"text","text":"{} passed"}}],"structuredContent":{{"runnerId":"{}","status":"passed","evidenceRef":"local://mcp/{}/call/latest","outputs":{}}}}},"id":1}}"#,
+                escape_json(&tool.name),
+                escape_json(&tool.id),
+                escape_json(&tool.id),
+                outputs
+            )
+        }
         None => {
             r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"Tool is not enabled"},"id":1}"#
                 .to_owned()

@@ -338,7 +338,11 @@ fn run_gui(
         platform: info.os,
         runtime_home: config.runner.home.clone(),
         evidence_store: config.evidence.store.clone(),
-        mcp_bind: config.mcp.bind.clone(),
+        mcp_bind: if std::env::var("GREENTIC_DESKTOP_E2E").ok().as_deref() == Some("1") {
+            "127.0.0.1:0".to_owned()
+        } else {
+            config.mcp.bind.clone()
+        },
         installed_core_adapter_ids: info.installed_adapters,
         installed_extension_ids: discover_extensions(&config.runner.home).unwrap_or_default(),
         runner_names: discover_runners(&config.runner.home).unwrap_or_default(),
