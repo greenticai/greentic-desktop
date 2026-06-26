@@ -169,7 +169,7 @@ pub struct RedactionRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputExtractorCandidate {
     VisibleText(String),
-    TargetText(LocatorTarget),
+    TargetText(Box<LocatorTarget>),
     TerminalField { row: usize, col: usize, len: usize },
     Regex(String),
     VisionRegion(String),
@@ -1401,7 +1401,7 @@ mod tests {
         session.mark_secret("access token", locator("Token"));
         session.mark_output(
             "confirmation",
-            OutputExtractorCandidate::TargetText(locator("Confirmation")),
+            OutputExtractorCandidate::TargetText(Box::new(locator("Confirmation"))),
         );
         session.capture_human_event(
             "greentic.desktop.playwright",
@@ -1519,7 +1519,11 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("{name}-{}", unix_timestamp()));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("{name}-{}-{}", std::process::id(), nanos));
         if root.exists() {
             fs::remove_dir_all(&root).expect("old temp dir should remove");
         }

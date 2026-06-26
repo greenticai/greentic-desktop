@@ -735,7 +735,7 @@ fn linux_desktop_workflow(workflow: &LinuxX11AppWorkflow) -> DesktopWorkflow {
             .map(|output| WorkflowOutput {
                 name: output.name.clone(),
                 value_type: WorkflowValueType::String,
-                extractor: WorkflowOutputExtractor::TargetText(output.target.clone()),
+                extractor: WorkflowOutputExtractor::TargetText(Box::new(output.target.clone())),
                 required: true,
                 expected: output.expected.clone(),
             })
