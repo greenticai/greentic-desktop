@@ -86,6 +86,12 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 60. PR-60 Generic Web Adapter Semantics
 61. PR-61 Generic MCP Published Runner Fixtures
 62. PR-62 Store Index Generation from Extension Manifests
+63. PR-63 Real Recorder Session Runtime and Event Stream
+64. PR-64 Native Desktop Recording Backends
+65. PR-65 Web, Terminal, and Remote Recording Backends
+66. PR-66 Recording Normalisation, Locators, Redaction, and Evidence
+67. PR-67 Recorder GUI for Real Capture, Evidence Review, and Repair
+68. PR-68 Recorder End-to-End Fixtures and CI Harness
 
 ## Roadmap Alignment
 
