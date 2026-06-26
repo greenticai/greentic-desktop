@@ -5,7 +5,9 @@ use greentic_desktop_extension::{
 };
 use greentic_desktop_gui_assets::{asset, spa_asset, GuiAsset};
 use greentic_desktop_llm::{known_providers, provider_by_id, LlmProvider};
-use greentic_desktop_planner::{plan_prompt, PlanningContext, RunnerDraft};
+use greentic_desktop_planner::{
+    plan_prompt_with_default_llm, PlannerOptions, PlanningContext, RunnerDraft,
+};
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
     load_recording_session, normalise_recording, pause_recording_session, resume_recording_session,
@@ -2207,21 +2209,10 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
         ));
     }
 
-    let context = PlanningContext {
-        available_adapters: vec![StaticAdapter::new(AdapterCapabilities::new(
-            "greentic.desktop.playwright",
-            env!("CARGO_PKG_VERSION"),
-            ["web.goto", "web.click", "web.fill", "web.extract_text"],
-        ))
-        .capabilities()],
-        available_mcp_tools: Vec::new(),
-        application_metadata: Vec::new(),
-        existing_runners: state.runner_names.clone(),
-        ltm_examples: Vec::new(),
-        security_policies: vec!["unsigned drafts allowed locally".to_owned()],
-        desktop_observations: Vec::new(),
-    };
-    let draft = plan_prompt(&prompt, &context);
+    let context = planner_context(state);
+    let planned = plan_prompt_with_default_llm(&prompt, &context, &PlannerOptions::default())
+        .map_err(|err| api_error_json(&err.code, &err.message))?;
+    let draft = planned.draft;
     let draft_id = format!("draft-{:016x}", fnv1a64(prompt.as_bytes()));
     let draft_dir = planner_drafts_dir(state).join(&draft_id);
     std::fs::create_dir_all(&draft_dir).map_err(|err| {
@@ -2234,9 +2225,70 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
     let json = planner_draft_json(&draft_id, &draft, &yaml);
     std::fs::write(draft_dir.join("draft.json"), &json)
         .and_then(|_| std::fs::write(draft_dir.join("runner.yaml"), yaml))
-        .and_then(|_| std::fs::write(draft_dir.join("request.json"), body))
+        .and_then(|_| std::fs::write(draft_dir.join("request.json"), planned.request_json))
         .map_err(|err| api_error_json("runtime.io", &format!("Could not persist draft: {err}")))?;
     Ok(json)
+}
+
+fn planner_context(state: &GuiApiState) -> PlanningContext {
+    let mut adapters = vec![StaticAdapter::new(AdapterCapabilities::new(
+        "greentic.desktop.playwright",
+        env!("CARGO_PKG_VERSION"),
+        ["web.goto", "web.click", "web.fill", "web.extract_text"],
+    ))
+    .capabilities()];
+
+    match state.platform.as_str() {
+        "macos" => adapters.push(
+            StaticAdapter::new(AdapterCapabilities::new(
+                "greentic.desktop.macos",
+                env!("CARGO_PKG_VERSION"),
+                [
+                    "macos.activate_app",
+                    "macos.find_element",
+                    "macos.type_text",
+                    "macos.read_text",
+                ],
+            ))
+            .capabilities(),
+        ),
+        "windows" => adapters.push(
+            StaticAdapter::new(AdapterCapabilities::new(
+                "greentic.desktop.windows",
+                env!("CARGO_PKG_VERSION"),
+                [
+                    "windows.open_app",
+                    "windows.find_element",
+                    "windows.type_text",
+                    "windows.read_text",
+                ],
+            ))
+            .capabilities(),
+        ),
+        _ => adapters.push(
+            StaticAdapter::new(AdapterCapabilities::new(
+                "greentic.desktop.linux",
+                env!("CARGO_PKG_VERSION"),
+                [
+                    "linux.find_window",
+                    "linux.find_element",
+                    "linux.type_text",
+                    "linux.read_text",
+                ],
+            ))
+            .capabilities(),
+        ),
+    }
+
+    PlanningContext {
+        available_adapters: adapters,
+        available_mcp_tools: Vec::new(),
+        application_metadata: Vec::new(),
+        existing_runners: state.runner_names.clone(),
+        ltm_examples: Vec::new(),
+        security_policies: vec!["unsigned drafts allowed locally".to_owned()],
+        desktop_observations: Vec::new(),
+    }
 }
 
 fn planner_draft_action_json(

@@ -195,10 +195,28 @@ impl GreenticLlmClient for HeuristicLlmClient {
         };
         let capability = if lower.contains("terminal") || lower.contains("mainframe") {
             "terminal.read_screen"
+        } else if lower.contains("calculator") || lower.contains("desktop") || lower.contains("app")
+        {
+            desktop_capability(request)
         } else {
             "web.goto"
         };
         let mut inputs = Vec::new();
+        if lower.contains("calculator")
+            || lower.contains("two numbers")
+            || lower.contains("value 1")
+        {
+            inputs.push("number_1");
+        }
+        if lower.contains("calculator")
+            || lower.contains("two numbers")
+            || lower.contains("value 2")
+        {
+            inputs.push("number_2");
+        }
+        if lower.contains("calculator") || lower.contains("operation") {
+            inputs.push("operation");
+        }
         if lower.contains("company") {
             inputs.push("company_name");
         }
@@ -208,7 +226,12 @@ impl GreenticLlmClient for HeuristicLlmClient {
         if inputs.is_empty() && lower.contains("customer") {
             inputs.push("customer_name");
         }
-        let outputs = if lower.contains("customer id") || lower.contains("customer_id") {
+        let outputs = if lower.contains("calculator")
+            || lower.contains("calculate")
+            || lower.contains("result")
+        {
+            vec!["result"]
+        } else if lower.contains("customer id") || lower.contains("customer_id") {
             vec!["customer_id"]
         } else {
             Vec::new()
@@ -234,6 +257,33 @@ impl GreenticLlmClient for HeuristicLlmClient {
                 string_array(&open_questions.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>())
             ),
         })
+    }
+}
+
+fn desktop_capability(request: &LlmRequestEnvelope) -> &'static str {
+    let adapters = &request.context.available_adapters;
+    if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.macos"))
+    {
+        "macos.activate_app"
+    } else if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.windows"))
+    {
+        "windows.open_app"
+    } else if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.linux"))
+    {
+        "linux.find_window"
+    } else if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.java"))
+    {
+        "java.find_window"
+    } else {
+        "web.goto"
     }
 }
 
@@ -318,6 +368,27 @@ mod tests {
             .content
             .contains("\"runner_id\":\"crm.create_customer\""));
         assert!(response.content.contains("company_name"));
+    }
+
+    #[test]
+    fn heuristic_client_extracts_calculator_inputs_and_result() {
+        let client = HeuristicLlmClient;
+        let response = client
+            .complete(&LlmRequestEnvelope::prompt_to_runner(
+                "open the calculator, let me introduce value 1 and value 2 as well as the operation, use the calculator to calculate and retrieve the result and provide that back",
+                LlmPlanningContext {
+                    available_adapters: vec!["greentic.desktop.macos".to_owned()],
+                    ..LlmPlanningContext::default()
+                },
+            ))
+            .expect("heuristic response");
+
+        assert!(response.content.contains("\"number_1\""));
+        assert!(response.content.contains("\"number_2\""));
+        assert!(response.content.contains("\"operation\""));
+        assert!(response.content.contains("\"result\""));
+        assert!(response.content.contains("\"macos.activate_app\""));
+        assert!(response.content.contains("\"open_questions\":[]"));
     }
 
     #[test]
