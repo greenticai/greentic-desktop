@@ -2616,12 +2616,7 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
     }
 
     let context = PlanningContext {
-        available_adapters: vec![StaticAdapter::new(AdapterCapabilities::new(
-            "greentic.desktop.playwright",
-            env!("CARGO_PKG_VERSION"),
-            ["web.goto", "web.click", "web.fill", "web.extract_text"],
-        ))
-        .capabilities()],
+        available_adapters: planner_available_adapters(),
         available_mcp_tools: Vec::new(),
         application_metadata: Vec::new(),
         existing_runners: state.runner_names.clone(),
@@ -2673,6 +2668,83 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
         .and_then(|_| std::fs::write(planner_trace_path(state, &trace_id), trace_json))
         .map_err(|err| api_error_json("runtime.io", &format!("Could not persist draft: {err}")))?;
     Ok(json)
+}
+
+fn planner_available_adapters() -> Vec<AdapterCapabilities> {
+    let mut adapters = vec![
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.playwright",
+            env!("CARGO_PKG_VERSION"),
+            ["web.goto", "web.click", "web.fill", "web.extract_text"],
+        ))
+        .capabilities(),
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.terminal.tn3270",
+            env!("CARGO_PKG_VERSION"),
+            [
+                "terminal.connect",
+                "terminal.send_text",
+                "terminal.wait_for_screen",
+                "terminal.extract_field",
+            ],
+        ))
+        .capabilities(),
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.vision",
+            env!("CARGO_PKG_VERSION"),
+            [
+                "vision.screenshot",
+                "vision.find_text",
+                "vision.extract_text",
+            ],
+        ))
+        .capabilities(),
+    ];
+
+    #[cfg(target_os = "macos")]
+    adapters.push(
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.macos",
+            env!("CARGO_PKG_VERSION"),
+            [
+                "macos.activate_app",
+                "macos.find_element",
+                "macos.type_text",
+                "macos.read_text",
+            ],
+        ))
+        .capabilities(),
+    );
+    #[cfg(target_os = "linux")]
+    adapters.push(
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.linux",
+            env!("CARGO_PKG_VERSION"),
+            [
+                "linux.find_window",
+                "linux.find_element",
+                "linux.type_text",
+                "linux.read_text",
+            ],
+        ))
+        .capabilities(),
+    );
+    #[cfg(target_os = "windows")]
+    adapters.push(
+        StaticAdapter::new(AdapterCapabilities::new(
+            "greentic.desktop.windows",
+            env!("CARGO_PKG_VERSION"),
+            [
+                "windows.open_app",
+                "windows.find_element",
+                "windows.type_text",
+                "windows.read_text",
+            ],
+        ))
+        .capabilities(),
+    );
+
+    adapters
 }
 
 fn planner_draft_action_json(
@@ -2797,6 +2869,8 @@ fn planner_draft_json(
     yaml: &str,
 ) -> String {
     let package = &draft.package;
+    let inputs = clean_runner_fields(&package.inputs);
+    let outputs = clean_runner_fields(&package.outputs);
     let steps = package
         .steps
         .iter()
@@ -2818,14 +2892,21 @@ fn planner_draft_json(
         escape_json(&package.id),
         escape_json(&format!("{:?}", draft.risk).to_ascii_lowercase()),
         string_array_json(&draft.required_adapters),
-        string_array_json(&package.inputs),
-        string_array_json(&package.outputs),
+        string_array_json(&inputs),
+        string_array_json(&outputs),
         string_array_json(&package.secrets),
         steps,
         string_array_json(&package.assertions),
         string_array_json(&draft.open_questions),
         escape_json(yaml)
     )
+}
+
+fn clean_runner_fields(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| clean_runner_field(value))
+        .collect()
 }
 
 fn planner_trace_path(state: &GuiApiState, trace_id: &str) -> PathBuf {
@@ -3490,9 +3571,12 @@ fn provider_http_request(
     let instruction = llm_planner_instruction();
     let prompt = request.render_json();
     match client.provider.as_str() {
-        "openai" | "mistral" | "azure_openai" => {
+        "openai" | "mistral" | "azure_openai" | "deepseek" | "openai_compatible" | "nvidia_nim" => {
             let endpoint = client.endpoint(match client.provider.as_str() {
                 "mistral" => "https://api.mistral.ai/v1",
+                "deepseek" => "https://api.deepseek.com/v1",
+                "nvidia_nim" => "https://integrate.api.nvidia.com/v1",
+                "openai_compatible" => "http://127.0.0.1:8000/v1",
                 _ => "https://api.openai.com/v1",
             });
             let url = if endpoint.ends_with("/chat/completions") {
@@ -4145,6 +4229,9 @@ mod tests {
         let initial = llm_settings_json(&state);
         assert!(initial.contains("\"providers\""));
         assert!(initial.contains("\"id\":\"openai\""));
+        assert!(initial.contains("\"id\":\"deepseek\""));
+        assert!(initial.contains("\"id\":\"openai_compatible\""));
+        assert!(initial.contains("\"id\":\"nvidia_nim\""));
         assert!(initial.contains("\"defaultModel\":\"gpt-4.1-mini\""));
 
         let saved = save_llm_settings_json(
@@ -4161,6 +4248,34 @@ mod tests {
             .expect("llm settings should clear API key");
         assert!(cleared.contains("\"hasApiKey\":false"));
         assert!(llm_test_json(&state).contains("requires an API key"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn planner_draft_derives_calculator_inputs_and_output() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-calculator-draft-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let state = GuiApiState {
+            runtime_home: root.clone(),
+            evidence_store: root.join("evidence"),
+            ..GuiApiState::default()
+        };
+
+        let draft = create_planner_draft_json(
+            r#"{"prompt":"open the calculator app. Take three inputs: two numbers and one operation (plus, minus, divide or multiply) and make the calculator do the operation and return the result"}"#,
+            &state,
+        )
+        .expect("calculator prompt should generate draft");
+
+        assert!(draft.contains("\"number_1\""));
+        assert!(draft.contains("\"number_2\""));
+        assert!(draft.contains("\"operation\""));
+        assert!(draft.contains("\"result\""));
+        assert!(!draft.contains("\"inputs\":[]"));
+        assert!(!draft.contains("\"outputs\":[]"));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -150,6 +150,27 @@ pub fn supported_provider_profiles() -> Vec<LlmProviderProfile> {
             requires_api_key: true,
         },
         LlmProviderProfile {
+            id: "deepseek",
+            label: "DeepSeek",
+            default_model: "deepseek-chat",
+            endpoint: Some("https://api.deepseek.com/v1"),
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
+            id: "openai_compatible",
+            label: "OpenAI compatible",
+            default_model: "gpt-4o-mini",
+            endpoint: Some("http://127.0.0.1:8000/v1"),
+            requires_api_key: false,
+        },
+        LlmProviderProfile {
+            id: "nvidia_nim",
+            label: "NVIDIA NIM",
+            default_model: "meta/llama-3.1-70b-instruct",
+            endpoint: Some("https://integrate.api.nvidia.com/v1"),
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
             id: "ollama",
             label: "Ollama",
             default_model: "llama3.1",
@@ -240,12 +261,22 @@ impl GreenticLlmClient for HeuristicLlmClient {
         } else {
             "low"
         };
-        let capability = if lower.contains("terminal") || lower.contains("mainframe") {
+        let calculator_request = lower.contains("calculator")
+            || ((lower.contains("number 1") || lower.contains("two numbers"))
+                && lower.contains("operation"));
+        let capability = if calculator_request {
+            native_planner_capability(&request.context)
+        } else if lower.contains("terminal") || lower.contains("mainframe") {
             "terminal.read_screen"
         } else {
             "web.goto"
         };
         let mut inputs = Vec::new();
+        if calculator_request {
+            inputs.push("number_1");
+            inputs.push("number_2");
+            inputs.push("operation");
+        }
         if lower.contains("company") {
             inputs.push("company_name");
         }
@@ -255,7 +286,12 @@ impl GreenticLlmClient for HeuristicLlmClient {
         if inputs.is_empty() && lower.contains("customer") {
             inputs.push("customer_name");
         }
-        let outputs = if lower.contains("customer id") || lower.contains("customer_id") {
+        let outputs = if calculator_request
+            || lower.contains("return result")
+            || lower.contains("return the result")
+        {
+            vec!["result"]
+        } else if lower.contains("customer id") || lower.contains("customer_id") {
             vec!["customer_id"]
         } else {
             Vec::new()
@@ -281,6 +317,30 @@ impl GreenticLlmClient for HeuristicLlmClient {
                 string_array(&open_questions.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>())
             ),
         })
+    }
+}
+
+fn native_planner_capability(context: &LlmPlanningContext) -> &'static str {
+    if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.contains("macos"))
+    {
+        "macos.activate_app"
+    } else if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.contains("linux"))
+    {
+        "linux.find_window"
+    } else if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.contains("windows"))
+    {
+        "windows.open_app"
+    } else {
+        "vision.screenshot"
     }
 }
 
@@ -368,12 +428,40 @@ mod tests {
     }
 
     #[test]
+    fn heuristic_client_derives_calculator_inputs_and_result_output() {
+        let client = HeuristicLlmClient;
+        let response = client
+            .complete(&LlmRequestEnvelope::prompt_to_runner(
+                "open the calculator app. Take three inputs: two numbers and one operation (plus, minus, divide or multiply) and make the calculator do the operation and return the result",
+                LlmPlanningContext {
+                    available_adapters: vec!["greentic.desktop.macos".to_owned()],
+                    ..LlmPlanningContext::default()
+                },
+            ))
+            .expect("heuristic response");
+
+        assert!(response.content.contains("\"number_1\""));
+        assert!(response.content.contains("\"number_2\""));
+        assert!(response.content.contains("\"operation\""));
+        assert!(response.content.contains("\"result\""));
+        assert!(response.content.contains("\"macos.activate_app\""));
+    }
+
+    #[test]
     fn exposes_supported_provider_profiles() {
         let providers = supported_provider_profiles();
         assert!(providers.iter().any(|provider| provider.id == "local"));
         assert!(providers
             .iter()
             .any(|provider| provider.id == "openai" && provider.requires_api_key));
+        assert!(
+            providers
+                .iter()
+                .any(|provider| provider.id == "deepseek"
+                    && provider.default_model == "deepseek-chat")
+        );
+        assert!(provider_profile("openai_compatible").is_some());
+        assert!(provider_profile("nvidia_nim").is_some());
         assert!(provider_profile("ollama").is_some());
     }
 }

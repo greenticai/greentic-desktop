@@ -748,10 +748,16 @@ fn infer_inputs(prompt: &str) -> Vec<String> {
     for name in extract_named_fields(prompt, &["using", "with", "from"]) {
         inputs.push(format!("inputs.{name}"));
     }
-    if prompt.contains("number 1") || prompt.contains("number one") {
+    if prompt.contains("number 1")
+        || prompt.contains("number one")
+        || prompt.contains("two numbers")
+    {
         inputs.push("inputs.number_1".to_owned());
     }
-    if prompt.contains("number 2") || prompt.contains("number two") {
+    if prompt.contains("number 2")
+        || prompt.contains("number two")
+        || prompt.contains("two numbers")
+    {
         inputs.push("inputs.number_2".to_owned());
     }
     if prompt.contains("operation") {
