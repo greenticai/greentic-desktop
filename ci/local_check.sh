@@ -102,6 +102,26 @@ if [ "${GREENTIC_CHECK_FRONTEND:-0}" = "1" ]; then
   fi
 fi
 
+if [ "${GREENTIC_CHECK_E2E_SMOKE:-0}" = "1" ]; then
+  header "GUI E2E smoke"
+  bash ci/gui_e2e_smoke.sh
+else
+  header "GUI E2E smoke"
+  printf 'Skipped. Set GREENTIC_CHECK_E2E_SMOKE=1 to run the mandatory release smoke gate locally.\n'
+fi
+
+if [ "${GREENTIC_CHECK_E2E:-0}" = "1" ]; then
+  header "GUI E2E functional"
+  bash ci/gui_e2e_functional.sh
+fi
+
+if [ "${GREENTIC_DESKTOP_REAL_DESKTOP:-0}" = "1" ] \
+  || [ "${GREENTIC_DESKTOP_REAL_JAVA:-0}" = "1" ] \
+  || [ "${GREENTIC_DESKTOP_REAL_LLM:-0}" = "1" ]; then
+  header "GUI E2E real desktop"
+  bash ci/gui_e2e_desktop_manual.sh
+fi
+
 CRATES="$(locally_packageable_crates)"
 if [ -z "$CRATES" ]; then
   header "cargo package"

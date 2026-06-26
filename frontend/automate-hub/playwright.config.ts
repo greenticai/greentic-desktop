@@ -26,7 +26,22 @@ export default defineConfig({
     {
       name: "chromium-functional",
       use: { ...devices["Desktop Chrome"] },
-      grepInvert: /@smoke|@manual|@desktop-real/,
+      grepInvert: /@smoke|@manual|@desktop-real|@java-real/,
+    },
+    {
+      name: "desktop-real-macos",
+      use: { ...devices["Desktop Chrome"] },
+      grep: /@manual|@desktop-real|@java-real/,
+    },
+    {
+      name: "desktop-real-windows",
+      use: { ...devices["Desktop Chrome"] },
+      grep: /@manual|@desktop-real|@java-real/,
+    },
+    {
+      name: "desktop-real-linux",
+      use: { ...devices["Desktop Chrome"] },
+      grep: /@manual|@desktop-real|@java-real/,
     },
   ],
 });

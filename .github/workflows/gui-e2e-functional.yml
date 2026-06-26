@@ -1,0 +1,66 @@
+name: GUI E2E Functional
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: gui-e2e-functional-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  functional:
+    name: functional (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_HTTP_MULTIPLEXING: "false"
+      CARGO_HTTP_TIMEOUT: "120"
+      CARGO_NET_RETRY: "10"
+      GREENTIC_CHECK_E2E: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/automate-hub/package-lock.json
+      - name: Install frontend dependencies
+        shell: bash
+        run: npm --prefix frontend/automate-hub ci
+      - name: Install Playwright browser
+        shell: bash
+        run: |
+          cd frontend/automate-hub
+          npx playwright install chromium
+      - name: Run GUI functional E2E
+        shell: bash
+        run: bash ci/gui_e2e_functional.sh
+      - name: Write release gate report
+        if: always()
+        shell: bash
+        env:
+          GREENTIC_E2E_SMOKE_STATUS: "see GUI E2E Smoke workflow"
+          GREENTIC_E2E_FUNCTIONAL_STATUS: "${{ job.status }}"
+        run: bash ci/gui_e2e_release_report.sh > gui-e2e-release-report.md
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-e2e-functional-${{ matrix.os }}
+          path: |
+            gui-e2e-release-report.md
+            frontend/automate-hub/playwright-report
+            frontend/automate-hub/test-results
+          if-no-files-found: ignore
+
