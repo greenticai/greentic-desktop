@@ -284,6 +284,19 @@ export interface LlmSettingsDto {
   endpoint: string | null;
   secretRef: string | null;
   mode: "heuristic" | "remote" | string;
+  requiresApiKey: boolean;
+  hasApiKey: boolean;
+  apiKey?: string;
+  clearApiKey?: boolean;
+  providers: LlmProviderDto[];
+}
+
+export interface LlmProviderDto {
+  id: string;
+  label: string;
+  defaultModel: string;
+  endpoint: string | null;
+  requiresApiKey: boolean;
 }
 
 export interface LlmTestResultDto {

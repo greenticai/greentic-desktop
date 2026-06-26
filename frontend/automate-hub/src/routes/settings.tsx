@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import type { ExtensionDto, SetupChecklistItemDto } from "@/lib/types";
+import type { ExtensionDto, LlmSettingsDto, SetupChecklistItemDto } from "@/lib/types";
 import {
   Select,
   SelectContent,
@@ -88,6 +88,9 @@ function SettingsPage() {
   const [query, setQuery] = useState("");
   const [setupStatus, setSetupStatus] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [llmDraft, setLlmDraft] = useState<LlmSettingsDto | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [clearApiKey, setClearApiKey] = useState(false);
 
   const runtime = useQuery({ queryKey: ["runtime-info"], queryFn: api.runtimeInfo });
   const setup = useQuery({ queryKey: ["setup-checklist"], queryFn: api.setupChecklist });
@@ -101,6 +104,14 @@ function SettingsPage() {
     queryFn: api.installedExtensions,
   });
   const llm = useQuery({ queryKey: ["llm-settings"], queryFn: api.llmSettings });
+
+  useEffect(() => {
+    if (llm.data) {
+      setLlmDraft(llm.data);
+      setApiKey("");
+      setClearApiKey(false);
+    }
+  }, [llm.data]);
 
   const extensionAction = useMutation({
     mutationFn: ({ extension, action }: { extension: ExtensionDto; action: string }) =>
@@ -127,8 +138,19 @@ function SettingsPage() {
     onError: (error) => setSetupStatus(error instanceof Error ? error.message : "Setup failed"),
   });
   const saveLlm = useMutation({
-    mutationFn: () => api.saveLlmSettings(llm.data!),
-    onSuccess: () => setActionStatus("LLM settings saved"),
+    mutationFn: () =>
+      api.saveLlmSettings({
+        ...llmDraft!,
+        apiKey: apiKey.trim() || undefined,
+        clearApiKey,
+      }),
+    onSuccess: (settings) => {
+      setActionStatus("LLM settings saved");
+      setLlmDraft(settings);
+      setApiKey("");
+      setClearApiKey(false);
+      void queryClient.invalidateQueries({ queryKey: ["llm-settings"] });
+    },
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Save failed"),
   });
 
@@ -138,6 +160,37 @@ function SettingsPage() {
     ...extension,
     installed: extension.installed || installedIds.has(extension.id),
   }));
+  const llmProviders = llmDraft?.providers ?? llm.data?.providers ?? [];
+  const selectedProvider = llmProviders.find((provider) => provider.id === llmDraft?.provider);
+
+  function updateLlmProvider(providerId: string) {
+    const provider = llmProviders.find((candidate) => candidate.id === providerId);
+    if (!provider || !llmDraft) {
+      return;
+    }
+    setLlmDraft({
+      ...llmDraft,
+      provider: provider.id,
+      model: provider.defaultModel,
+      endpoint: provider.endpoint,
+      secretRef: provider.requiresApiKey ? `llm.${provider.id}.api_key` : null,
+      mode: provider.id === "local" ? "heuristic" : "remote",
+      requiresApiKey: provider.requiresApiKey,
+      hasApiKey: false,
+    });
+    setApiKey("");
+    setClearApiKey(false);
+  }
+
+  function updateLlmField(field: "model" | "endpoint", value: string) {
+    if (!llmDraft) {
+      return;
+    }
+    setLlmDraft({
+      ...llmDraft,
+      [field]: field === "endpoint" && !value.trim() ? null : value,
+    });
+  }
 
   return (
     <div className="p-8 md:p-12 max-w-4xl mx-auto space-y-6">
@@ -221,22 +274,78 @@ function SettingsPage() {
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <Label>Provider</Label>
-            <Select value={llm.data?.provider ?? "local"}>
+            <Select
+              value={llmDraft?.provider ?? "local"}
+              onValueChange={(provider) => updateLlmProvider(provider)}
+            >
               <SelectTrigger className="mt-1.5">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="local">Local heuristic</SelectItem>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="anthropic">Anthropic</SelectItem>
+                {llmProviders.map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {provider.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
           <div>
             <Label>Model</Label>
-            <Input className="mt-1.5" readOnly value={llm.data?.model ?? "heuristic-planner"} />
+            <Input
+              className="mt-1.5"
+              value={llmDraft?.model ?? ""}
+              placeholder={selectedProvider?.defaultModel ?? "heuristic-planner"}
+              onChange={(event) => updateLlmField("model", event.target.value)}
+            />
           </div>
         </div>
+        <div className="mt-4">
+          <Label>Endpoint</Label>
+          <Input
+            className="mt-1.5"
+            value={llmDraft?.endpoint ?? ""}
+            placeholder={selectedProvider?.endpoint ?? "Provider default"}
+            onChange={(event) => updateLlmField("endpoint", event.target.value)}
+          />
+        </div>
+        {llmDraft?.requiresApiKey && (
+          <div className="mt-4 grid gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label>API key</Label>
+              <span className="text-xs text-muted-foreground">
+                {llmDraft.hasApiKey && !clearApiKey ? "Saved" : "Not saved"}
+              </span>
+            </div>
+            <Input
+              type="password"
+              value={apiKey}
+              placeholder={llmDraft.hasApiKey ? "Leave blank to keep existing key" : "Paste API key"}
+              onChange={(event) => {
+                setApiKey(event.target.value);
+                setClearApiKey(false);
+              }}
+            />
+            {llmDraft.hasApiKey && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={clearApiKey}
+                  onChange={(event) => {
+                    setClearApiKey(event.target.checked);
+                    if (event.target.checked) {
+                      setApiKey("");
+                    }
+                  }}
+                />
+                Clear saved API key
+              </label>
+            )}
+            <div className="text-xs text-muted-foreground">
+              Secret ref {llmDraft.secretRef}. Saved keys are write-only from this screen.
+            </div>
+          </div>
+        )}
         <div className="mt-4 flex gap-2">
           <Button
             variant="outline"
@@ -249,7 +358,7 @@ function SettingsPage() {
           <Button
             variant="outline"
             size="sm"
-            disabled={!llm.data || saveLlm.isPending}
+            disabled={!llmDraft || saveLlm.isPending}
             onClick={() => saveLlm.mutate()}
           >
             Save

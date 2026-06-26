@@ -4,6 +4,7 @@ use greentic_desktop_extension::{
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
 };
 use greentic_desktop_gui_assets::{asset, spa_asset, GuiAsset};
+use greentic_desktop_llm::{provider_profile, supported_provider_profiles, LlmProviderProfile};
 use greentic_desktop_planner::{plan_prompt, PlanningContext, RunnerDraft};
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
@@ -12,14 +13,18 @@ use greentic_desktop_recorder::{
     RecordingStartRequest,
 };
 use greentic_distributor_client::GreenticDistributorClient;
+use greentic_secrets_api::{SecretError, SecretsManager};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -387,7 +392,7 @@ fn api_response(
         ("GET" | "HEAD", "/api/v1/mcp/status") => mcp_status_json(state),
         ("GET" | "HEAD", "/api/v1/mcp/tools") => mcp_tools_json(state),
         ("GET" | "HEAD", "/api/v1/mcp/client-config") => mcp_client_config_json(state),
-        ("GET" | "HEAD", "/api/v1/settings/llm") => llm_settings_json(),
+        ("GET" | "HEAD", "/api/v1/settings/llm") => llm_settings_json(state),
         ("POST", "/api/v1/planner/drafts") => match create_planner_draft_json(body, state) {
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
@@ -429,10 +434,11 @@ fn api_response(
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
         },
-        ("PUT", "/api/v1/settings/llm") => llm_settings_json(),
-        ("POST", "/api/v1/settings/llm/test") => {
-            r#"{"status":"ok","message":"Heuristic planner is available."}"#.to_owned()
-        }
+        ("PUT", "/api/v1/settings/llm") => match save_llm_settings_json(body, state) {
+            Ok(json) => json,
+            Err(error) => return json_response(400, "Bad Request", &error, head_only),
+        },
+        ("POST", "/api/v1/settings/llm/test") => llm_test_json(state),
         ("POST", "/api/v1/extensions/install") => match extension_install_json(body, state) {
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
@@ -2775,9 +2781,268 @@ fn extension_action_json(path: &str, state: &GuiApiState) -> Result<String, Stri
     ))
 }
 
-fn llm_settings_json() -> String {
-    r#"{"provider":"local","model":"heuristic-planner","endpoint":null,"secretRef":null,"mode":"heuristic"}"#
-        .to_owned()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LlmSettings {
+    provider: String,
+    model: String,
+    endpoint: Option<String>,
+}
+
+fn default_llm_provider() -> LlmProviderProfile {
+    provider_profile("local").expect("local LLM provider should be registered")
+}
+
+fn llm_settings_json(state: &GuiApiState) -> String {
+    let settings = load_llm_settings(state);
+    render_llm_settings_json(state, &settings)
+}
+
+fn save_llm_settings_json(body: &str, state: &GuiApiState) -> Result<String, String> {
+    let provider = json_string_field(body, "provider").unwrap_or_else(|| "local".to_owned());
+    let profile = provider_profile(&provider).ok_or_else(|| {
+        api_error_json(
+            "llm.provider_unsupported",
+            &format!("LLM provider '{provider}' is not supported."),
+        )
+    })?;
+    let model = json_string_field(body, "model")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| profile.default_model.to_owned());
+    let endpoint = json_string_field(body, "endpoint").and_then(|value| {
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    });
+    let settings = LlmSettings {
+        provider: profile.id.to_owned(),
+        model,
+        endpoint: endpoint.or_else(|| profile.endpoint.map(str::to_owned)),
+    };
+    let secret_ref = llm_secret_ref(&settings.provider);
+    let api_key = json_string_field(body, "apiKey").unwrap_or_default();
+    if json_bool_field(body, "clearApiKey").unwrap_or(false) {
+        delete_gui_secret(state, &secret_ref)?;
+    } else if !api_key.trim().is_empty() {
+        write_gui_secret(state, &secret_ref, api_key.trim())?;
+    }
+    write_llm_settings(state, &settings)?;
+    Ok(render_llm_settings_json(state, &settings))
+}
+
+fn llm_test_json(state: &GuiApiState) -> String {
+    let settings = load_llm_settings(state);
+    let profile = provider_profile(&settings.provider).unwrap_or_else(default_llm_provider);
+    if profile.requires_api_key && !secret_exists(state, &llm_secret_ref(&settings.provider)) {
+        return format!(
+            r#"{{"status":"error","message":"{} requires an API key before it can be tested."}}"#,
+            escape_json(profile.label)
+        );
+    }
+    if settings.provider == "local" {
+        return r#"{"status":"ok","message":"Heuristic planner is available."}"#.to_owned();
+    }
+    format!(
+        r#"{{"status":"ok","message":"{} is configured with model {}."}}"#,
+        escape_json(profile.label),
+        escape_json(&settings.model)
+    )
+}
+
+fn render_llm_settings_json(state: &GuiApiState, settings: &LlmSettings) -> String {
+    let profile = provider_profile(&settings.provider).unwrap_or_else(default_llm_provider);
+    let secret_ref = if profile.requires_api_key {
+        Some(llm_secret_ref(&settings.provider))
+    } else {
+        None
+    };
+    let has_api_key = secret_ref
+        .as_deref()
+        .map(|key| secret_exists(state, key))
+        .unwrap_or(false);
+    format!(
+        r#"{{"provider":"{}","model":"{}","endpoint":{},"secretRef":{},"mode":"{}","requiresApiKey":{},"hasApiKey":{},"providers":{}}}"#,
+        escape_json(&settings.provider),
+        escape_json(&settings.model),
+        optional_string_json(settings.endpoint.as_deref()),
+        optional_string_json(secret_ref.as_deref()),
+        if settings.provider == "local" {
+            "heuristic"
+        } else {
+            "remote"
+        },
+        profile.requires_api_key,
+        has_api_key,
+        llm_providers_json()
+    )
+}
+
+fn llm_providers_json() -> String {
+    format!(
+        "[{}]",
+        supported_provider_profiles()
+            .into_iter()
+            .map(|provider| {
+                format!(
+                    r#"{{"id":"{}","label":"{}","defaultModel":"{}","endpoint":{},"requiresApiKey":{}}}"#,
+                    escape_json(provider.id),
+                    escape_json(provider.label),
+                    escape_json(provider.default_model),
+                    optional_string_json(provider.endpoint),
+                    provider.requires_api_key
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn load_llm_settings(state: &GuiApiState) -> LlmSettings {
+    let contents = std::fs::read_to_string(llm_settings_path(state)).unwrap_or_default();
+    let provider = json_string_field(&contents, "provider").unwrap_or_else(|| "local".to_owned());
+    let profile = provider_profile(&provider).unwrap_or_else(default_llm_provider);
+    let model = json_string_field(&contents, "model")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| profile.default_model.to_owned());
+    let endpoint = json_string_field(&contents, "endpoint")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| profile.endpoint.map(str::to_owned));
+    LlmSettings {
+        provider: profile.id.to_owned(),
+        model,
+        endpoint,
+    }
+}
+
+fn write_llm_settings(state: &GuiApiState, settings: &LlmSettings) -> Result<(), String> {
+    let path = llm_settings_path(state);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            api_error_json(
+                "runtime.io",
+                &format!("Could not create settings dir: {err}"),
+            )
+        })?;
+    }
+    let json = format!(
+        r#"{{"provider":"{}","model":"{}","endpoint":{}}}"#,
+        escape_json(&settings.provider),
+        escape_json(&settings.model),
+        optional_string_json(settings.endpoint.as_deref())
+    );
+    std::fs::write(path, json)
+        .map_err(|err| api_error_json("runtime.io", &format!("Could not save LLM settings: {err}")))
+}
+
+fn llm_settings_path(state: &GuiApiState) -> PathBuf {
+    state.runtime_home.join("settings").join("llm.json")
+}
+
+fn llm_secret_ref(provider: &str) -> String {
+    format!("llm.{provider}.api_key")
+}
+
+fn secret_exists(state: &GuiApiState, secret_ref: &str) -> bool {
+    let store = GuiSecretsStore::new(state);
+    block_on_ready(store.read(secret_ref)).is_ok()
+}
+
+fn write_gui_secret(state: &GuiApiState, secret_ref: &str, value: &str) -> Result<(), String> {
+    let store = GuiSecretsStore::new(state);
+    block_on_ready(store.write(secret_ref, value.as_bytes())).map_err(|err| {
+        api_error_json(
+            "secrets.write_failed",
+            &format!("Could not save secret via Greentic secrets API: {err}"),
+        )
+    })
+}
+
+fn delete_gui_secret(state: &GuiApiState, secret_ref: &str) -> Result<(), String> {
+    let store = GuiSecretsStore::new(state);
+    match block_on_ready(store.delete(secret_ref)) {
+        Ok(()) => Ok(()),
+        Err(SecretError::NotFound(_)) => Ok(()),
+        Err(err) => Err(api_error_json(
+            "secrets.delete_failed",
+            &format!("Could not delete secret via Greentic secrets API: {err}"),
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GuiSecretsStore {
+    root: PathBuf,
+}
+
+impl GuiSecretsStore {
+    fn new(state: &GuiApiState) -> Self {
+        Self {
+            root: state.runtime_home.join("secrets"),
+        }
+    }
+
+    fn path_for(&self, path: &str) -> PathBuf {
+        self.root.join(format!("{}.secret", slug(path)))
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretsManager for GuiSecretsStore {
+    async fn read(&self, path: &str) -> greentic_secrets_api::Result<Vec<u8>> {
+        std::fs::read(self.path_for(path)).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                SecretError::NotFound(path.to_owned())
+            } else {
+                SecretError::Backend(Cow::Owned(err.to_string()))
+            }
+        })
+    }
+
+    async fn write(&self, path: &str, bytes: &[u8]) -> greentic_secrets_api::Result<()> {
+        let secret_path = self.path_for(path);
+        if let Some(parent) = secret_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| SecretError::Backend(Cow::Owned(err.to_string())))?;
+        }
+        std::fs::write(secret_path, bytes)
+            .map_err(|err| SecretError::Backend(Cow::Owned(err.to_string())))
+    }
+
+    async fn delete(&self, path: &str) -> greentic_secrets_api::Result<()> {
+        match std::fs::remove_file(self.path_for(path)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err(SecretError::NotFound(path.to_owned()))
+            }
+            Err(err) => Err(SecretError::Backend(Cow::Owned(err.to_string()))),
+        }
+    }
+}
+
+struct NoopWaker;
+
+impl Wake for NoopWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn block_on_ready<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    loop {
+        match Future::poll(future.as_mut(), &mut context) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => thread::yield_now(),
+        }
+    }
+}
+
+fn optional_string_json(value: Option<&str>) -> String {
+    value
+        .map(|value| format!(r#""{}""#, escape_json(value)))
+        .unwrap_or_else(|| "null".to_owned())
 }
 
 fn string_array_json(values: &[String]) -> String {
@@ -3180,6 +3445,41 @@ mod tests {
             ),
         );
         assert!(response_head(&ok).starts_with("HTTP/1.1 200 OK"));
+    }
+
+    #[test]
+    fn llm_settings_lists_providers_and_stores_api_key_write_only() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-llm-settings-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let state = GuiApiState {
+            runtime_home: root.clone(),
+            evidence_store: root.join("evidence"),
+            ..GuiApiState::default()
+        };
+
+        let initial = llm_settings_json(&state);
+        assert!(initial.contains("\"providers\""));
+        assert!(initial.contains("\"id\":\"openai\""));
+        assert!(initial.contains("\"defaultModel\":\"gpt-4.1-mini\""));
+
+        let saved = save_llm_settings_json(
+            r#"{"provider":"openai","model":"gpt-4.1-mini","endpoint":"https://api.openai.com/v1","apiKey":"sk-test-secret"}"#,
+            &state,
+        )
+        .expect("llm settings should save");
+        assert!(saved.contains("\"provider\":\"openai\""));
+        assert!(saved.contains("\"hasApiKey\":true"));
+        assert!(!saved.contains("sk-test-secret"));
+        assert!(llm_test_json(&state).contains("OpenAI is configured"));
+
+        let cleared = save_llm_settings_json(r#"{"provider":"openai","clearApiKey":true}"#, &state)
+            .expect("llm settings should clear API key");
+        assert!(cleared.contains("\"hasApiKey\":false"));
+        assert!(llm_test_json(&state).contains("requires an API key"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -77,6 +77,75 @@ pub trait GreenticLlmClient {
     fn complete(&self, request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmProviderProfile {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub default_model: &'static str,
+    pub endpoint: Option<&'static str>,
+    pub requires_api_key: bool,
+}
+
+pub fn supported_provider_profiles() -> Vec<LlmProviderProfile> {
+    vec![
+        LlmProviderProfile {
+            id: "local",
+            label: "Local heuristic",
+            default_model: "heuristic-planner",
+            endpoint: None,
+            requires_api_key: false,
+        },
+        LlmProviderProfile {
+            id: "openai",
+            label: "OpenAI",
+            default_model: "gpt-4.1-mini",
+            endpoint: Some("https://api.openai.com/v1"),
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
+            id: "anthropic",
+            label: "Anthropic",
+            default_model: "claude-3-5-sonnet-latest",
+            endpoint: Some("https://api.anthropic.com"),
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
+            id: "azure_openai",
+            label: "Azure OpenAI",
+            default_model: "gpt-4.1-mini",
+            endpoint: None,
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
+            id: "google",
+            label: "Google Gemini",
+            default_model: "gemini-1.5-pro",
+            endpoint: Some("https://generativelanguage.googleapis.com"),
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
+            id: "mistral",
+            label: "Mistral",
+            default_model: "mistral-large-latest",
+            endpoint: Some("https://api.mistral.ai/v1"),
+            requires_api_key: true,
+        },
+        LlmProviderProfile {
+            id: "ollama",
+            label: "Ollama",
+            default_model: "llama3.1",
+            endpoint: Some("http://127.0.0.1:11434"),
+            requires_api_key: false,
+        },
+    ]
+}
+
+pub fn provider_profile(id: &str) -> Option<LlmProviderProfile> {
+    supported_provider_profiles()
+        .into_iter()
+        .find(|profile| profile.id == id)
+}
+
 #[derive(Debug, Clone)]
 pub struct StaticLlmClient {
     response: Result<LlmResponse, LlmError>,
@@ -243,5 +312,15 @@ mod tests {
             .content
             .contains("\"runner_id\":\"crm.create_customer\""));
         assert!(response.content.contains("company_name"));
+    }
+
+    #[test]
+    fn exposes_supported_provider_profiles() {
+        let providers = supported_provider_profiles();
+        assert!(providers.iter().any(|provider| provider.id == "local"));
+        assert!(providers
+            .iter()
+            .any(|provider| provider.id == "openai" && provider.requires_api_key));
+        assert!(provider_profile("ollama").is_some());
     }
 }

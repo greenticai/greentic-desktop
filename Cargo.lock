@@ -33,6 +33,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "anyhow"
+version = "1.0.103"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+
+[[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -296,12 +313,15 @@ dependencies = [
 name = "greentic-desktop-gui"
 version = "0.1.3"
 dependencies = [
+ "async-trait",
  "greentic-desktop-adapter",
  "greentic-desktop-extension",
  "greentic-desktop-gui-assets",
+ "greentic-desktop-llm",
  "greentic-desktop-planner",
  "greentic-desktop-recorder",
  "greentic-distributor-client",
+ "greentic-secrets-api",
 ]
 
 [[package]]
@@ -569,6 +589,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "greentic-secrets-api"
+version = "1.2.0-research.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9aa8a4a95e273072eea4090133c4c7acb35da555cfc534a150327df76ea722c2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "thiserror",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -828,6 +859,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
