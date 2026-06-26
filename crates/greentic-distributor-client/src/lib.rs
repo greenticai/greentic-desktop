@@ -213,11 +213,7 @@ impl StoreIndex {
                 },
                 StoreExtension {
                     id: "greentic.desktop.macos.ax".to_owned(),
-                    aliases: vec![
-                        "macos".to_owned(),
-                        "macos-ax".to_owned(),
-                        "calculator".to_owned(),
-                    ],
+                    aliases: vec!["macos".to_owned(), "macos-ax".to_owned()],
                     name: "macOS Accessibility Adapter".to_owned(),
                     description: "Drive native macOS apps through Accessibility.".to_owned(),
                     latest: "1.0.0".to_owned(),
@@ -362,8 +358,8 @@ mod tests {
         assert_eq!(versions, vec!["1.0.0"]);
 
         let macos = client
-            .resolve("calculator")
-            .expect("calculator alias should resolve to macOS adapter");
+            .resolve("macos")
+            .expect("macOS alias should resolve to macOS adapter");
         assert_eq!(macos.extension_id, "greentic.desktop.macos.ax");
         assert_eq!(
             macos.resolved_uri,

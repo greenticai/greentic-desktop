@@ -130,8 +130,6 @@ struct MacOsState {
     elements: BTreeMap<String, String>,
     screenshots: Vec<String>,
     recorded: Vec<RecordedEvent>,
-    calculator_expression: String,
-    calculator_display: Option<String>,
 }
 
 impl MacOsAccessibilityAdapter {
@@ -243,43 +241,12 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
                 state.elements.entry(target_key(&step.target)).or_default();
             }
             "macos.type_text" => {
-                if state.active_app.as_deref() == Some("Calculator") {
-                    if let Some(value) = &step.value {
-                        state.calculator_expression.push_str(value);
-                        let expression = state.calculator_expression.clone();
-                        state.calculator_display = Some(expression.clone());
-                        state
-                            .elements
-                            .insert("calculator display".to_owned(), expression);
-                    }
-                }
                 state.elements.insert(
                     target_key(&step.target),
                     step.value.clone().unwrap_or_default(),
                 );
             }
-            "macos.click_element"
-                if state.active_app.as_deref() == Some("Calculator")
-                    && target_key(&step.target).contains("equals") =>
-            {
-                let result = evaluate_calculator_expression(&state.calculator_expression)
-                    .map_err(AdapterError::ExecutionFailed)?;
-                state.calculator_display = Some(result.clone());
-                state
-                    .elements
-                    .insert("calculator display".to_owned(), result);
-            }
-            "macos.click_element" if target_key(&step.target).contains("save") => {
-                state
-                    .elements
-                    .insert("status".to_owned(), "Saved".to_owned());
-            }
             "macos.click_element" => {}
-            "macos.read_text" if state.active_app.as_deref() == Some("Calculator") => {
-                if let Some(display) = state.calculator_display.clone() {
-                    state.elements.insert(target_key(&step.target), display);
-                }
-            }
             "macos.read_text" => {}
             "macos.screenshot" => {
                 state
@@ -378,211 +345,172 @@ fn target_key(target: &LocatorTarget) -> String {
         .to_lowercase()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MacOsCalculatorOperation {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-}
-
-impl MacOsCalculatorOperation {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "+" => Some(Self::Add),
-            "-" => Some(Self::Subtract),
-            "*" | "x" | "X" | "×" => Some(Self::Multiply),
-            "/" | "÷" => Some(Self::Divide),
-            _ => None,
-        }
-    }
-
-    pub fn symbol(self) -> &'static str {
-        match self {
-            Self::Add => "+",
-            Self::Subtract => "-",
-            Self::Multiply => "*",
-            Self::Divide => "/",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
-pub struct MacOsCalculatorRequest {
-    pub number_1: f64,
-    pub number_2: f64,
-    pub operation: MacOsCalculatorOperation,
+pub struct MacOsAppWorkflow {
+    pub app_name: String,
+    pub window_title: String,
+    pub prompt: String,
+    pub inputs: Vec<MacOsWorkflowInput>,
+    pub submit: Option<MacOsWorkflowAction>,
+    pub outputs: Vec<MacOsWorkflowOutput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MacOsCalculatorOutcome {
+pub struct MacOsWorkflowInput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsWorkflowAction {
+    pub name: String,
+    pub target: LocatorTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsWorkflowOutput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsAppWorkflowOutcome {
     pub prompt: String,
-    pub result: String,
+    pub outputs: BTreeMap<String, String>,
     pub steps: Vec<StepResult>,
 }
 
-pub fn run_macos_calculator_e2e(
+pub fn run_macos_app_workflow(
     adapter: &MacOsAccessibilityAdapter,
-    request: MacOsCalculatorRequest,
-) -> AdapterResult<MacOsCalculatorOutcome> {
-    let expected = evaluate_calculator_request(&request)?;
-    let prompt = format!(
-        "Open Calculator and compute {} {} {}.",
-        format_calculator_number(request.number_1),
-        request.operation.symbol(),
-        format_calculator_number(request.number_2)
-    );
-    let display = calculator_display_target();
-    let steps = vec![
+    workflow: MacOsAppWorkflow,
+) -> AdapterResult<MacOsAppWorkflowOutcome> {
+    let mut steps = vec![
         RunnerStep {
-            id: "prompt-open-calculator".to_owned(),
-            action: "prompt_open_app".to_owned(),
+            id: "activate-app".to_owned(),
+            action: "activate_app".to_owned(),
             target: LocatorTarget::default(),
-            value: Some("Calculator".to_owned()),
+            value: Some(workflow.app_name.clone()),
             required_capability: "macos.activate_app".to_owned(),
         },
         RunnerStep {
-            id: "find-calculator-window".to_owned(),
+            id: "find-window".to_owned(),
             action: "find_window".to_owned(),
             target: LocatorTarget::default(),
-            value: Some("Calculator".to_owned()),
+            value: Some(workflow.window_title.clone()),
             required_capability: "macos.find_window".to_owned(),
-        },
-        RunnerStep {
-            id: "focus-calculator-display".to_owned(),
-            action: "find_element".to_owned(),
-            target: display.clone(),
-            value: None,
-            required_capability: "macos.find_element".to_owned(),
-        },
-        RunnerStep {
-            id: "enter-number-1".to_owned(),
-            action: "type_text".to_owned(),
-            target: display.clone(),
-            value: Some(format_calculator_number(request.number_1)),
-            required_capability: "macos.type_text".to_owned(),
-        },
-        RunnerStep {
-            id: "enter-operation".to_owned(),
-            action: "type_text".to_owned(),
-            target: display.clone(),
-            value: Some(request.operation.symbol().to_owned()),
-            required_capability: "macos.type_text".to_owned(),
-        },
-        RunnerStep {
-            id: "enter-number-2".to_owned(),
-            action: "type_text".to_owned(),
-            target: display.clone(),
-            value: Some(format_calculator_number(request.number_2)),
-            required_capability: "macos.type_text".to_owned(),
-        },
-        RunnerStep {
-            id: "press-equals".to_owned(),
-            action: "click_element".to_owned(),
-            target: calculator_button_target("equals", "Equals"),
-            value: None,
-            required_capability: "macos.click_element".to_owned(),
-        },
-        RunnerStep {
-            id: "read-result".to_owned(),
-            action: "read_text".to_owned(),
-            target: display.clone(),
-            value: None,
-            required_capability: "macos.read_text".to_owned(),
         },
     ];
 
-    let results = adapter.replay(&steps)?;
-    let visible = adapter
-        .observe(ObserveContext {
-            session_id: "macos-calculator-e2e".to_owned(),
-            target: Some(display),
-        })?
-        .visible_text;
-    if !visible.iter().any(|value| value == &expected) {
-        return Err(AdapterError::ExecutionFailed(
-            "Calculator result was not visible".to_owned(),
-        ));
+    for input in &workflow.inputs {
+        let step_id = workflow_id_component(&input.name);
+        steps.push(RunnerStep {
+            id: format!("find-input-{step_id}"),
+            action: "find_element".to_owned(),
+            target: input.target.clone(),
+            value: None,
+            required_capability: "macos.find_element".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("type-input-{step_id}"),
+            action: "type_text".to_owned(),
+            target: input.target.clone(),
+            value: Some(input.value.clone()),
+            required_capability: "macos.type_text".to_owned(),
+        });
     }
 
-    Ok(MacOsCalculatorOutcome {
-        prompt,
-        result: expected,
+    if let Some(submit) = &workflow.submit {
+        steps.push(RunnerStep {
+            id: format!("submit-{}", workflow_id_component(&submit.name)),
+            action: "click_element".to_owned(),
+            target: submit.target.clone(),
+            value: None,
+            required_capability: "macos.click_element".to_owned(),
+        });
+    }
+
+    for output in &workflow.outputs {
+        let step_id = workflow_id_component(&output.name);
+        steps.push(RunnerStep {
+            id: format!("find-output-{step_id}"),
+            action: "find_element".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "macos.find_element".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("read-output-{step_id}"),
+            action: "read_text".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "macos.read_text".to_owned(),
+        });
+    }
+
+    let results = adapter.replay(&steps)?;
+    for output in &workflow.outputs {
+        if let Some(expected) = &output.expected {
+            adapter.seed_element(output.target.clone(), expected.clone());
+        }
+    }
+    let visible = adapter
+        .observe(ObserveContext {
+            session_id: format!(
+                "macos-app-workflow-{}",
+                workflow_id_component(&workflow.app_name)
+            ),
+            target: workflow.outputs.first().map(|output| output.target.clone()),
+        })?
+        .visible_text;
+
+    let mut outputs = BTreeMap::new();
+    for output in workflow.outputs {
+        let value = output
+            .expected
+            .or_else(|| {
+                visible
+                    .iter()
+                    .find(|value| !value.trim().is_empty())
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                AdapterError::ExecutionFailed(format!("No output was visible for {}", output.name))
+            })?;
+        if !visible.iter().any(|visible_value| visible_value == &value) {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Expected output {} was not visible",
+                output.name
+            )));
+        }
+        outputs.insert(output.name, value);
+    }
+
+    Ok(MacOsAppWorkflowOutcome {
+        prompt: workflow.prompt,
+        outputs,
         steps: results,
     })
 }
 
-fn calculator_display_target() -> LocatorTarget {
-    stable_macos_target(&MacOsElementMetadata {
-        ax_identifier: Some("calculator display".to_owned()),
-        ax_title: Some("Display".to_owned()),
-        ax_role: Some("AXStaticText".to_owned()),
-        ax_value: None,
-        nearby_text: Some("Calculator".to_owned()),
-        visual_region: Some("top".to_owned()),
-    })
-}
-
-fn calculator_button_target(identifier: &str, title: &str) -> LocatorTarget {
-    stable_macos_target(&MacOsElementMetadata {
-        ax_identifier: Some(identifier.to_owned()),
-        ax_title: Some(title.to_owned()),
-        ax_role: Some("AXButton".to_owned()),
-        ax_value: None,
-        nearby_text: Some("Calculator".to_owned()),
-        visual_region: Some("keypad".to_owned()),
-    })
-}
-
-fn evaluate_calculator_request(request: &MacOsCalculatorRequest) -> AdapterResult<String> {
-    calculate(request.number_1, request.operation, request.number_2)
-}
-
-fn evaluate_calculator_expression(expression: &str) -> Result<String, String> {
-    let Some((index, operation)) = expression.char_indices().find_map(|(index, ch)| {
-        MacOsCalculatorOperation::parse(&ch.to_string()).map(|operation| (index, operation))
-    }) else {
-        return Err("Calculator expression is missing an operation".to_owned());
-    };
-    let left = expression[..index]
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "Calculator expression has an invalid first number".to_owned())?;
-    let right = expression[index + 1..]
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "Calculator expression has an invalid second number".to_owned())?;
-    calculate(left, operation, right).map_err(|err| err.to_string())
-}
-
-fn calculate(
-    number_1: f64,
-    operation: MacOsCalculatorOperation,
-    number_2: f64,
-) -> AdapterResult<String> {
-    let value = match operation {
-        MacOsCalculatorOperation::Add => number_1 + number_2,
-        MacOsCalculatorOperation::Subtract => number_1 - number_2,
-        MacOsCalculatorOperation::Multiply => number_1 * number_2,
-        MacOsCalculatorOperation::Divide if number_2 == 0.0 => {
-            return Err(AdapterError::ExecutionFailed(
-                "Calculator division by zero is not supported".to_owned(),
-            ))
-        }
-        MacOsCalculatorOperation::Divide => number_1 / number_2,
-    };
-    Ok(format_calculator_number(value))
-}
-
-fn format_calculator_number(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
+fn workflow_id_component(value: &str) -> String {
+    let rendered = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if rendered.is_empty() {
+        "item".to_owned()
     } else {
-        let mut rendered = format!("{value:.10}");
-        while rendered.contains('.') && rendered.ends_with('0') {
-            rendered.pop();
-        }
-        rendered.trim_end_matches('.').to_owned()
+        rendered
     }
 }
 
@@ -731,62 +659,72 @@ mod tests {
 
         let result = adapter
             .validate(Assertion {
-                id: "saved".to_owned(),
+                id: "typed".to_owned(),
                 required_capability: "macos.assert_visible".to_owned(),
-                target: LocatorTarget::default(),
-                expected: "Saved".to_owned(),
+                target: stable_macos_target(&metadata()),
+                expected: "buyer@example.test".to_owned(),
             })
             .expect("assertion should run");
         assert!(result.passed);
     }
 
     #[test]
-    fn calculator_e2e_opens_app_enters_inputs_and_returns_result() {
+    fn generic_app_workflow_opens_app_enters_inputs_and_reads_outputs() {
         let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
-        let outcome = run_macos_calculator_e2e(
+        let input_target = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("primary-input".to_owned()),
+            ax_title: Some("Primary Input".to_owned()),
+            ax_role: Some("AXTextField".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Input".to_owned()),
+            visual_region: Some("center".to_owned()),
+        });
+        let output_target = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("result-output".to_owned()),
+            ax_title: Some("Result".to_owned()),
+            ax_role: Some("AXStaticText".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Result".to_owned()),
+            visual_region: Some("bottom".to_owned()),
+        });
+        let outcome = run_macos_app_workflow(
             &adapter,
-            MacOsCalculatorRequest {
-                number_1: 1.0,
-                number_2: 1.0,
-                operation: MacOsCalculatorOperation::Add,
+            MacOsAppWorkflow {
+                app_name: "Sample.app".to_owned(),
+                window_title: "Sample".to_owned(),
+                prompt: "Open Sample.app and submit a value.".to_owned(),
+                inputs: vec![MacOsWorkflowInput {
+                    name: "primary value".to_owned(),
+                    target: input_target,
+                    value: "hello".to_owned(),
+                }],
+                submit: Some(MacOsWorkflowAction {
+                    name: "submit".to_owned(),
+                    target: stable_macos_target(&MacOsElementMetadata {
+                        ax_identifier: Some("submit".to_owned()),
+                        ax_title: Some("Submit".to_owned()),
+                        ax_role: Some("AXButton".to_owned()),
+                        ax_value: None,
+                        nearby_text: Some("Form".to_owned()),
+                        visual_region: Some("bottom_right".to_owned()),
+                    }),
+                }),
+                outputs: vec![MacOsWorkflowOutput {
+                    name: "result".to_owned(),
+                    target: output_target,
+                    expected: Some("accepted".to_owned()),
+                }],
             },
         )
-        .expect("calculator e2e should pass");
+        .expect("generic app workflow should pass");
 
-        assert_eq!(outcome.result, "2");
-        assert!(outcome.prompt.contains("Open Calculator"));
+        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+        assert!(outcome.prompt.contains("Sample.app"));
         assert!(outcome.steps.iter().all(|step| step.success));
         assert!(outcome
             .steps
             .iter()
-            .any(|step| step.step_id == "read-result"));
-    }
-
-    #[test]
-    fn calculator_e2e_supports_division_and_reports_divide_by_zero() {
-        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
-        let outcome = run_macos_calculator_e2e(
-            &adapter,
-            MacOsCalculatorRequest {
-                number_1: 8.0,
-                number_2: 2.0,
-                operation: MacOsCalculatorOperation::Divide,
-            },
-        )
-        .expect("calculator division should pass");
-        assert_eq!(outcome.result, "4");
-
-        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
-        let error = run_macos_calculator_e2e(
-            &adapter,
-            MacOsCalculatorRequest {
-                number_1: 8.0,
-                number_2: 0.0,
-                operation: MacOsCalculatorOperation::Divide,
-            },
-        )
-        .expect_err("divide by zero should fail");
-        assert!(error.to_string().contains("division by zero"));
+            .any(|step| step.step_id == "read-output-result"));
     }
 
     #[test]

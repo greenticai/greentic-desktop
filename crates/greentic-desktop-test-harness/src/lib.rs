@@ -1,7 +1,7 @@
 use greentic_desktop_linux::{detect_wayland_support, detect_x11_session, WaylandCompositor};
 use greentic_desktop_macos::{
-    first_run_permission_check, run_macos_calculator_e2e, MacOsAccessibilityAdapter,
-    MacOsCalculatorOperation, MacOsCalculatorOutcome, MacOsCalculatorRequest,
+    first_run_permission_check, run_macos_app_workflow, MacOsAccessibilityAdapter,
+    MacOsAppWorkflow, MacOsAppWorkflowOutcome,
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
 use greentic_desktop_runtime::DesktopRuntime;
@@ -71,22 +71,22 @@ pub fn desktop_harness_plan() -> HarnessPlan {
                 permission_gated: true,
             },
             HarnessJob {
-                name: "macos-calculator-e2e".to_owned(),
+                name: "macos-app-workflow-e2e".to_owned(),
                 environment: HarnessEnvironment::MacOsGithubActions,
-                command: "cargo test -p greentic-desktop-test-harness macos_calculator_e2e_installs_extension_and_returns_result".to_owned(),
+                command: "cargo test -p greentic-desktop-test-harness macos_app_workflow_e2e_installs_extension_and_returns_output".to_owned(),
                 permission_gated: false,
             },
             HarnessJob {
                 name: "ubuntu-x11-virtual-display".to_owned(),
                 environment: HarnessEnvironment::UbuntuX11VirtualDisplay,
-                command: "xvfb-run -a cargo test -p greentic-desktop-linux -- can_detect_x11_session can_list_windows_and_inspect_at_spi_tree"
+                command: "xvfb-run -a cargo test -p greentic-desktop-linux can_detect_x11_session && xvfb-run -a cargo test -p greentic-desktop-linux can_list_windows_and_inspect_at_spi_tree"
                     .to_owned(),
                 permission_gated: false,
             },
             HarnessJob {
                 name: "ubuntu-wayland-detection".to_owned(),
                 environment: HarnessEnvironment::UbuntuWaylandDetection,
-                command: "cargo test -p greentic-desktop-linux -- detects_wayland_and_reports_global_restrictions wayland_requires_manual_approval_when_portal_is_missing"
+                command: "cargo test -p greentic-desktop-linux detects_wayland_and_reports_global_restrictions && cargo test -p greentic-desktop-linux wayland_requires_manual_approval_when_portal_is_missing"
                     .to_owned(),
                 permission_gated: false,
             },
@@ -134,15 +134,11 @@ pub fn macos_unit_harness_result() -> Vec<String> {
     first_run_permission_check(&info).messages
 }
 
-pub fn macos_calculator_e2e_result(
-    number_1: f64,
-    number_2: f64,
-    operation: &str,
-) -> Result<MacOsCalculatorOutcome, String> {
-    let operation = MacOsCalculatorOperation::parse(operation)
-        .ok_or_else(|| format!("unsupported calculator operation: {operation}"))?;
+pub fn macos_app_workflow_e2e_result(
+    workflow: MacOsAppWorkflow,
+) -> Result<MacOsAppWorkflowOutcome, String> {
     let root = std::env::temp_dir().join(format!(
-        "greentic-macos-calculator-e2e-{}",
+        "greentic-macos-app-workflow-e2e-{}",
         std::process::id()
     ));
     if root.exists() {
@@ -153,7 +149,7 @@ pub fn macos_calculator_e2e_result(
     config.evidence.store = root.join("evidence");
     let runtime = DesktopRuntime::new(config);
     let manifest = runtime
-        .install_extension("calculator")
+        .install_extension("macos")
         .map_err(|err| err.to_string())?;
     if manifest.id != "greentic.desktop.macos.ax" {
         return Err(format!(
@@ -175,15 +171,7 @@ pub fn macos_calculator_e2e_result(
             PlatformPermission::WindowManagement,
         ],
     });
-    let outcome = run_macos_calculator_e2e(
-        &adapter,
-        MacOsCalculatorRequest {
-            number_1,
-            number_2,
-            operation,
-        },
-    )
-    .map_err(|err| err.to_string());
+    let outcome = run_macos_app_workflow(&adapter, workflow).map_err(|err| err.to_string());
     let _ = std::fs::remove_dir_all(root);
     outcome
 }
@@ -218,6 +206,65 @@ pub fn ubuntu_wayland_harness_detects_limitations() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use greentic_desktop_macos::{
+        stable_macos_target, MacOsElementMetadata, MacOsWorkflowAction, MacOsWorkflowInput,
+        MacOsWorkflowOutput,
+    };
+
+    fn calculator_workflow_fixture(
+        number_1: &str,
+        operation: &str,
+        number_2: &str,
+        expected_result: &str,
+    ) -> MacOsAppWorkflow {
+        let calculator_display = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("calculator-display".to_owned()),
+            ax_title: Some("Display".to_owned()),
+            ax_role: Some("AXStaticText".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Calculator".to_owned()),
+            visual_region: Some("top".to_owned()),
+        });
+
+        MacOsAppWorkflow {
+            app_name: "Calculator".to_owned(),
+            window_title: "Calculator".to_owned(),
+            prompt: "Open Calculator and complete the supplied operation.".to_owned(),
+            inputs: vec![
+                MacOsWorkflowInput {
+                    name: "number 1".to_owned(),
+                    target: calculator_display.clone(),
+                    value: number_1.to_owned(),
+                },
+                MacOsWorkflowInput {
+                    name: "operation".to_owned(),
+                    target: calculator_display.clone(),
+                    value: operation.to_owned(),
+                },
+                MacOsWorkflowInput {
+                    name: "number 2".to_owned(),
+                    target: calculator_display.clone(),
+                    value: number_2.to_owned(),
+                },
+            ],
+            submit: Some(MacOsWorkflowAction {
+                name: "equals".to_owned(),
+                target: stable_macos_target(&MacOsElementMetadata {
+                    ax_identifier: Some("equals".to_owned()),
+                    ax_title: Some("Equals".to_owned()),
+                    ax_role: Some("AXButton".to_owned()),
+                    ax_value: None,
+                    nearby_text: Some("Calculator".to_owned()),
+                    visual_region: Some("keypad".to_owned()),
+                }),
+            }),
+            outputs: vec![MacOsWorkflowOutput {
+                name: "result".to_owned(),
+                target: calculator_display,
+                expected: Some(expected_result.to_owned()),
+            }],
+        }
+    }
 
     #[test]
     fn ci_plan_covers_windows_macos_and_linux() {
@@ -278,16 +325,16 @@ mod tests {
     fn macos_has_unit_and_manual_permission_gated_harnesses() {
         let plan = desktop_harness_plan();
         let unit = plan.job("macos-unit").expect("macos unit job");
-        let calculator = plan
-            .job("macos-calculator-e2e")
-            .expect("macos calculator e2e job");
+        let app_workflow = plan
+            .job("macos-app-workflow-e2e")
+            .expect("macos app workflow e2e job");
         let manual = plan
             .job("macos-manual-permission")
             .expect("macos manual job");
 
         assert!(!unit.permission_gated);
-        assert!(!calculator.permission_gated);
-        assert!(calculator.command.contains("macos_calculator_e2e"));
+        assert!(!app_workflow.permission_gated);
+        assert!(app_workflow.command.contains("macos_app_workflow_e2e"));
         assert!(manual.permission_gated);
         assert!(macos_unit_harness_result()
             .iter()
@@ -295,11 +342,12 @@ mod tests {
     }
 
     #[test]
-    fn macos_calculator_e2e_installs_extension_and_returns_result() {
+    fn macos_app_workflow_e2e_installs_extension_and_returns_output() {
         let outcome =
-            macos_calculator_e2e_result(1.0, 1.0, "+").expect("macos calculator e2e should pass");
+            macos_app_workflow_e2e_result(calculator_workflow_fixture("1", "+", "1", "2"))
+                .expect("macos app workflow e2e should pass");
 
-        assert_eq!(outcome.result, "2");
+        assert_eq!(outcome.outputs.get("result"), Some(&"2".to_owned()));
         assert!(outcome.prompt.contains("Open Calculator"));
         assert!(outcome.steps.iter().all(|step| step.success));
     }
