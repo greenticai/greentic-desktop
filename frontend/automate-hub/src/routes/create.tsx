@@ -308,6 +308,7 @@ function PromptStep({
   return (
     <div className="space-y-4">
       <Textarea
+        data-testid="prompt-textarea"
         rows={6}
         value={prompt}
         onChange={(event) => onPromptChange(event.target.value)}
@@ -361,13 +362,15 @@ function FieldList({
   const update = (next: string[]) => {
     onChange(next);
   };
+  const testId = `field-list-${title.toLowerCase()}`;
   return (
-    <div className="rounded-xl border p-4">
+    <div className="rounded-xl border p-4" data-testid={testId}>
       <div className="font-medium text-sm mb-3">{title}</div>
       <ul className="space-y-2">
         {items.map((field, index) => (
           <li key={index} className="flex items-center gap-2">
             <Input
+              data-testid={`${testId}-${index}`}
               value={field}
               className="h-9"
               onChange={(event) => {
@@ -396,6 +399,7 @@ function FieldList({
         variant="outline"
         size="sm"
         className="mt-3 gap-1.5"
+        data-testid={`${testId}-add`}
         disabled={busy}
         onClick={() => update([...items, ""])}
       >
@@ -405,6 +409,7 @@ function FieldList({
         variant="ghost"
         size="sm"
         className="mt-3 ml-2"
+        data-testid={`${testId}-save`}
         disabled={busy}
         onClick={() => persist(items)}
       >
@@ -431,21 +436,36 @@ function IOStep({
     return <div className="text-sm text-muted-foreground">Generate a draft first.</div>;
   }
   return (
-    <div className="grid md:grid-cols-2 gap-4">
-      <FieldList
-        title="Inputs"
-        items={draft.inputs}
-        busy={busy}
-        onChange={onInputsChange}
-        onPersist={(inputs) => onPersist({ inputs })}
-      />
-      <FieldList
-        title="Outputs"
-        items={draft.outputs}
-        busy={busy}
-        onChange={onOutputsChange}
-        onPersist={(outputs) => onPersist({ outputs })}
-      />
+    <div className="space-y-4">
+      {draft.openQuestions.length > 0 && (
+        <div
+          data-testid="open-questions"
+          className="rounded-xl border border-warning/30 bg-warning/10 p-4 text-sm"
+        >
+          <div className="font-medium">Open questions</div>
+          <ul className="mt-2 list-disc pl-5 text-muted-foreground">
+            {draft.openQuestions.map((question) => (
+              <li key={question}>{question}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="grid md:grid-cols-2 gap-4">
+        <FieldList
+          title="Inputs"
+          items={draft.inputs}
+          busy={busy}
+          onChange={onInputsChange}
+          onPersist={(inputs) => onPersist({ inputs })}
+        />
+        <FieldList
+          title="Outputs"
+          items={draft.outputs}
+          busy={busy}
+          onChange={onOutputsChange}
+          onPersist={(outputs) => onPersist({ outputs })}
+        />
+      </div>
     </div>
   );
 }

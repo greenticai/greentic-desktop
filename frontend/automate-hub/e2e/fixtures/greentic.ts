@@ -25,6 +25,8 @@ type GreenticFixtures = {
 };
 
 type GreenticOptions = {
+  llmMockDraftJson?: string;
+  llmMockDraftJsonSequence?: string;
   testPermissions?: string;
 };
 
@@ -33,6 +35,8 @@ const frontendRoot = path.resolve(fixtureDir, "..", "..");
 const repoRoot = path.resolve(frontendRoot, "..", "..");
 
 export const test = base.extend<GreenticFixtures & GreenticOptions>({
+  llmMockDraftJson: [undefined, { option: true }],
+  llmMockDraftJsonSequence: [undefined, { option: true }],
   testPermissions: [undefined, { option: true }],
 
   runtimeHome: async ({}, use, testInfo) => {
@@ -49,9 +53,17 @@ export const test = base.extend<GreenticFixtures & GreenticOptions>({
     await use(logs);
   },
 
-  guiUrl: async ({ runtimeHome, processLogs, testPermissions }, use, testInfo) => {
+  guiUrl: async (
+    { runtimeHome, processLogs, testPermissions, llmMockDraftJson, llmMockDraftJsonSequence },
+    use,
+    testInfo,
+  ) => {
     const binary = ensureGreenticBinary();
-    const process = spawnGreentic(binary, runtimeHome, processLogs, testPermissions);
+    const process = spawnGreentic(binary, runtimeHome, processLogs, {
+      llmMockDraftJson,
+      llmMockDraftJsonSequence,
+      testPermissions,
+    });
     try {
       const guiUrl = await waitForGuiUrl(process, processLogs);
       await use(guiUrl);
@@ -160,7 +172,7 @@ function spawnGreentic(
   binary: string,
   runtimeHome: string,
   logPath: string,
-  testPermissions?: string,
+  options: Pick<GreenticOptions, "llmMockDraftJson" | "llmMockDraftJsonSequence" | "testPermissions">,
 ): ChildProcessWithoutNullStreams {
   writeFileSync(logPath, "");
   const child = spawn(binary, ["gui", "--no-open", "--bind", "127.0.0.1:0"], {
@@ -169,7 +181,13 @@ function spawnGreentic(
       ...process.env,
       GREENTIC_DESKTOP_E2E: "1",
       GREENTIC_DESKTOP_HOME: runtimeHome,
-      ...(testPermissions ? { GREENTIC_DESKTOP_TEST_PERMISSIONS: testPermissions } : {}),
+      ...(options.llmMockDraftJson
+        ? { GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON: options.llmMockDraftJson }
+        : {}),
+      ...(options.llmMockDraftJsonSequence
+        ? { GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON_SEQUENCE: options.llmMockDraftJsonSequence }
+        : {}),
+      ...(options.testPermissions ? { GREENTIC_DESKTOP_TEST_PERMISSIONS: options.testPermissions } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

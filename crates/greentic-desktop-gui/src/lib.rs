@@ -20,7 +20,7 @@ use greentic_desktop_recorder::{
 use greentic_distributor_client::GreenticDistributorClient;
 use greentic_secrets_api::{SecretError, SecretsManager};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io::{Read, Write};
@@ -2784,6 +2784,7 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
         &prompt,
         &draft.open_questions,
         &draft.required_adapters,
+        configured_llm_mock_attempts(&llm_settings),
     );
     std::fs::write(draft_dir.join("draft.json"), &json)
         .and_then(|_| std::fs::write(draft_dir.join("runner.yaml"), yaml))
@@ -3056,9 +3057,10 @@ fn planner_trace_document_json(
     prompt: &str,
     open_questions: &[String],
     required_adapters: &[String],
+    attempts: usize,
 ) -> String {
     format!(
-        r#"{{"traceId":"{}","draftId":"{}","provider":"{}","model":"{}","structuredOutputMode":"{}","schemaVersion":"runner-draft-v1","attempts":1,"promptSummary":"{}","openQuestions":{},"requiredAdapters":{},"redacted":true}}"#,
+        r#"{{"traceId":"{}","draftId":"{}","provider":"{}","model":"{}","structuredOutputMode":"{}","schemaVersion":"runner-draft-v1","attempts":{},"promptSummary":"{}","openQuestions":{},"requiredAdapters":{},"redacted":true}}"#,
         escape_json(trace_id),
         escape_json(draft_id),
         escape_json(&settings.provider),
@@ -3068,10 +3070,27 @@ fn planner_trace_document_json(
         } else {
             "provider_json_or_repair"
         },
+        attempts,
         escape_json(&redact_prompt_for_trace(prompt)),
         string_array_json(open_questions),
         string_array_json(required_adapters),
     )
+}
+
+fn configured_llm_mock_attempts(settings: &LlmSettings) -> usize {
+    if settings.provider == "local" {
+        return 1;
+    }
+    std::env::var("GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON_SEQUENCE")
+        .ok()
+        .map(|value| {
+            value
+                .split("\n---GREENTIC-LLM-RESPONSE---\n")
+                .filter(|item| !item.trim().is_empty())
+                .count()
+                .max(1)
+        })
+        .unwrap_or(1)
 }
 
 fn redact_prompt_for_trace(prompt: &str) -> String {
@@ -3642,6 +3661,7 @@ struct ConfiguredGuiLlmClient {
     model: String,
     endpoint: Option<String>,
     api_key: Option<String>,
+    mock_responses: Option<Arc<Mutex<VecDeque<String>>>>,
 }
 
 impl ConfiguredGuiLlmClient {
@@ -3672,6 +3692,16 @@ impl ConfiguredGuiLlmClient {
             model: settings.model.clone(),
             endpoint: settings.endpoint.clone(),
             api_key,
+            mock_responses: std::env::var("GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON_SEQUENCE")
+                .ok()
+                .map(|value| {
+                    Arc::new(Mutex::new(
+                        value
+                            .split("\n---GREENTIC-LLM-RESPONSE---\n")
+                            .map(str::to_owned)
+                            .collect::<VecDeque<_>>(),
+                    ))
+                }),
         })
     }
 
@@ -3687,6 +3717,16 @@ impl ConfiguredGuiLlmClient {
 
 impl GreenticLlmClient for ConfiguredGuiLlmClient {
     fn complete(&self, request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError> {
+        if let Some(responses) = &self.mock_responses {
+            let mut responses = responses
+                .lock()
+                .map_err(|_| LlmError::Unavailable("mock response lock poisoned".to_owned()))?;
+            let content = responses
+                .pop_front()
+                .or_else(|| responses.back().cloned())
+                .unwrap_or_default();
+            return Ok(LlmResponse { content });
+        }
         if let Ok(mock) = std::env::var("GREENTIC_DESKTOP_LLM_MOCK_DRAFT_JSON") {
             return Ok(LlmResponse { content: mock });
         }
