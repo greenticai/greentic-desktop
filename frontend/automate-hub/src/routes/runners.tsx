@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   FileCog,
   Plus,
+  Trash2,
 } from "lucide-react";
 
 export const Route = createFileRoute("/runners")({
@@ -101,6 +102,12 @@ function RunnersPage() {
   const activeAction = runnerAction.variables;
 
   function runAction(runner: RunnerSummaryDto, action: string) {
+    if (
+      action === "delete" &&
+      !window.confirm(`Delete "${runner.name}"? This removes the local runner package.`)
+    ) {
+      return;
+    }
     runnerAction.mutate({ id: runner.id, action });
   }
 
@@ -276,6 +283,18 @@ function RunnersPage() {
                     : "Publish as MCP"}
                 </Button>
               )}
+              <Button
+                size="sm"
+                variant="destructive"
+                className="gap-1.5"
+                disabled={runnerAction.isPending}
+                onClick={() => runAction(r, "delete")}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {activeAction?.id === r.id && activeAction.action === "delete"
+                  ? "Deleting"
+                  : "Delete"}
+              </Button>
             </div>
             {refineRunnerId === r.id && (
               <div className="mt-4 rounded-lg border bg-muted/40 p-3">

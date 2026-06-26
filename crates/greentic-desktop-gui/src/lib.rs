@@ -1693,6 +1693,10 @@ fn runner_action_json(path: &str, state: &GuiApiState) -> Result<String, String>
             let _ = std::fs::remove_file(mcp_tool_path(state, &runner.id));
             "deprecated"
         }
+        "delete" => {
+            delete_runner(state, &runner)?;
+            "deleted"
+        }
         "refine" => {
             persist_runner_state(state, &runner.id, "draft", "unknown", &evidence_ref)?;
             "draft"
@@ -1713,6 +1717,54 @@ fn runner_action_json(path: &str, state: &GuiApiState) -> Result<String, String>
         escape_json(&evidence_ref),
         escape_json(status)
     ))
+}
+
+fn delete_runner(state: &GuiApiState, runner: &RunnerFile) -> Result<(), String> {
+    let path = runner.path.as_ref().ok_or_else(|| {
+        api_error_json(
+            "runner.delete_unavailable",
+            "This runner is built in and cannot be deleted from local storage.",
+        )
+    })?;
+    std::fs::remove_file(path).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!("Could not delete runner package: {err}"),
+        )
+    })?;
+
+    let _ = std::fs::remove_file(runner_state_path(state, &runner.id));
+    let _ = std::fs::remove_file(mcp_tool_path(state, &runner.id));
+    remove_runner_approvals(state, &runner.id);
+    remove_runner_refinements(state, &runner.id);
+    Ok(())
+}
+
+fn remove_runner_approvals(state: &GuiApiState, runner_id: &str) {
+    for path in approval_files(state) {
+        let json = std::fs::read_to_string(&path).unwrap_or_default();
+        if json_string_field(&json, "runnerId").as_deref() == Some(runner_id) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn remove_runner_refinements(state: &GuiApiState, runner_id: &str) {
+    let files = std::fs::read_dir(refinements_dir(state))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for path in files {
+        let json = std::fs::read_to_string(&path).unwrap_or_default();
+        if json_string_field(&json, "runnerId").as_deref() == Some(runner_id) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn refinement_action_json(path: &str, body: &str, state: &GuiApiState) -> Result<String, String> {
@@ -3234,6 +3286,21 @@ mod tests {
         let tools = String::from_utf8_lossy(&tools);
         assert!(tools.contains("\"name\":\"runner.crm.create_customer\""));
         assert!(tools.contains("\"status\":\"enabled\""));
+
+        let delete = post(
+            handle.addr(),
+            "/api/v1/runners/crm.create_customer/delete",
+            "{}",
+        );
+        assert!(String::from_utf8_lossy(&delete).contains("\"status\":\"deleted\""));
+        assert!(!runners_dir.join("crm.create_customer.draft.yaml").exists());
+        assert!(!root
+            .join("mcp-tools")
+            .join("crm.create_customer.mcp.json")
+            .exists());
+
+        let list = get(handle.addr(), "/api/v1/runners");
+        assert!(!String::from_utf8_lossy(&list).contains("\"id\":\"crm.create_customer\""));
 
         let _ = std::fs::remove_dir_all(root);
     }
