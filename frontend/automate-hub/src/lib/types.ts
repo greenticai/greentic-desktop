@@ -94,6 +94,8 @@ export interface RunnerSummaryDto {
   updated?: string;
   adapters?: string[];
   published?: boolean;
+  inputFields?: string[];
+  outputFields?: string[];
   evidenceRefs?: string[];
 }
 

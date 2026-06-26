@@ -191,10 +191,10 @@ export const api = {
       jsonInit("POST"),
     ),
   runners: () => request<RunnersDto>("/runners"),
-  runnerAction: (id: string, action: string) =>
+  runnerAction: (id: string, action: string, inputs?: Record<string, string>) =>
     request<RunnerActionResultDto>(
       `/runners/${encodeURIComponent(id)}/${action}`,
-      jsonInit("POST"),
+      jsonInit("POST", inputs ?? {}),
     ),
   createRefinement: (runnerId: string, correction: string) =>
     request<RefinementResultDto>(

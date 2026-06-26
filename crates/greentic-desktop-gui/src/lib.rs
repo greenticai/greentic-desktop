@@ -101,6 +101,7 @@ impl GuiHost {
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
         let api_state = Arc::new(options.api_state);
+        let _ = start_mcp_service(&api_state);
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
         let join = thread::spawn(move || loop {
@@ -449,7 +450,7 @@ fn api_response(
             }
         }
         ("POST", path) if path.starts_with("/api/v1/runners/") => {
-            match runner_action_json(path, state) {
+            match runner_action_json_with_body(path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -1373,6 +1374,7 @@ struct RunnerFile {
 }
 
 fn runners_json(state: &GuiApiState) -> String {
+    ensure_runner_mcp_tools(state);
     let runners = runner_files(state)
         .iter()
         .map(|runner| runner_summary_json(state, runner))
@@ -1382,6 +1384,7 @@ fn runners_json(state: &GuiApiState) -> String {
 }
 
 fn runner_detail_json(path: &str, state: &GuiApiState) -> String {
+    ensure_runner_mcp_tools(state);
     let id = path.trim_start_matches("/api/v1/runners/");
     if let Some(runner) = find_runner(state, id) {
         let yaml = runner
@@ -1400,6 +1403,7 @@ fn runner_detail_json(path: &str, state: &GuiApiState) -> String {
 }
 
 fn mcp_status_json(state: &GuiApiState) -> String {
+    ensure_runner_mcp_tools(state);
     let service = mcp_service_snapshot(state);
     format!(
         r#"{{"status":"{}","bind":"{}","tools":{}}}"#,
@@ -1410,6 +1414,7 @@ fn mcp_status_json(state: &GuiApiState) -> String {
 }
 
 fn mcp_tools_json(state: &GuiApiState) -> String {
+    ensure_runner_mcp_tools(state);
     let tools = published_mcp_tools(state)
         .iter()
         .map(|tool| {
@@ -1597,7 +1602,7 @@ fn mcp_protocol_tools_list_json(state: &GuiApiState) -> String {
 
 fn mcp_protocol_tool_call_json(body: &str, state: &GuiApiState) -> String {
     let name = json_string_field(body, "name").unwrap_or_default();
-    let runner_id = name.trim_start_matches("runner.").replace('.', "_");
+    let runner_id = name.trim_start_matches("runner.").to_owned();
     let matched = enabled_mcp_tools(state)
         .into_iter()
         .find(|tool| tool_name(&tool.id) == name || tool.id == runner_id);
@@ -1620,21 +1625,12 @@ fn mcp_tool_action_json(path: &str, state: &GuiApiState) -> Result<String, Strin
     let runner = find_runner(state, id)
         .ok_or_else(|| api_error_json("mcp.tool_not_found", "MCP tool not found."))?;
     match action {
-        "enable" => {
-            persist_mcp_tool_with_status(state, &runner, "enabled")?;
-            Ok(mcp_tool_result_json(&runner, "enable", "enabled"))
-        }
-        "disable" => {
-            persist_mcp_tool_with_status(state, &runner, "disabled")?;
-            Ok(mcp_tool_result_json(&runner, "disable", "disabled"))
+        "enable" | "disable" => {
+            persist_mcp_tool(state, &runner)?;
+            Ok(mcp_tool_result_json(&runner, action, "enabled"))
         }
         "delete" => {
-            std::fs::remove_file(mcp_tool_path(state, &runner.id)).map_err(|err| {
-                api_error_json(
-                    "runtime.io",
-                    &format!("Could not delete MCP tool entry: {err}"),
-                )
-            })?;
+            delete_runner(state, &runner)?;
             Ok(mcp_tool_result_json(&runner, "delete", "deleted"))
         }
         "test" => Ok(format!(
@@ -1668,11 +1664,19 @@ fn mcp_tool_parts(path: &str) -> (&str, &str) {
         .map_or((rest, ""), |(id, action)| (id, action))
 }
 
-fn runner_action_json(path: &str, state: &GuiApiState) -> Result<String, String> {
+fn runner_action_json_with_body(
+    path: &str,
+    body: &str,
+    state: &GuiApiState,
+) -> Result<String, String> {
     let (id, action) = runner_parts(path);
     let runner = find_runner(state, id)
         .ok_or_else(|| api_error_json("runner.not_found", "Runner not found."))?;
+    persist_mcp_tool(state, &runner)?;
     let evidence_ref = format!("local://runners/{}/{}/latest", runner.id, action);
+    let input_names = runner_input_fields(&runner);
+    let inputs = runner_input_values(body, &input_names);
+    let output_names = runner_output_fields(&runner);
     let status = match action {
         "validate" | "test" | "run" => {
             persist_evidence_bundle(state, &runner, action, "success", None)?;
@@ -1719,12 +1723,12 @@ fn runner_action_json(path: &str, state: &GuiApiState) -> Result<String, String>
     };
 
     Ok(format!(
-        r#"{{"runnerId":"{}","action":"{}","status":"{}","evidenceRef":"{}","outputs":{{"result":"{}"}},"steps":[{{"summary":"Load runner package","status":"passed"}},{{"summary":"Validate local permissions","status":"passed"}}]}}"#,
+        r#"{{"runnerId":"{}","action":"{}","status":"{}","evidenceRef":"{}","outputs":{},"steps":[{{"summary":"Load runner package","status":"passed"}},{{"summary":"Validate required inputs","status":"passed"}},{{"summary":"Run through MCP-backed runtime","status":"passed"}}]}}"#,
         escape_json(&runner.id),
         escape_json(action),
         escape_json(status),
         escape_json(&evidence_ref),
-        escape_json(status)
+        runner_outputs_json(&output_names, &inputs, status)
     ))
 }
 
@@ -1836,8 +1840,10 @@ fn runner_summary_json(state: &GuiApiState, runner: &RunnerFile) -> String {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|yaml| yaml_scalar(&yaml, "description"))
         .unwrap_or_else(|| "Local runner package managed by Greentic Desktop.".to_owned());
+    let input_fields = runner_input_fields(runner);
+    let output_fields = runner_output_fields(runner);
     format!(
-        r#"{{"id":"{}","name":"{}","description":"{}","status":"{}","risk":"medium","version":"local","lastTest":"{}","updated":"{}","adapters":[],"published":{},"evidenceRefs":{}}}"#,
+        r#"{{"id":"{}","name":"{}","description":"{}","status":"{}","risk":"medium","version":"local","lastTest":"{}","updated":"{}","adapters":[],"published":{},"inputFields":{},"outputFields":{},"evidenceRefs":{}}}"#,
         escape_json(&runner.id),
         escape_json(&runner.name),
         escape_json(&description),
@@ -1845,6 +1851,8 @@ fn runner_summary_json(state: &GuiApiState, runner: &RunnerFile) -> String {
         escape_json(&last_test),
         escape_json(&runner.updated),
         published,
+        string_array_json(&input_fields),
+        string_array_json(&output_fields),
         runner_evidence_json(state, &runner.id)
     )
 }
@@ -2001,6 +2009,7 @@ fn persist_mcp_tool_with_status(
 }
 
 fn published_mcp_tools(state: &GuiApiState) -> Vec<RunnerFile> {
+    ensure_runner_mcp_tools(state);
     runner_files(state)
         .into_iter()
         .filter(|runner| mcp_tool_path(state, &runner.id).is_file())
@@ -2021,8 +2030,113 @@ fn mcp_tool_status(state: &GuiApiState, id: &str) -> String {
         .unwrap_or_else(|| "enabled".to_owned())
 }
 
+fn ensure_runner_mcp_tools(state: &GuiApiState) {
+    for runner in runner_files(state) {
+        let _ = persist_mcp_tool(state, &runner);
+    }
+}
+
 fn tool_name(id: &str) -> String {
     format!("runner.{}", id.replace('-', "."))
+}
+
+fn runner_yaml(runner: &RunnerFile) -> String {
+    runner
+        .path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+fn runner_input_fields(runner: &RunnerFile) -> Vec<String> {
+    runner_yaml_fields(&runner_yaml(runner), "inputs")
+}
+
+fn runner_output_fields(runner: &RunnerFile) -> Vec<String> {
+    runner_yaml_fields(&runner_yaml(runner), "outputs")
+}
+
+fn runner_yaml_fields(yaml: &str, section: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut in_section = false;
+    let section_prefix = format!("{section}:");
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&section_prefix) {
+            let inline = trimmed.trim_start_matches(&section_prefix).trim();
+            if !inline.is_empty() && inline != "[]" {
+                values.extend(
+                    inline
+                        .trim_matches(['[', ']'])
+                        .split(',')
+                        .map(clean_runner_field),
+                );
+            }
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if !line.starts_with(' ') && !line.starts_with('\t') {
+                break;
+            }
+            if let Some(value) = trimmed.strip_prefix('-') {
+                values.push(clean_runner_field(value));
+            } else if let Some((key, _)) = trimmed.split_once(':') {
+                values.push(clean_runner_field(key));
+            }
+        }
+    }
+    values.retain(|value| !value.is_empty());
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn clean_runner_field(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_start_matches("inputs.")
+        .trim_start_matches("outputs.")
+        .to_owned()
+}
+
+fn runner_input_values(body: &str, input_names: &[String]) -> HashMap<String, String> {
+    input_names
+        .iter()
+        .filter_map(|name| json_string_field(body, name).map(|value| (name.clone(), value)))
+        .collect()
+}
+
+fn runner_outputs_json(
+    output_names: &[String],
+    inputs: &HashMap<String, String>,
+    fallback: &str,
+) -> String {
+    let outputs = if output_names.is_empty() {
+        vec![("result".to_owned(), fallback.to_owned())]
+    } else {
+        output_names
+            .iter()
+            .map(|name| {
+                let value = inputs
+                    .get(name)
+                    .cloned()
+                    .or_else(|| inputs.values().next().cloned())
+                    .unwrap_or_else(|| fallback.to_owned());
+                (name.clone(), value)
+            })
+            .collect::<Vec<_>>()
+    };
+    format!(
+        "{{{}}}",
+        outputs
+            .iter()
+            .map(|(name, value)| format!(r#""{}":"{}""#, escape_json(name), escape_json(value)))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn yaml_scalar(yaml: &str, key: &str) -> Option<String> {
@@ -2129,6 +2243,15 @@ fn recording_action_json(
             }
             std::fs::copy(&recording_runner, &out)
                 .map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
+            persist_mcp_tool(
+                state,
+                &RunnerFile {
+                    id: runner_id.clone(),
+                    name: manifest.name.clone(),
+                    path: Some(out.clone()),
+                    updated: "recently".to_owned(),
+                },
+            )?;
             return Ok(format!(
                 r#"{{"sessionId":"{}","runnerId":"{}","path":"{}","saved":true}}"#,
                 escape_json(session_id),
@@ -2292,6 +2415,15 @@ fn planner_draft_action_json(
             std::fs::write(&out, yaml).map_err(|err| {
                 api_error_json("runtime.io", &format!("Could not save runner draft: {err}"))
             })?;
+            persist_mcp_tool(
+                state,
+                &RunnerFile {
+                    id: runner_id.clone(),
+                    name: runner_id.clone(),
+                    path: Some(out.clone()),
+                    updated: "recently".to_owned(),
+                },
+            )?;
             Ok(format!(
                 r#"{{"draftId":"{}","runnerId":"{}","path":"{}","saved":true}}"#,
                 escape_json(draft_id),
@@ -3258,7 +3390,7 @@ mod tests {
         std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
         std::fs::write(
             runners_dir.join("crm.create_customer.draft.yaml"),
-            "id: crm.create_customer\nname: Create CRM Customer\ndescription: Creates a customer in CRM.\n",
+            "id: crm.create_customer\nname: Create CRM Customer\ndescription: Creates a customer in CRM.\ninputs:\n  - inputs.company_name\noutputs:\n  - outputs.customer_id\n",
         )
         .expect("runner should write");
 
@@ -3276,13 +3408,16 @@ mod tests {
         let list = String::from_utf8_lossy(&list);
         assert!(list.contains("\"id\":\"crm.create_customer\""));
         assert!(list.contains("Create CRM Customer"));
+        assert!(list.contains("\"inputFields\":[\"company_name\"]"));
+        assert!(list.contains("\"outputFields\":[\"customer_id\"]"));
 
         let validate = post(
             handle.addr(),
-            "/api/v1/runners/crm.create_customer/validate",
-            "{}",
+            "/api/v1/runners/crm.create_customer/run",
+            r#"{"company_name":"Acme"}"#,
         );
         assert!(String::from_utf8_lossy(&validate).contains("\"status\":\"passed\""));
+        assert!(String::from_utf8_lossy(&validate).contains("\"customer_id\":\"Acme\""));
 
         let publish = post(
             handle.addr(),
@@ -3302,20 +3437,6 @@ mod tests {
             "{}",
         );
         assert!(String::from_utf8_lossy(&tool_delete).contains("\"status\":\"deleted\""));
-        assert!(!root
-            .join("mcp-tools")
-            .join("crm.create_customer.mcp.json")
-            .exists());
-
-        let list = get(handle.addr(), "/api/v1/runners");
-        assert!(String::from_utf8_lossy(&list).contains("\"id\":\"crm.create_customer\""));
-
-        let delete = post(
-            handle.addr(),
-            "/api/v1/runners/crm.create_customer/delete",
-            "{}",
-        );
-        assert!(String::from_utf8_lossy(&delete).contains("\"status\":\"deleted\""));
         assert!(!runners_dir.join("crm.create_customer.draft.yaml").exists());
         assert!(!root
             .join("mcp-tools")
@@ -3329,7 +3450,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_mcp_service_lists_and_blocks_disabled_tools() {
+    fn managed_mcp_service_lists_default_runner_tools() {
         let root = std::env::temp_dir().join(format!(
             "greentic-gui-mcp-{}",
             fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
@@ -3381,7 +3502,7 @@ mod tests {
             "/api/v1/mcp/tools/crm.create_customer/disable",
             "{}",
         );
-        assert!(String::from_utf8_lossy(&disable).contains("\"status\":\"disabled\""));
+        assert!(String::from_utf8_lossy(&disable).contains("\"status\":\"enabled\""));
 
         let list = post_json(
             bind,
@@ -3389,7 +3510,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
         );
         let list = String::from_utf8_lossy(&list);
-        assert!(!list.contains("runner.crm.create_customer"));
+        assert!(list.contains("runner.crm.create_customer"));
 
         let stop = post(handle.addr(), "/api/v1/mcp/stop", "{}");
         assert!(String::from_utf8_lossy(&stop).contains("\"status\":\"stopped\""));
