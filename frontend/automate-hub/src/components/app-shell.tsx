@@ -1,12 +1,11 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { BrandLogo } from "@/components/brand-logo";
-import { Home, Plus, Workflow, Plug, Settings, Circle } from "lucide-react";
+import { Home, Plus, Workflow, Settings, Circle } from "lucide-react";
 
 const nav = [
   { to: "/", label: "Home", icon: Home },
   { to: "/create", label: "Create Runner", icon: Plus },
   { to: "/runners", label: "My Runners", icon: Workflow },
-  { to: "/mcp", label: "MCP Tools", icon: Plug },
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
 

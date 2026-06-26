@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
-import type { RefinementResultDto, RunnerSummaryDto } from "@/lib/types";
+import type { McpToolDto, RefinementResultDto, RunnerSummaryDto } from "@/lib/types";
 import {
   Play,
   Pencil,
@@ -15,6 +15,9 @@ import {
   FileCog,
   Plus,
   Trash2,
+  Copy,
+  Power,
+  RotateCw,
 } from "lucide-react";
 
 export const Route = createFileRoute("/runners")({
@@ -56,7 +59,11 @@ function RunnersPage() {
   const [refineRunnerId, setRefineRunnerId] = useState<string | null>(null);
   const [correction, setCorrection] = useState("");
   const [refinement, setRefinement] = useState<RefinementResultDto | null>(null);
+  const [mcpActionStatus, setMcpActionStatus] = useState<string | null>(null);
   const runnersQuery = useQuery({ queryKey: ["runners"], queryFn: api.runners });
+  const mcpStatus = useQuery({ queryKey: ["mcp-status"], queryFn: api.mcpStatus });
+  const mcpToolsQuery = useQuery({ queryKey: ["mcp-tools"], queryFn: api.mcpTools });
+  const mcpConfig = useQuery({ queryKey: ["mcp-client-config"], queryFn: api.mcpClientConfig });
   const evidence = useQuery({ queryKey: ["evidence"], queryFn: api.evidence });
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: api.approvals });
   const runnerAction = useMutation({
@@ -69,6 +76,34 @@ function RunnersPage() {
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
       void queryClient.invalidateQueries({ queryKey: ["activity"] });
     },
+  });
+  const mcpLifecycle = useMutation({
+    mutationFn: (action: "start" | "stop" | "restart") => api.mcpLifecycle(action),
+    onSuccess: (result) => {
+      setMcpActionStatus(`MCP server ${result.status} on ${result.bind}`);
+      void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] });
+    },
+    onError: (error) =>
+      setMcpActionStatus(error instanceof Error ? error.message : "MCP action failed"),
+  });
+  const mcpToolAction = useMutation({
+    mutationFn: ({
+      id,
+      action,
+    }: {
+      id: string;
+      action: "test" | "enable" | "disable" | "delete";
+    }) => api.mcpToolAction(id, action),
+    onSuccess: (result) => {
+      setMcpActionStatus(`${result.toolName}: ${result.action} ${result.status}`);
+      void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["runners"] });
+      void queryClient.invalidateQueries({ queryKey: ["activity"] });
+    },
+    onError: (error) =>
+      setMcpActionStatus(error instanceof Error ? error.message : "MCP tool action failed"),
   });
   const approvalAction = useMutation({
     mutationFn: ({ id, action }: { id: string; action: "approve" | "reject" }) =>
@@ -92,8 +127,13 @@ function RunnersPage() {
       void queryClient.invalidateQueries({ queryKey: ["activity"] });
     },
   });
+  const mcpTools = mcpToolsQuery.data?.tools ?? [];
+  const mcpToolsByRunnerId = new Map(mcpTools.map((tool) => [tool.id, tool]));
+  const enabledMcpTools = mcpTools.filter((tool) => tool.status === "enabled").length;
+  const busy = runnerAction.isPending || mcpToolAction.isPending || mcpLifecycle.isPending;
   const items = (runnersQuery.data?.runners ?? []).map((r) => ({
     ...r,
+    mcpTool: mcpToolsByRunnerId.get(r.id),
     friendly:
       r.lastTest === "failed"
         ? friendlyStatus.failed
@@ -111,6 +151,22 @@ function RunnersPage() {
     runnerAction.mutate({ id: runner.id, action });
   }
 
+  function runMcpToolAction(
+    runner: RunnerSummaryDto,
+    tool: McpToolDto,
+    action: "test" | "enable" | "disable" | "delete",
+  ) {
+    if (
+      action === "delete" &&
+      !window.confirm(
+        `Unpublish "${runner.name}" from MCP? This removes the MCP tool but keeps the runner.`,
+      )
+    ) {
+      return;
+    }
+    mcpToolAction.mutate({ id: tool.id, action });
+  }
+
   return (
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
       <div className="flex items-start justify-between gap-6 mb-8">
@@ -125,6 +181,60 @@ function RunnersPage() {
             <Plus className="h-4 w-4" /> New runner
           </Link>
         </Button>
+      </div>
+
+      <div className="mb-6 rounded-2xl border bg-card p-5 shadow-[var(--shadow-card)]">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="font-medium text-sm">MCP publishing</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Server {mcpStatus.data?.status ?? "configured"} on{" "}
+              {mcpStatus.data?.bind ?? mcpConfig.data?.localUrl ?? "local runtime"} ·{" "}
+              {enabledMcpTools} enabled tool{enabledMcpTools === 1 ? "" : "s"}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              disabled={busy}
+              onClick={() => mcpLifecycle.mutate("restart")}
+            >
+              <RotateCw className="h-3.5 w-3.5" /> Restart MCP
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              disabled={busy}
+              onClick={() =>
+                mcpLifecycle.mutate(mcpStatus.data?.status === "running" ? "stop" : "start")
+              }
+            >
+              <Power className="h-3.5 w-3.5" />
+              {mcpStatus.data?.status === "running" ? "Stop MCP" : "Start MCP"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={() =>
+                void navigator.clipboard?.writeText(mcpConfig.data?.clientJson ?? "{}")
+              }
+            >
+              <Copy className="h-3.5 w-3.5" /> Copy MCP config
+            </Button>
+          </div>
+        </div>
+        {mcpActionStatus && (
+          <div className="mt-3 text-xs text-muted-foreground">{mcpActionStatus}</div>
+        )}
+        {(mcpStatus.isError || mcpToolsQuery.isError || mcpConfig.isError) && (
+          <div className="mt-3 text-xs text-destructive">
+            Some MCP state could not be loaded from the local runtime.
+          </div>
+        )}
       </div>
 
       {runnerAction.data && (
@@ -232,13 +342,18 @@ function RunnersPage() {
                 Evidence {r.evidenceRefs[0]}
               </div>
             )}
+            {r.mcpTool && (
+              <div className="mt-3 text-xs text-muted-foreground">
+                MCP tool {r.mcpTool.name} · {r.mcpTool.status}
+              </div>
+            )}
             <div className="mt-5 flex flex-wrap gap-2">
               {r.friendly.tone === "fix" ? (
                 <Button
                   size="sm"
                   variant="default"
                   className="gap-1.5"
-                  disabled={runnerAction.isPending}
+                  disabled={busy}
                   onClick={() => setRefineRunnerId(r.id)}
                 >
                   <Wrench className="h-3.5 w-3.5" /> Fix
@@ -247,7 +362,7 @@ function RunnersPage() {
                 <Button
                   size="sm"
                   className="gap-1.5"
-                  disabled={runnerAction.isPending}
+                  disabled={busy}
                   onClick={() => runAction(r, "run")}
                 >
                   <Play className="h-3.5 w-3.5" />
@@ -258,7 +373,7 @@ function RunnersPage() {
                 size="sm"
                 variant="outline"
                 className="gap-1.5"
-                disabled={runnerAction.isPending}
+                disabled={busy}
                 onClick={() => runAction(r, "test")}
               >
                 <Play className="h-3.5 w-3.5" />
@@ -269,12 +384,12 @@ function RunnersPage() {
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Link>
               </Button>
-              {r.friendly.tone !== "fix" && r.friendly.tone !== "published" && (
+              {!mcpToolsQuery.isLoading && !r.mcpTool && r.friendly.tone !== "fix" && (
                 <Button
                   size="sm"
                   variant="outline"
                   className="gap-1.5"
-                  disabled={runnerAction.isPending}
+                  disabled={busy}
                   onClick={() => runAction(r, "publish")}
                 >
                   <Upload className="h-3.5 w-3.5" />
@@ -283,11 +398,49 @@ function RunnersPage() {
                     : "Publish as MCP"}
                 </Button>
               )}
+              {r.mcpTool && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    disabled={busy || r.mcpTool.status !== "enabled"}
+                    onClick={() => runMcpToolAction(r, r.mcpTool!, "test")}
+                  >
+                    <Play className="h-3.5 w-3.5" /> Test MCP
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    disabled={busy}
+                    onClick={() =>
+                      runMcpToolAction(
+                        r,
+                        r.mcpTool!,
+                        r.mcpTool!.status === "enabled" ? "disable" : "enable",
+                      )
+                    }
+                  >
+                    <Power className="h-3.5 w-3.5" />
+                    {r.mcpTool.status === "enabled" ? "Disable MCP" : "Enable MCP"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="gap-1.5"
+                    disabled={busy}
+                    onClick={() => runMcpToolAction(r, r.mcpTool!, "delete")}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Unpublish MCP
+                  </Button>
+                </>
+              )}
               <Button
                 size="sm"
                 variant="destructive"
                 className="gap-1.5"
-                disabled={runnerAction.isPending}
+                disabled={busy}
                 onClick={() => runAction(r, "delete")}
               >
                 <Trash2 className="h-3.5 w-3.5" />
