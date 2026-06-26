@@ -29,10 +29,24 @@ import type {
   SetupChecklistDto,
   SetupFixResultDto,
 } from "./types";
+import { toast } from "sonner";
 
 const API_BASE = "/api/v1";
-const guiToken =
-  typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("token");
+const GUI_TOKEN_STORAGE_KEY = "greentic.gui.token";
+
+function guiToken(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const token = new URLSearchParams(window.location.search).get("token");
+  if (token) {
+    window.sessionStorage.setItem(GUI_TOKEN_STORAGE_KEY, token);
+    return token;
+  }
+
+  return window.sessionStorage.getItem(GUI_TOKEN_STORAGE_KEY) ?? "";
+}
 
 export class ApiClientError extends Error {
   readonly code: string;
@@ -47,18 +61,32 @@ export class ApiClientError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      accept: "application/json",
-      ...(guiToken ? { "x-greentic-gui-token": guiToken } : {}),
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  });
+  let response: Response;
+  try {
+    const token = guiToken();
+    response = await fetch(`${API_BASE}${path}`, {
+      headers: {
+        accept: "application/json",
+        ...(token ? { "x-greentic-gui-token": token } : {}),
+        ...(init?.headers ?? {}),
+      },
+      ...init,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "The local GUI API is unavailable.";
+    toast.error(message);
+    throw error;
+  }
 
   const payload = (await response.json()) as ApiResponse<T>;
   if (!payload.ok) {
-    throw new ApiClientError(payload.error.code, payload.error.message, payload.error.details);
+    const error = new ApiClientError(
+      payload.error.code,
+      payload.error.message,
+      payload.error.details,
+    );
+    toast.error(error.message, { description: error.code });
+    throw error;
   }
 
   return payload.data;
