@@ -56,9 +56,7 @@ function RunnersPage() {
   const [refineRunnerId, setRefineRunnerId] = useState<string | null>(null);
   const [correction, setCorrection] = useState("");
   const [refinement, setRefinement] = useState<RefinementResultDto | null>(null);
-  const [execution, setExecution] = useState<{ runnerId: string; action: "run" | "test" } | null>(
-    null,
-  );
+  const [execution, setExecution] = useState<{ runnerId: string; action: "run" } | null>(null);
   const [runnerInputs, setRunnerInputs] = useState<Record<string, Record<string, string>>>({});
   const [runnerResults, setRunnerResults] = useState<Record<string, RunnerActionResultDto>>({});
   const [runnerErrors, setRunnerErrors] = useState<Record<string, string>>({});
@@ -147,12 +145,12 @@ function RunnersPage() {
     runnerAction.mutate({ id: runner.id, action, inputs });
   }
 
-  function startExecution(runner: RunnerSummaryDto, action: "run" | "test") {
+  function startExecution(runner: RunnerSummaryDto) {
     if ((runner.inputFields ?? []).length === 0) {
-      runAction(runner, action, {});
+      runAction(runner, "run", {});
       return;
     }
-    setExecution({ runnerId: runner.id, action });
+    setExecution({ runnerId: runner.id, action: "run" });
   }
 
   function updateRunnerInput(runnerId: string, field: string, value: string) {
@@ -388,22 +386,12 @@ function RunnersPage() {
                   size="sm"
                   className="gap-1.5"
                   disabled={busy}
-                  onClick={() => startExecution(r, "run")}
+                  onClick={() => startExecution(r)}
                 >
                   <Play className="h-3.5 w-3.5" />
                   {activeAction?.id === r.id && activeAction.action === "run" ? "Running" : "Run"}
                 </Button>
               )}
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1.5"
-                disabled={busy}
-                onClick={() => startExecution(r, "test")}
-              >
-                <Play className="h-3.5 w-3.5" />
-                {activeAction?.id === r.id && activeAction.action === "test" ? "Testing" : "Test"}
-              </Button>
               <Button size="sm" variant="outline" className="gap-1.5" asChild>
                 <Link
                   to="/create"
@@ -431,9 +419,7 @@ function RunnersPage() {
             </div>
             {execution?.runnerId === r.id && (
               <div className="mt-4 rounded-lg border bg-muted/40 p-3">
-                <div className="text-sm font-medium">
-                  {execution.action === "run" ? "Run" : "Test"} inputs
-                </div>
+                <div className="text-sm font-medium">Run inputs</div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   {(r.inputFields ?? []).map((field) => (
                     <div key={field}>
@@ -452,7 +438,7 @@ function RunnersPage() {
                     disabled={busy}
                     onClick={() => runAction(r, execution.action, runnerInputs[r.id] ?? {})}
                   >
-                    {execution.action === "run" ? "Run" : "Test"}
+                    Run
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => setExecution(null)}>
                     Cancel

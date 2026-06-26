@@ -1684,10 +1684,14 @@ fn runner_action_json_with_body(
     let inputs = runner_input_values(body, &input_names);
     let output_names = runner_output_fields(&runner);
     let status = match action {
-        "validate" | "test" | "run" => {
+        "validate" | "test" => {
             persist_evidence_bundle(state, &runner, action, "success", None)?;
             persist_runner_state(state, &runner.id, "validated", "passed", &evidence_ref)?;
             "passed"
+        }
+        "run" => {
+            persist_evidence_bundle(state, &runner, action, "success", None)?;
+            "completed"
         }
         "approve" => {
             persist_runner_state(state, &runner.id, "approved", "passed", &evidence_ref)?;
