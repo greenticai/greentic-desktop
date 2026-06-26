@@ -53,9 +53,7 @@ function Home() {
   return (
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
       <div className="text-center mb-12">
-        <div
-          className="inline-flex h-14 w-14 rounded-2xl items-center justify-center mb-5 bg-background border shadow-[var(--shadow-card)]"
-        >
+        <div className="inline-flex h-14 w-14 rounded-2xl items-center justify-center mb-5 bg-background border shadow-[var(--shadow-card)]">
           <BrandLogo className="h-11 w-11" />
         </div>
         <h1 className="text-4xl font-semibold tracking-tight">

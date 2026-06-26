@@ -53,14 +53,27 @@ function StatusPill({ tone, label }: { tone: string; label: string }) {
 function RunnersPage() {
   const queryClient = useQueryClient();
   const [refineRunnerId, setRefineRunnerId] = useState<string | null>(null);
+  const [runRunner, setRunRunner] = useState<RunnerSummaryDto | null>(null);
+  const [runInputs, setRunInputs] = useState<Record<string, string>>({});
   const [correction, setCorrection] = useState("");
   const [refinement, setRefinement] = useState<RefinementResultDto | null>(null);
   const runnersQuery = useQuery({ queryKey: ["runners"], queryFn: api.runners });
   const evidence = useQuery({ queryKey: ["evidence"], queryFn: api.evidence });
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: api.approvals });
   const runnerAction = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: string }) => api.runnerAction(id, action),
-    onSuccess: () => {
+    mutationFn: ({
+      id,
+      action,
+      inputs,
+    }: {
+      id: string;
+      action: string;
+      inputs?: Record<string, string>;
+    }) => api.runnerAction(id, action, inputs),
+    onSuccess: (result) => {
+      if (result.action === "run") {
+        setRunRunner(null);
+      }
       void queryClient.invalidateQueries({ queryKey: ["runners"] });
       void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
       void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] });
@@ -100,8 +113,14 @@ function RunnersPage() {
   }));
   const activeAction = runnerAction.variables;
 
-  function runAction(runner: RunnerSummaryDto, action: string) {
-    runnerAction.mutate({ id: runner.id, action });
+  function runAction(runner: RunnerSummaryDto, action: string, inputs?: Record<string, string>) {
+    runnerAction.mutate({ id: runner.id, action, inputs });
+  }
+
+  function openRun(runner: RunnerSummaryDto) {
+    const defaults = Object.fromEntries((runner.inputs ?? []).map((input) => [input, ""]));
+    setRunInputs(defaults);
+    setRunRunner(runner);
   }
 
   return (
@@ -124,6 +143,51 @@ function RunnersPage() {
         <div className="mb-5 rounded-lg border bg-card px-4 py-3 text-sm">
           {runnerAction.data.runnerId}: {runnerAction.data.action} {runnerAction.data.status}
           <span className="ml-2 text-muted-foreground">{runnerAction.data.evidenceRef}</span>
+          {Object.keys(runnerAction.data.outputs).length > 0 && (
+            <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+              {Object.entries(runnerAction.data.outputs).map(([key, value]) => (
+                <div key={key}>
+                  {key}: <span className="font-medium text-foreground">{value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {runRunner && (
+        <div className="mb-5 rounded-lg border bg-card p-4">
+          <div className="font-medium text-sm">Run {runRunner.name}</div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            {(runRunner.inputs ?? []).map((input) => (
+              <div key={input}>
+                <label className="text-xs text-muted-foreground">{input}</label>
+                <Input
+                  className="mt-1"
+                  value={runInputs[input] ?? ""}
+                  onChange={(event) =>
+                    setRunInputs((current) => ({ ...current, [input]: event.target.value }))
+                  }
+                />
+              </div>
+            ))}
+          </div>
+          {(runRunner.inputs ?? []).length === 0 && (
+            <div className="mt-2 text-sm text-muted-foreground">
+              This runner does not declare any inputs.
+            </div>
+          )}
+          <div className="mt-4 flex gap-2">
+            <Button
+              size="sm"
+              disabled={runnerAction.isPending}
+              onClick={() => runAction(runRunner, "run", runInputs)}
+            >
+              Run
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setRunRunner(null)}>
+              Cancel
+            </Button>
+          </div>
         </div>
       )}
       {(approvals.data?.approvals ?? []).filter((approval) => approval.status === "pending")
@@ -241,7 +305,7 @@ function RunnersPage() {
                   size="sm"
                   className="gap-1.5"
                   disabled={runnerAction.isPending}
-                  onClick={() => runAction(r, "run")}
+                  onClick={() => openRun(r)}
                 >
                   <Play className="h-3.5 w-3.5" />
                   {activeAction?.id === r.id && activeAction.action === "run" ? "Running" : "Run"}

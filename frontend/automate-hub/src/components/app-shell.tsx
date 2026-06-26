@@ -16,9 +16,7 @@ export function AppShell() {
     <div className="min-h-screen flex w-full bg-background text-foreground">
       <aside className="w-64 shrink-0 border-r border-sidebar-border bg-sidebar flex flex-col">
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-sidebar-border">
-          <div
-            className="h-9 w-9 rounded-lg flex items-center justify-center bg-background border border-sidebar-border"
-          >
+          <div className="h-9 w-9 rounded-lg flex items-center justify-center bg-background border border-sidebar-border">
             <BrandLogo className="h-7 w-7" />
           </div>
           <div>

@@ -15,6 +15,81 @@ impl Default for ModelPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmProvider {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub default_model: &'static str,
+    pub mode: &'static str,
+    pub endpoint: Option<&'static str>,
+    pub secret_name: Option<&'static str>,
+}
+
+pub fn known_providers() -> &'static [LlmProvider] {
+    &[
+        LlmProvider {
+            id: "local",
+            name: "Local heuristic",
+            default_model: "heuristic-planner",
+            mode: "heuristic",
+            endpoint: None,
+            secret_name: None,
+        },
+        LlmProvider {
+            id: "openai",
+            name: "OpenAI",
+            default_model: "gpt-4.1-mini",
+            mode: "remote",
+            endpoint: Some("https://api.openai.com/v1"),
+            secret_name: Some("OPENAI_API_KEY"),
+        },
+        LlmProvider {
+            id: "anthropic",
+            name: "Anthropic",
+            default_model: "claude-3-5-sonnet-latest",
+            mode: "remote",
+            endpoint: Some("https://api.anthropic.com"),
+            secret_name: Some("ANTHROPIC_API_KEY"),
+        },
+        LlmProvider {
+            id: "deepseek",
+            name: "DeepSeek",
+            default_model: "deepseek-chat",
+            mode: "remote",
+            endpoint: Some("https://api.deepseek.com"),
+            secret_name: Some("DEEPSEEK_API_KEY"),
+        },
+        LlmProvider {
+            id: "google",
+            name: "Google Gemini",
+            default_model: "gemini-1.5-flash",
+            mode: "remote",
+            endpoint: Some("https://generativelanguage.googleapis.com"),
+            secret_name: Some("GOOGLE_API_KEY"),
+        },
+        LlmProvider {
+            id: "mistral",
+            name: "Mistral",
+            default_model: "mistral-small-latest",
+            mode: "remote",
+            endpoint: Some("https://api.mistral.ai"),
+            secret_name: Some("MISTRAL_API_KEY"),
+        },
+        LlmProvider {
+            id: "ollama",
+            name: "Ollama",
+            default_model: "llama3.1",
+            mode: "remote",
+            endpoint: Some("http://127.0.0.1:11434"),
+            secret_name: None,
+        },
+    ]
+}
+
+pub fn provider_by_id(id: &str) -> Option<&'static LlmProvider> {
+    known_providers().iter().find(|provider| provider.id == id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LlmPlanningContext {
     pub available_adapters: Vec<String>,
@@ -120,10 +195,28 @@ impl GreenticLlmClient for HeuristicLlmClient {
         };
         let capability = if lower.contains("terminal") || lower.contains("mainframe") {
             "terminal.read_screen"
+        } else if lower.contains("calculator") || lower.contains("desktop") || lower.contains("app")
+        {
+            desktop_capability(request)
         } else {
             "web.goto"
         };
         let mut inputs = Vec::new();
+        if lower.contains("calculator")
+            || lower.contains("two numbers")
+            || lower.contains("value 1")
+        {
+            inputs.push("number_1");
+        }
+        if lower.contains("calculator")
+            || lower.contains("two numbers")
+            || lower.contains("value 2")
+        {
+            inputs.push("number_2");
+        }
+        if lower.contains("calculator") || lower.contains("operation") {
+            inputs.push("operation");
+        }
         if lower.contains("company") {
             inputs.push("company_name");
         }
@@ -133,7 +226,12 @@ impl GreenticLlmClient for HeuristicLlmClient {
         if inputs.is_empty() && lower.contains("customer") {
             inputs.push("customer_name");
         }
-        let outputs = if lower.contains("customer id") || lower.contains("customer_id") {
+        let outputs = if lower.contains("calculator")
+            || lower.contains("calculate")
+            || lower.contains("result")
+        {
+            vec!["result"]
+        } else if lower.contains("customer id") || lower.contains("customer_id") {
             vec!["customer_id"]
         } else {
             Vec::new()
@@ -159,6 +257,33 @@ impl GreenticLlmClient for HeuristicLlmClient {
                 string_array(&open_questions.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>())
             ),
         })
+    }
+}
+
+fn desktop_capability(request: &LlmRequestEnvelope) -> &'static str {
+    let adapters = &request.context.available_adapters;
+    if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.macos"))
+    {
+        "macos.activate_app"
+    } else if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.windows"))
+    {
+        "windows.open_app"
+    } else if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.linux"))
+    {
+        "linux.find_window"
+    } else if adapters
+        .iter()
+        .any(|adapter| adapter.contains("greentic.desktop.java"))
+    {
+        "java.find_window"
+    } else {
+        "web.goto"
     }
 }
 
@@ -243,5 +368,41 @@ mod tests {
             .content
             .contains("\"runner_id\":\"crm.create_customer\""));
         assert!(response.content.contains("company_name"));
+    }
+
+    #[test]
+    fn heuristic_client_extracts_calculator_inputs_and_result() {
+        let client = HeuristicLlmClient;
+        let response = client
+            .complete(&LlmRequestEnvelope::prompt_to_runner(
+                "open the calculator, let me introduce value 1 and value 2 as well as the operation, use the calculator to calculate and retrieve the result and provide that back",
+                LlmPlanningContext {
+                    available_adapters: vec!["greentic.desktop.macos".to_owned()],
+                    ..LlmPlanningContext::default()
+                },
+            ))
+            .expect("heuristic response");
+
+        assert!(response.content.contains("\"number_1\""));
+        assert!(response.content.contains("\"number_2\""));
+        assert!(response.content.contains("\"operation\""));
+        assert!(response.content.contains("\"result\""));
+        assert!(response.content.contains("\"macos.activate_app\""));
+        assert!(response.content.contains("\"open_questions\":[]"));
+    }
+
+    #[test]
+    fn known_providers_include_remote_defaults() {
+        let providers = known_providers();
+
+        assert!(providers.iter().any(
+            |provider| provider.id == "local" && provider.default_model == "heuristic-planner"
+        ));
+        assert!(providers.iter().any(|provider| provider.id == "deepseek"
+            && provider.secret_name == Some("DEEPSEEK_API_KEY")));
+        assert_eq!(
+            provider_by_id("openai").map(|provider| provider.default_model),
+            Some("gpt-4.1-mini")
+        );
     }
 }
