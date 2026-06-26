@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,6 +11,7 @@ import type {
   RecordingFinaliseResultDto,
   RecordingNormaliseResultDto,
   RecordingSummaryDto,
+  RecordingTargetDto,
   RecordingTestResultDto,
 } from "@/lib/types";
 import {
@@ -561,6 +562,7 @@ function SaveStep({ draft }: { draft: PlannerDraftDto | null }) {
 }
 
 function RecordWizard({ onBack }: { onBack: () => void }) {
+  const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
   const [name, setName] = useState("Create customer in CRM");
   const [target, setTarget] = useState("browser");
@@ -569,9 +571,14 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
   const [recordingTest, setRecordingTest] = useState<RecordingTestResultDto | null>(null);
   const [finalised, setFinalised] = useState<RecordingFinaliseResultDto | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const targets = useQuery({ queryKey: ["recording-targets"], queryFn: api.recordingTargets });
   const setupPermission = useMutation({
     mutationFn: () => api.setupFix("screen_capture_permission", "open_system_settings"),
-    onSuccess: (result) => setMessage(result.message),
+    onSuccess: (result) => {
+      setMessage(result.message);
+      void queryClient.invalidateQueries({ queryKey: ["recording-targets"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup-checklist"] });
+    },
     onError: (error) =>
       setMessage(error instanceof Error ? error.message : "Could not open permission settings"),
   });
@@ -620,7 +627,18 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
     setStep((s) => Math.min(s + 1, 4));
   };
   const prev = () => (step === 0 ? onBack() : setStep((s) => s - 1));
-  const needsScreenRecording = target === "desktop" || target === "remote";
+  const targetOptions =
+    targets.data?.targets ??
+    ([
+      { id: "browser", label: "Browser task", profile: "web", adapter: "greentic.desktop.playwright", available: true },
+      { id: "desktop", label: "Desktop app task", profile: "desktop", adapter: "greentic.desktop.vision", available: false, unavailableReason: "Screen recording permission is required." },
+      { id: "remote", label: "Remote desktop task", profile: "remote", adapter: "greentic.desktop.vision", available: false, unavailableReason: "Screen recording permission is required." },
+      { id: "terminal", label: "Terminal/mainframe task", profile: "terminal", adapter: "greentic.desktop.terminal.tn3270", available: true },
+    ] satisfies RecordingTargetDto[]);
+  const selectedTarget = targetOptions.find((option) => option.id === target);
+  const needsScreenRecording =
+    (target === "desktop" || target === "remote") &&
+    targets.data?.screenCapture?.status !== "ready";
 
   const titles = [
     { t: "Name your runner", s: "Give it something memorable." },
@@ -685,30 +703,31 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
       {step === 1 && (
         <div className="space-y-4">
           <div className="grid sm:grid-cols-2 gap-3">
-            {[
-              ["browser", "Browser task"],
-              ["desktop", "Desktop app task"],
-              ["remote", "Remote desktop task"],
-              ["terminal", "Terminal/mainframe task"],
-            ].map(([id, label]) => (
+            {targetOptions.map((option) => (
               <button
-                key={id}
-                onClick={() => setTarget(id)}
+                key={option.id}
+                onClick={() => setTarget(option.id)}
                 className={`rounded-xl border p-4 text-left hover:border-primary/40 hover:bg-accent/40 ${
-                  target === id ? "border-primary bg-accent/50" : ""
+                  target === option.id ? "border-primary bg-accent/50" : ""
                 }`}
               >
-                <div className="font-medium text-sm">{label}</div>
+                <div className="font-medium text-sm">{option.label}</div>
+                {!option.available && option.unavailableReason && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {option.unavailableReason}
+                  </div>
+                )}
               </button>
             ))}
           </div>
           {needsScreenRecording && (
             <div className="rounded-xl border border-warning/30 bg-warning/10 p-4 text-sm">
-              <div className="font-medium">Screen recording permission required</div>
+              <div className="font-medium">
+                {targets.data?.screenCapture?.label ?? "Screen recording permission required"}
+              </div>
               <p className="mt-1 text-muted-foreground">
-                Desktop and remote recording need OS screen sharing/screen recording permission.
-                Until that is granted and the native capture adapter is active, this flow can only
-                create a session and markers, not capture the real desktop steps.
+                {targets.data?.screenCapture?.help ??
+                  "Desktop and remote recording need OS screen sharing/screen recording permission. Until that is granted and the native capture adapter is active, this flow can only create a session and markers, not capture the real desktop steps."}
               </p>
               <Button
                 size="sm"
@@ -719,6 +738,11 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
               >
                 Open permission settings
               </Button>
+              {selectedTarget?.unavailableReason && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {selectedTarget.unavailableReason}
+                </div>
+              )}
             </div>
           )}
         </div>

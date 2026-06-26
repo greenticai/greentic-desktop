@@ -29,6 +29,7 @@ import type {
   RunnersDto,
   RuntimeInfoDto,
   SetupChecklistDto,
+  SetupChecklistItemDto,
   SetupFixResultDto,
 } from "./types";
 import { toast } from "sonner";
@@ -158,6 +159,8 @@ export const api = {
         },
       ],
     })),
+  setupItem: (itemId: string) =>
+    request<SetupChecklistItemDto>(`/setup/items/${encodeURIComponent(itemId)}`),
   setupFix: (itemId: string, action?: string) =>
     request<SetupFixResultDto>("/setup/fix", jsonInit("POST", { id: itemId, action })),
   activity: () => request<ActivityDto>("/activity"),

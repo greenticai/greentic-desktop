@@ -197,9 +197,11 @@ export interface RecordingTargetDto {
   profile: string;
   adapter: string;
   available: boolean;
+  unavailableReason?: string;
 }
 
 export interface RecordingTargetsDto {
+  screenCapture?: SetupChecklistItemDto;
   targets: RecordingTargetDto[];
 }
 

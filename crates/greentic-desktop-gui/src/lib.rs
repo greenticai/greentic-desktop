@@ -358,6 +358,9 @@ fn api_response(
             }
         }
         ("GET" | "HEAD", "/api/v1/setup/checklist") => setup_checklist_json(state),
+        ("GET" | "HEAD", path) if path.starts_with("/api/v1/setup/items/") => {
+            setup_item_json(path, state)
+        }
         ("GET" | "HEAD", "/api/v1/extensions/recommended") => recommended_extensions_json(None),
         ("GET" | "HEAD", "/api/v1/extensions/installed") => installed_extensions_json(state),
         ("GET" | "HEAD", path) if path.starts_with("/api/v1/extensions/search") => {
@@ -377,7 +380,7 @@ fn api_response(
             runner_detail_json(path, state)
         }
         ("GET" | "HEAD", "/api/v1/recordings") => recordings_list_json(state),
-        ("GET" | "HEAD", "/api/v1/recording-targets") => recording_targets_json(),
+        ("GET" | "HEAD", "/api/v1/recording-targets") => recording_targets_json(state),
         ("POST", "/api/v1/recordings") => match create_recording_json(body, state) {
             Ok(json) => json,
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
@@ -843,6 +846,61 @@ fn setup_checklist_json(state: &GuiApiState) -> String {
     )
 }
 
+fn setup_item_json(path: &str, state: &GuiApiState) -> String {
+    let id = path.trim_start_matches("/api/v1/setup/items/");
+    match id {
+        "screen_capture_permission" => {
+            let status = permission_setup_status(
+                state,
+                "screen_capture",
+                "Allow screen capture for the app that is running Greentic.",
+            );
+            checklist_item_json(
+                "screen_capture_permission",
+                "Screen capture permission",
+                &status.status,
+                &status.help,
+                "open_system_settings",
+            )
+        }
+        "accessibility_permission" => {
+            let status = permission_setup_status(
+                state,
+                "accessibility",
+                "Allow accessibility or UI automation for the app that is running Greentic.",
+            );
+            checklist_item_json(
+                "accessibility_permission",
+                "Accessibility permission",
+                &status.status,
+                &status.help,
+                "open_system_settings",
+            )
+        }
+        "input_control_permission" => {
+            let status = permission_setup_status(
+                state,
+                "input_control",
+                "Allow input monitoring or keyboard/mouse control for the app that is running Greentic.",
+            );
+            checklist_item_json(
+                "input_control_permission",
+                "Keyboard/mouse control permission",
+                &status.status,
+                &status.help,
+                "open_system_settings",
+            )
+        }
+        _ => checklist_item_json(
+            id,
+            "Unknown setup item",
+            "unsupported",
+            "This setup item is not recognised.",
+            "manual",
+        ),
+    }
+}
+
 fn setup_fix_json(body: &str, state: &GuiApiState) -> Result<String, String> {
     let id = json_string_field(body, "id")
         .or_else(|| json_string_field(body, "itemId"))
@@ -1106,7 +1164,7 @@ fn open_macos_settings(permission: &str) -> Result<(), String> {
         }
         _ => "x-apple.systempreferences:com.apple.preference.security",
     };
-    spawn_detached("open", &[pane])
+    spawn_detached("open", &["-b", "com.apple.systempreferences", pane])
 }
 
 fn open_windows_settings(permission: &str) -> Result<(), String> {
@@ -2341,8 +2399,35 @@ fn replace_yaml_scalar(yaml: &str, key: &str, value: &str) -> String {
     output
 }
 
-fn recording_targets_json() -> String {
-    r#"{"targets":[{"id":"browser","label":"Browser task","profile":"web","adapter":"greentic.desktop.playwright","available":true},{"id":"desktop","label":"Desktop app task","profile":"desktop","adapter":"greentic.desktop.vision","available":true},{"id":"remote","label":"Remote desktop task","profile":"remote","adapter":"greentic.desktop.vision","available":true},{"id":"terminal","label":"Terminal/mainframe task","profile":"terminal","adapter":"greentic.desktop.terminal.tn3270","available":true}]}"#.to_owned()
+fn recording_targets_json(state: &GuiApiState) -> String {
+    let screen_capture = permission_setup_status(
+        state,
+        "screen_capture",
+        "Allow screen capture for the app that is running Greentic.",
+    );
+    let visual_capture_available = screen_capture.status == "ready";
+    format!(
+        r#"{{"screenCapture":{},"targets":[{{"id":"browser","label":"Browser task","profile":"web","adapter":"greentic.desktop.playwright","available":true}},{{"id":"desktop","label":"Desktop app task","profile":"desktop","adapter":"greentic.desktop.vision","available":{},"unavailableReason":"{}"}},{{"id":"remote","label":"Remote desktop task","profile":"remote","adapter":"greentic.desktop.vision","available":{},"unavailableReason":"{}"}},{{"id":"terminal","label":"Terminal/mainframe task","profile":"terminal","adapter":"greentic.desktop.terminal.tn3270","available":true}}]}}"#,
+        checklist_item_json(
+            "screen_capture_permission",
+            "Screen capture permission",
+            &screen_capture.status,
+            &screen_capture.help,
+            "open_system_settings",
+        ),
+        visual_capture_available,
+        if visual_capture_available {
+            ""
+        } else {
+            "Screen recording permission is required."
+        },
+        visual_capture_available,
+        if visual_capture_available {
+            ""
+        } else {
+            "Screen recording permission is required."
+        },
+    )
 }
 
 fn recordings_list_json(state: &GuiApiState) -> String {
@@ -4184,6 +4269,35 @@ mod tests {
 
         assert_eq!(status.status, "warning");
         assert!(status.help.contains("Allow screen capture."));
+    }
+
+    #[test]
+    fn setup_item_reports_single_permission_status() {
+        let state = GuiApiState {
+            platform: "plan9".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let item = setup_item_json("/api/v1/setup/items/screen_capture_permission", &state);
+
+        assert!(item.contains("\"id\":\"screen_capture_permission\""));
+        assert!(item.contains("\"status\":\"warning\""));
+        assert!(item.contains("Screen capture"));
+    }
+
+    #[test]
+    fn recording_targets_include_screen_capture_status() {
+        let state = GuiApiState {
+            platform: "plan9".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let targets = recording_targets_json(&state);
+
+        assert!(targets.contains("\"screenCapture\""));
+        assert!(targets.contains("\"id\":\"desktop\""));
+        assert!(targets.contains("\"available\":false"));
+        assert!(targets.contains("Screen recording permission is required"));
     }
 
     #[test]
