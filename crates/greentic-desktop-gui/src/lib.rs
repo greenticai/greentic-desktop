@@ -110,12 +110,14 @@ impl GuiHost {
 
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let _ = handle_connection(stream, addr, &api_state);
+                    let api_state = Arc::clone(&api_state);
+                    thread::spawn(move || {
+                        let _ = handle_connection(stream, addr, &api_state);
+                    });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(_) => {
                     thread::sleep(Duration::from_millis(25));
                 }
-                Err(_) => break,
             }
         });
 
@@ -216,6 +218,9 @@ fn handle_connection(
     addr: SocketAddr,
     api_state: &GuiApiState,
 ) -> Result<(), GuiError> {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let mut buffer = [0; 8192];
     let read = stream.read(&mut buffer)?;
     if read == 0 {
