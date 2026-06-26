@@ -1025,7 +1025,9 @@ pub fn finalise_recording(
     runner: &Path,
 ) -> Result<PathBuf, RecordingLifecycleError> {
     let out = recording.join("runner.draft.yaml");
-    fs::copy(runner, &out)?;
+    if runner != out {
+        fs::copy(runner, &out)?;
+    }
     Ok(out)
 }
 

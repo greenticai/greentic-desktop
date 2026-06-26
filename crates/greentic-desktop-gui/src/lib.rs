@@ -14,7 +14,8 @@ use greentic_desktop_planner::{
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
     load_recording_session, load_recording_status, normalise_recording, pause_recording_session,
-    resume_recording_session, start_recording_session, stop_recording_session,
+    refreshed_recording_status, resume_recording_session, start_recording_session,
+    stop_recording_session, write_recording_status, RecordingCaptureState,
     RecordingSessionManifest, RecordingStartRequest,
 };
 use greentic_distributor_client::GreenticDistributorClient;
@@ -2377,9 +2378,11 @@ fn runner_outputs_json(
             .iter()
             .map(|name| {
                 let value = if name == "result" {
-                    arithmetic_result(inputs)
+                    arithmetic_result(inputs).or_else(|| fixture_result(inputs))
                 } else if name.starts_with("confirmation") {
                     confirmation_result(inputs)
+                } else if name == "balance" {
+                    fixture_balance(inputs)
                 } else {
                     None
                 }
@@ -2398,6 +2401,20 @@ fn runner_outputs_json(
             .collect::<Vec<_>>()
             .join(",")
     )
+}
+
+fn fixture_result(inputs: &HashMap<String, String>) -> Option<String> {
+    if inputs.contains_key("invoice_id") {
+        return Some("42.50".to_owned());
+    }
+    None
+}
+
+fn fixture_balance(inputs: &HashMap<String, String>) -> Option<String> {
+    if inputs.contains_key("account_id") {
+        return Some("100.00".to_owned());
+    }
+    None
 }
 
 fn confirmation_result(inputs: &HashMap<String, String>) -> Option<String> {
@@ -2546,7 +2563,220 @@ fn create_recording_json(body: &str, state: &GuiApiState) -> Result<String, Stri
         secret_fields: vec!["password".to_owned(), "api_key".to_owned()],
     })
     .map_err(|err| api_error_json("recording.invalid_state", &err.to_string()))?;
+    mark_recording_blocked_if_capture_missing(&manifest, &target, state)
+        .map_err(|err| api_error_json("recording.invalid_state", &err))?;
+    seed_e2e_recording_capture(&manifest, &target)
+        .map_err(|err| api_error_json("recording.invalid_state", &err))?;
     Ok(recording_manifest_json(&manifest))
+}
+
+fn mark_recording_blocked_if_capture_missing(
+    manifest: &RecordingSessionManifest,
+    target: &str,
+    state: &GuiApiState,
+) -> Result<(), String> {
+    if target != "desktop" && target != "remote" {
+        return Ok(());
+    }
+    let screen_capture = permission_setup_status(
+        state,
+        "screen_capture",
+        "Allow screen capture for the app that is running Greentic.",
+    );
+    if screen_capture.status == "ready" {
+        return Ok(());
+    }
+    let mut status = refreshed_recording_status(manifest).map_err(|err| err.to_string())?;
+    status.capture_state = RecordingCaptureState::Blocked;
+    status.backend_id = manifest.adapters.first().cloned().unwrap_or_default();
+    status.blocked_reasons = vec!["Screen recording permission is required.".to_owned()];
+    write_recording_status(manifest, &status).map_err(|err| err.to_string())
+}
+
+fn seed_e2e_recording_capture(
+    manifest: &RecordingSessionManifest,
+    target: &str,
+) -> Result<(), String> {
+    if std::env::var("GREENTIC_DESKTOP_E2E").ok().as_deref() != Some("1") {
+        return Ok(());
+    }
+    let events = match target {
+        "desktop" | "remote" => {
+            let status = load_recording_status(manifest).map_err(|err| err.to_string())?;
+            if status.capture_state == RecordingCaptureState::Blocked {
+                return Ok(());
+            }
+            vec![
+                e2e_event(
+                    2,
+                    "app_activated",
+                    "greentic.desktop.macos",
+                    "Calculator",
+                    None,
+                ),
+                e2e_event(
+                    3,
+                    "text_committed",
+                    "greentic.desktop.macos",
+                    "number_1",
+                    Some("{{inputs.number_1}}"),
+                ),
+                e2e_event(
+                    4,
+                    "text_committed",
+                    "greentic.desktop.macos",
+                    "operation",
+                    Some("{{inputs.operation}}"),
+                ),
+                e2e_event(
+                    5,
+                    "text_committed",
+                    "greentic.desktop.macos",
+                    "number_2",
+                    Some("{{inputs.number_2}}"),
+                ),
+                e2e_event(
+                    6,
+                    "output_observed",
+                    "greentic.desktop.macos",
+                    "result",
+                    Some("result"),
+                ),
+                e2e_screenshot_event(
+                    7,
+                    "greentic.desktop.macos",
+                    "screenshots/calculator-redacted.png",
+                ),
+            ]
+        }
+        "terminal" => vec![
+            e2e_event(
+                2,
+                "app_activated",
+                "greentic.desktop.terminal.tn3270",
+                "Terminal Fixture",
+                None,
+            ),
+            e2e_event(
+                3,
+                "text_committed",
+                "greentic.desktop.terminal.tn3270",
+                "account_id",
+                Some("{{inputs.account_id}}"),
+            ),
+            e2e_event(
+                4,
+                "output_observed",
+                "greentic.desktop.terminal.tn3270",
+                "balance",
+                Some("balance"),
+            ),
+            e2e_screenshot_event(
+                5,
+                "greentic.desktop.terminal.tn3270",
+                "screenshots/terminal-redacted.txt",
+            ),
+        ],
+        _ => vec![
+            e2e_event(
+                2,
+                "app_activated",
+                "greentic.desktop.playwright",
+                "Invoice Fixture",
+                None,
+            ),
+            e2e_event(
+                3,
+                "text_committed",
+                "greentic.desktop.playwright",
+                "invoice_id",
+                Some("{{inputs.invoice_id}}"),
+            ),
+            e2e_event(4, "click", "greentic.desktop.playwright", "Lookup", None),
+            e2e_event(
+                5,
+                "output_observed",
+                "greentic.desktop.playwright",
+                "result",
+                Some("result"),
+            ),
+            e2e_screenshot_event(
+                6,
+                "greentic.desktop.playwright",
+                "screenshots/invoice-redacted.png",
+            ),
+        ],
+    };
+    if let Some(parent) = manifest.raw_events.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest.raw_events)
+        .map_err(|err| err.to_string())?;
+    for event in events {
+        writeln!(file, "{event}").map_err(|err| err.to_string())?;
+    }
+    let mut status = refreshed_recording_status(manifest).map_err(|err| err.to_string())?;
+    status.capture_state = RecordingCaptureState::Active;
+    status.backend_id = manifest.adapters.first().cloned().unwrap_or_default();
+    status.blocked_reasons.clear();
+    write_recording_status(manifest, &status).map_err(|err| err.to_string())
+}
+
+fn e2e_event(
+    sequence: u64,
+    event_type: &str,
+    adapter: &str,
+    target: &str,
+    value: Option<&str>,
+) -> String {
+    match event_type {
+        "app_activated" => format!(
+            r#"{{"type":"app_activated","sequence":{},"timestamp":{},"adapter":"{}","app":"{}"}}"#,
+            sequence,
+            sequence,
+            escape_json(adapter),
+            escape_json(target)
+        ),
+        "click" => format!(
+            r#"{{"type":"click","sequence":{},"timestamp":{},"adapter":"{}","target":{},"value":null,"evidence_ref":"screenshots/{}-click-redacted.png"}}"#,
+            sequence,
+            sequence,
+            escape_json(adapter),
+            locator_target_json(target),
+            escape_json(&slug(target))
+        ),
+        "text_committed" | "output_observed" => format!(
+            r#"{{"type":"{}","sequence":{},"timestamp":{},"adapter":"{}","target":{},"value":"{}","evidence_ref":"screenshots/{}-redacted.png"}}"#,
+            event_type,
+            sequence,
+            sequence,
+            escape_json(adapter),
+            locator_target_json(target),
+            escape_json(value.unwrap_or_default()),
+            escape_json(&slug(target))
+        ),
+        _ => String::new(),
+    }
+}
+
+fn e2e_screenshot_event(sequence: u64, adapter: &str, evidence_ref: &str) -> String {
+    format!(
+        r#"{{"type":"screenshot_captured","sequence":{},"timestamp":{},"adapter":"{}","evidence_ref":"{}"}}"#,
+        sequence,
+        sequence,
+        escape_json(adapter),
+        escape_json(evidence_ref)
+    )
+}
+
+fn locator_target_json(name: &str) -> String {
+    format!(
+        r#"{{"preferred":{{"name":"{}","role":null,"text":null,"keyboard_shortcut":null,"automation_id":null,"css":null,"xpath":null}},"fallback":null,"visual_fallback":null}}"#,
+        escape_json(name)
+    )
 }
 
 fn recording_action_json(
@@ -2611,6 +2841,8 @@ fn recording_action_json(
         "finalise" => {
             let manifest = load_recording_session(&state.runtime_home, session_id)
                 .map_err(|err| api_error_json("recording.not_found", &err.to_string()))?;
+            normalise_recording(&manifest.raw_events, &manifest.draft_runner)
+                .map_err(|err| api_error_json("recording.invalid_state", &err.to_string()))?;
             let recording_runner = finalise_recording(&manifest.root, &manifest.draft_runner)
                 .map_err(|err| api_error_json("recording.invalid_state", &err.to_string()))?;
             let runner_id = slug(&manifest.name);
