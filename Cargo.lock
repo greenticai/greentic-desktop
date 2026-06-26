@@ -492,9 +492,14 @@ dependencies = [
 name = "greentic-desktop-test-harness"
 version = "0.1.2"
 dependencies = [
+ "greentic-desktop-config",
+ "greentic-desktop-java",
  "greentic-desktop-linux",
  "greentic-desktop-macos",
  "greentic-desktop-platform",
+ "greentic-desktop-runtime",
+ "greentic-desktop-terminal",
+ "greentic-desktop-windows",
 ]
 
 [[package]]

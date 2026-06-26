@@ -12,6 +12,11 @@ concurrency:
   group: desktop-harness-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   unit-matrix:
     name: ${{ matrix.name }}
@@ -22,13 +27,16 @@ jobs:
         include:
           - name: windows-unit
             os: windows-latest
-            command: cargo test -p greentic-desktop-windows -p greentic-desktop-java
+            command: cargo test -p greentic-desktop-windows -p greentic-desktop-java -p greentic-desktop-terminal && cargo test -p greentic-desktop-test-harness windows_app_workflow_e2e_installs_extension_and_returns_output && cargo test -p greentic-desktop-test-harness java_app_workflow_e2e_installs_extension_and_returns_output && cargo test -p greentic-desktop-test-harness terminal_workflow_e2e_installs_extension_and_returns_output
           - name: macos-unit
             os: macos-latest
             command: cargo test -p greentic-desktop-macos -p greentic-desktop-platform
+          - name: macos-app-workflow-e2e
+            os: macos-latest
+            command: cargo test -p greentic-desktop-test-harness macos_app_workflow_e2e_installs_extension_and_returns_output
           - name: ubuntu-wayland-detection
             os: ubuntu-latest
-            command: cargo test -p greentic-desktop-linux -- detects_wayland_and_reports_global_restrictions wayland_requires_manual_approval_when_portal_is_missing
+            command: cargo test -p greentic-desktop-linux detects_wayland_and_reports_global_restrictions && cargo test -p greentic-desktop-linux wayland_requires_manual_approval_when_portal_is_missing
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,7 +50,7 @@ jobs:
       - name: Install virtual display tools
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Run X11 harness tests
-        run: xvfb-run -a cargo test -p greentic-desktop-linux -- can_detect_x11_session can_list_windows_and_inspect_at_spi_tree
+        run: xvfb-run -a cargo test -p greentic-desktop-linux can_detect_x11_session && xvfb-run -a cargo test -p greentic-desktop-linux can_list_windows_and_inspect_at_spi_tree && cargo test -p greentic-desktop-test-harness linux_x11_app_workflow_e2e_installs_extension_and_returns_output
 
   harness-plan:
     runs-on: ubuntu-latest

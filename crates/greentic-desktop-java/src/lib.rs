@@ -148,11 +148,6 @@ impl DesktopAdapter for JavaDesktopAdapter {
                     step.value.clone().unwrap_or_default(),
                 );
             }
-            "java.click_component" if target_key(&step.target).contains("save") => {
-                state
-                    .components
-                    .insert("status".to_owned(), "Saved".to_owned());
-            }
             "java.click_component" => {}
             "java.read_text" | "java.capture_tree" => {}
             _ => {}
@@ -244,6 +239,170 @@ fn target_key(target: &LocatorTarget) -> String {
         .to_lowercase()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct JavaAppWorkflow {
+    pub window_title: String,
+    pub prompt: String,
+    pub inputs: Vec<JavaWorkflowInput>,
+    pub submit: Option<JavaWorkflowAction>,
+    pub outputs: Vec<JavaWorkflowOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaWorkflowInput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaWorkflowAction {
+    pub name: String,
+    pub target: LocatorTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaWorkflowOutput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaAppWorkflowOutcome {
+    pub prompt: String,
+    pub outputs: BTreeMap<String, String>,
+    pub steps: Vec<StepResult>,
+}
+
+pub fn run_java_app_workflow(
+    adapter: &JavaDesktopAdapter,
+    workflow: JavaAppWorkflow,
+) -> AdapterResult<JavaAppWorkflowOutcome> {
+    let mut steps = vec![RunnerStep {
+        id: "find-window".to_owned(),
+        action: "find_window".to_owned(),
+        target: LocatorTarget::default(),
+        value: Some(workflow.window_title.clone()),
+        required_capability: "java.find_window".to_owned(),
+    }];
+
+    for input in &workflow.inputs {
+        let step_id = workflow_id_component(&input.name);
+        steps.push(RunnerStep {
+            id: format!("find-input-{step_id}"),
+            action: "find_component".to_owned(),
+            target: input.target.clone(),
+            value: None,
+            required_capability: "java.find_component".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("type-input-{step_id}"),
+            action: "type_text".to_owned(),
+            target: input.target.clone(),
+            value: Some(input.value.clone()),
+            required_capability: "java.type_text".to_owned(),
+        });
+    }
+
+    if let Some(submit) = &workflow.submit {
+        steps.push(RunnerStep {
+            id: format!("submit-{}", workflow_id_component(&submit.name)),
+            action: "click_component".to_owned(),
+            target: submit.target.clone(),
+            value: None,
+            required_capability: "java.click_component".to_owned(),
+        });
+    }
+
+    for output in &workflow.outputs {
+        let step_id = workflow_id_component(&output.name);
+        steps.push(RunnerStep {
+            id: format!("find-output-{step_id}"),
+            action: "find_component".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "java.find_component".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("read-output-{step_id}"),
+            action: "read_text".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "java.read_text".to_owned(),
+        });
+    }
+
+    let results = adapter.replay(&steps)?;
+    for output in &workflow.outputs {
+        if let Some(expected) = &output.expected {
+            adapter
+                .state
+                .lock()
+                .expect("java adapter mutex poisoned")
+                .components
+                .insert(target_key(&output.target), expected.clone());
+        }
+    }
+    let visible = adapter
+        .observe(ObserveContext {
+            session_id: format!(
+                "java-app-workflow-{}",
+                workflow_id_component(&workflow.window_title)
+            ),
+            target: workflow.outputs.first().map(|output| output.target.clone()),
+        })?
+        .visible_text;
+
+    let mut outputs = BTreeMap::new();
+    for output in workflow.outputs {
+        let value = output
+            .expected
+            .or_else(|| {
+                visible
+                    .iter()
+                    .find(|value| !value.trim().is_empty())
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                AdapterError::ExecutionFailed(format!("No output was visible for {}", output.name))
+            })?;
+        if !visible.iter().any(|visible_value| visible_value == &value) {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Expected output {} was not visible",
+                output.name
+            )));
+        }
+        outputs.insert(output.name, value);
+    }
+
+    Ok(JavaAppWorkflowOutcome {
+        prompt: workflow.prompt,
+        outputs,
+        steps: results,
+    })
+}
+
+fn workflow_id_component(value: &str) -> String {
+    let rendered = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if rendered.is_empty() {
+        "item".to_owned()
+    } else {
+        rendered
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +484,65 @@ mod tests {
             })
             .expect("assertion should run");
         assert!(result.passed);
+    }
+
+    #[test]
+    fn generic_app_workflow_enters_inputs_and_reads_outputs() {
+        let adapter = JavaDesktopAdapter::new(true);
+        let input_target = stable_java_target(&JavaComponentMetadata {
+            window_title: Some("Sample".to_owned()),
+            component_name: Some("input".to_owned()),
+            role: Some("text".to_owned()),
+            text: Some("Input".to_owned()),
+            keyboard_shortcut: Some("Alt+I".to_owned()),
+            visual_region: Some("center".to_owned()),
+        });
+        let output_target = stable_java_target(&JavaComponentMetadata {
+            window_title: Some("Sample".to_owned()),
+            component_name: Some("result".to_owned()),
+            role: Some("label".to_owned()),
+            text: Some("Result".to_owned()),
+            keyboard_shortcut: None,
+            visual_region: Some("bottom".to_owned()),
+        });
+
+        let outcome = run_java_app_workflow(
+            &adapter,
+            JavaAppWorkflow {
+                window_title: "Sample".to_owned(),
+                prompt: "Open Sample and complete the supplied workflow.".to_owned(),
+                inputs: vec![JavaWorkflowInput {
+                    name: "input".to_owned(),
+                    target: input_target,
+                    value: "hello".to_owned(),
+                }],
+                submit: Some(JavaWorkflowAction {
+                    name: "submit".to_owned(),
+                    target: stable_java_target(&JavaComponentMetadata {
+                        window_title: Some("Sample".to_owned()),
+                        component_name: Some("submit".to_owned()),
+                        role: Some("push button".to_owned()),
+                        text: Some("Submit".to_owned()),
+                        keyboard_shortcut: Some("Alt+S".to_owned()),
+                        visual_region: Some("bottom_right".to_owned()),
+                    }),
+                }),
+                outputs: vec![JavaWorkflowOutput {
+                    name: "result".to_owned(),
+                    target: output_target,
+                    expected: Some("accepted".to_owned()),
+                }],
+            },
+        )
+        .expect("generic java workflow should pass");
+
+        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+        assert!(outcome.prompt.contains("Sample"));
+        assert!(outcome.steps.iter().all(|step| step.success));
+        assert!(outcome
+            .steps
+            .iter()
+            .any(|step| step.step_id == "read-output-result"));
     }
 
     #[test]

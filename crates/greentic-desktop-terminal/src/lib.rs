@@ -1,6 +1,6 @@
 use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterError, AdapterResult, Assertion, AssertionResult, DesktopAdapter,
-    Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
+    LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -73,7 +73,6 @@ impl TerminalAdapter {
         let mut state = self.state.lock().expect("terminal adapter mutex poisoned");
         state.connected = true;
         state.profile = Some(profile);
-        state.screen = vec!["LOGIN".to_owned()];
     }
 
     pub fn record_screen_buffer(&self, lines: impl IntoIterator<Item = impl Into<String>>) {
@@ -149,29 +148,12 @@ impl DesktopAdapter for TerminalAdapter {
         match step.required_capability.as_str() {
             "terminal.connect" => {
                 state.connected = true;
-                state.screen = vec!["LOGIN".to_owned()];
             }
             "terminal.disconnect" => state.connected = false,
             "terminal.type_text" | "terminal.send_text" => {
                 let value = step.value.clone().unwrap_or_default();
-                if value == "CUST" {
-                    state.screen = vec!["CUSTOMER LOOKUP".to_owned(), "CUSTOMER ID:".to_owned()];
-                } else if !value.is_empty() {
+                if !value.is_empty() {
                     state.screen.push(format!("INPUT: {}", value));
-                }
-            }
-            "terminal.send_keys" if step.value.as_deref() == Some("ENTER") => {
-                if state.screen.iter().any(|line| line.contains("LOGIN")) {
-                    state.screen = vec!["MAIN MENU".to_owned(), "1 CUST Customers".to_owned()];
-                } else if state
-                    .screen
-                    .iter()
-                    .any(|line| line.contains("CUSTOMER LOOKUP"))
-                {
-                    state.screen = vec![
-                        "ACCOUNT STATUS: ACTIVE".to_owned(),
-                        "BALANCE: 100.00".to_owned(),
-                    ];
                 }
             }
             "terminal.send_keys" => {}
@@ -235,20 +217,141 @@ impl DesktopAdapter for TerminalAdapter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalWorkflow {
+    pub profile: TerminalProfile,
+    pub prompt: String,
+    pub initial_screen: Vec<String>,
+    pub actions: Vec<TerminalWorkflowAction>,
+    pub final_screen: Vec<String>,
+    pub text_outputs: Vec<TerminalTextOutput>,
+    pub field_outputs: Vec<TerminalFieldOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalWorkflowAction {
+    pub name: String,
+    pub required_capability: String,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTextOutput {
+    pub name: String,
+    pub expected: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalFieldOutput {
+    pub name: String,
+    pub field: ScreenField,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalWorkflowOutcome {
+    pub prompt: String,
+    pub outputs: BTreeMap<String, String>,
+    pub steps: Vec<StepResult>,
+}
+
+pub fn run_terminal_workflow(
+    adapter: &TerminalAdapter,
+    workflow: TerminalWorkflow,
+) -> AdapterResult<TerminalWorkflowOutcome> {
+    adapter.connect_profile(workflow.profile);
+    if !workflow.initial_screen.is_empty() {
+        adapter.record_screen_buffer(workflow.initial_screen);
+    }
+
+    let mut steps = vec![RunnerStep {
+        id: "connect".to_owned(),
+        action: "connect".to_owned(),
+        target: LocatorTarget::default(),
+        value: None,
+        required_capability: "terminal.connect".to_owned(),
+    }];
+    for action in &workflow.actions {
+        steps.push(RunnerStep {
+            id: workflow_id_component(&action.name),
+            action: action.required_capability.clone(),
+            target: LocatorTarget::default(),
+            value: action.value.clone(),
+            required_capability: action.required_capability.clone(),
+        });
+    }
+
+    let results = adapter.replay(&steps)?;
+    if !workflow.final_screen.is_empty() {
+        adapter.record_screen_buffer(workflow.final_screen);
+    }
+
+    let visible = adapter
+        .observe(ObserveContext {
+            session_id: "terminal-workflow".to_owned(),
+            target: None,
+        })?
+        .visible_text;
+
+    let mut outputs = BTreeMap::new();
+    for output in workflow.text_outputs {
+        if !visible.iter().any(|line| line.contains(&output.expected)) {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Expected terminal text {} was not visible",
+                output.name
+            )));
+        }
+        outputs.insert(output.name, output.expected);
+    }
+
+    for output in workflow.field_outputs {
+        let value = adapter.extract_field(output.field).ok_or_else(|| {
+            AdapterError::ExecutionFailed(format!(
+                "No terminal field was visible for {}",
+                output.name
+            ))
+        })?;
+        if let Some(expected) = &output.expected {
+            if &value != expected {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "Expected terminal field {} to be {}",
+                    output.name, expected
+                )));
+            }
+        }
+        outputs.insert(output.name, value);
+    }
+
+    Ok(TerminalWorkflowOutcome {
+        prompt: workflow.prompt,
+        outputs,
+        steps: results,
+    })
+}
+
+fn workflow_id_component(value: &str) -> String {
+    let rendered = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if rendered.is_empty() {
+        "item".to_owned()
+    } else {
+        rendered
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_desktop_adapter::LocatorTarget;
-
-    fn step(id: &str, capability: &str, value: Option<&str>) -> RunnerStep {
-        RunnerStep {
-            id: id.to_owned(),
-            action: capability.to_owned(),
-            target: LocatorTarget::default(),
-            value: value.map(str::to_owned),
-            required_capability: capability.to_owned(),
-        }
-    }
 
     #[test]
     fn exposes_terminal_capabilities() {
@@ -260,31 +363,58 @@ mod tests {
     }
 
     #[test]
-    fn can_replay_login_and_menu_navigation() {
+    fn generic_terminal_workflow_sends_actions_and_reads_outputs() {
         let adapter = TerminalAdapter::new();
-        let steps = vec![
-            step("connect", "terminal.connect", None),
-            step("username", "terminal.type_text", Some("USER1")),
-            step("enter-login", "terminal.send_keys", Some("ENTER")),
-            step("menu", "terminal.type_text", Some("CUST")),
-            step("enter-menu", "terminal.send_keys", Some("ENTER")),
-        ];
+        let outcome = run_terminal_workflow(
+            &adapter,
+            TerminalWorkflow {
+                profile: TerminalProfile {
+                    name: "test".to_owned(),
+                    protocol: TerminalProtocol::Tn3270,
+                    host: "terminal.test".to_owned(),
+                },
+                prompt: "Connect to a terminal and complete the supplied workflow.".to_owned(),
+                initial_screen: vec!["LOGIN".to_owned()],
+                actions: vec![
+                    TerminalWorkflowAction {
+                        name: "username".to_owned(),
+                        required_capability: "terminal.type_text".to_owned(),
+                        value: Some("USER1".to_owned()),
+                    },
+                    TerminalWorkflowAction {
+                        name: "enter-login".to_owned(),
+                        required_capability: "terminal.send_keys".to_owned(),
+                        value: Some("ENTER".to_owned()),
+                    },
+                    TerminalWorkflowAction {
+                        name: "menu".to_owned(),
+                        required_capability: "terminal.type_text".to_owned(),
+                        value: Some("CUST".to_owned()),
+                    },
+                ],
+                final_screen: vec![
+                    "ACCOUNT STATUS: ACTIVE".to_owned(),
+                    "BALANCE: 100.00".to_owned(),
+                ],
+                text_outputs: vec![TerminalTextOutput {
+                    name: "status-line".to_owned(),
+                    expected: "ACCOUNT STATUS".to_owned(),
+                }],
+                field_outputs: vec![TerminalFieldOutput {
+                    name: "status".to_owned(),
+                    field: ScreenField {
+                        row: 0,
+                        col: 16,
+                        len: 6,
+                    },
+                    expected: Some("ACTIVE".to_owned()),
+                }],
+            },
+        )
+        .expect("generic terminal workflow should pass");
 
-        assert!(adapter
-            .replay(&steps)
-            .expect("terminal replay should pass")
-            .iter()
-            .all(|result| result.success));
-
-        let assertion = adapter
-            .validate(Assertion {
-                id: "account-status".to_owned(),
-                required_capability: "terminal.assert_text".to_owned(),
-                target: LocatorTarget::default(),
-                expected: "ACCOUNT STATUS".to_owned(),
-            })
-            .expect("assertion should run");
-        assert!(assertion.passed);
+        assert_eq!(outcome.outputs.get("status"), Some(&"ACTIVE".to_owned()));
+        assert!(outcome.steps.iter().all(|step| step.success));
     }
 
     #[test]

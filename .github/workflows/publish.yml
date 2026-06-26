@@ -21,6 +21,11 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -45,7 +50,11 @@ jobs:
         id: version
         shell: bash
         run: |
-          version="$(cargo pkgid -p greentic-desktop | sed 's/.*#//')"
+          pkgid="$(cargo pkgid -p greentic-desktop)"
+          version="${pkgid##*@}"
+          if [ "${version}" = "${pkgid}" ]; then
+            version="${pkgid##*#}"
+          fi
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Determine publish intent

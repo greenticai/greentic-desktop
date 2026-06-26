@@ -33,5 +33,8 @@ if [ -z "${url}" ]; then
   exit 1
 fi
 
+base_url="${url%%\?*}"
+base_url="${base_url%/}"
+
 curl -fsS "${url}" | grep -q "Greentic"
-curl -fsS "${url%/}/api/v1/health" | grep -q '"status":"ok"'
+curl -fsS "${base_url}/api/v1/health" | grep -q '"status":"ok"'

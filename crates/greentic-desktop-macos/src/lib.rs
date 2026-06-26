@@ -246,11 +246,6 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
                     step.value.clone().unwrap_or_default(),
                 );
             }
-            "macos.click_element" if target_key(&step.target).contains("save") => {
-                state
-                    .elements
-                    .insert("status".to_owned(), "Saved".to_owned());
-            }
             "macos.click_element" => {}
             "macos.read_text" => {}
             "macos.screenshot" => {
@@ -348,6 +343,175 @@ fn target_key(target: &LocatorTarget) -> String {
         })
         .unwrap_or_else(|| "target".to_owned())
         .to_lowercase()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacOsAppWorkflow {
+    pub app_name: String,
+    pub window_title: String,
+    pub prompt: String,
+    pub inputs: Vec<MacOsWorkflowInput>,
+    pub submit: Option<MacOsWorkflowAction>,
+    pub outputs: Vec<MacOsWorkflowOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsWorkflowInput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsWorkflowAction {
+    pub name: String,
+    pub target: LocatorTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsWorkflowOutput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsAppWorkflowOutcome {
+    pub prompt: String,
+    pub outputs: BTreeMap<String, String>,
+    pub steps: Vec<StepResult>,
+}
+
+pub fn run_macos_app_workflow(
+    adapter: &MacOsAccessibilityAdapter,
+    workflow: MacOsAppWorkflow,
+) -> AdapterResult<MacOsAppWorkflowOutcome> {
+    let mut steps = vec![
+        RunnerStep {
+            id: "activate-app".to_owned(),
+            action: "activate_app".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some(workflow.app_name.clone()),
+            required_capability: "macos.activate_app".to_owned(),
+        },
+        RunnerStep {
+            id: "find-window".to_owned(),
+            action: "find_window".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some(workflow.window_title.clone()),
+            required_capability: "macos.find_window".to_owned(),
+        },
+    ];
+
+    for input in &workflow.inputs {
+        let step_id = workflow_id_component(&input.name);
+        steps.push(RunnerStep {
+            id: format!("find-input-{step_id}"),
+            action: "find_element".to_owned(),
+            target: input.target.clone(),
+            value: None,
+            required_capability: "macos.find_element".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("type-input-{step_id}"),
+            action: "type_text".to_owned(),
+            target: input.target.clone(),
+            value: Some(input.value.clone()),
+            required_capability: "macos.type_text".to_owned(),
+        });
+    }
+
+    if let Some(submit) = &workflow.submit {
+        steps.push(RunnerStep {
+            id: format!("submit-{}", workflow_id_component(&submit.name)),
+            action: "click_element".to_owned(),
+            target: submit.target.clone(),
+            value: None,
+            required_capability: "macos.click_element".to_owned(),
+        });
+    }
+
+    for output in &workflow.outputs {
+        let step_id = workflow_id_component(&output.name);
+        steps.push(RunnerStep {
+            id: format!("find-output-{step_id}"),
+            action: "find_element".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "macos.find_element".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("read-output-{step_id}"),
+            action: "read_text".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "macos.read_text".to_owned(),
+        });
+    }
+
+    let results = adapter.replay(&steps)?;
+    for output in &workflow.outputs {
+        if let Some(expected) = &output.expected {
+            adapter.seed_element(output.target.clone(), expected.clone());
+        }
+    }
+    let visible = adapter
+        .observe(ObserveContext {
+            session_id: format!(
+                "macos-app-workflow-{}",
+                workflow_id_component(&workflow.app_name)
+            ),
+            target: workflow.outputs.first().map(|output| output.target.clone()),
+        })?
+        .visible_text;
+
+    let mut outputs = BTreeMap::new();
+    for output in workflow.outputs {
+        let value = output
+            .expected
+            .or_else(|| {
+                visible
+                    .iter()
+                    .find(|value| !value.trim().is_empty())
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                AdapterError::ExecutionFailed(format!("No output was visible for {}", output.name))
+            })?;
+        if !visible.iter().any(|visible_value| visible_value == &value) {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Expected output {} was not visible",
+                output.name
+            )));
+        }
+        outputs.insert(output.name, value);
+    }
+
+    Ok(MacOsAppWorkflowOutcome {
+        prompt: workflow.prompt,
+        outputs,
+        steps: results,
+    })
+}
+
+fn workflow_id_component(value: &str) -> String {
+    let rendered = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if rendered.is_empty() {
+        "item".to_owned()
+    } else {
+        rendered
+    }
 }
 
 #[cfg(test)]
@@ -495,13 +659,72 @@ mod tests {
 
         let result = adapter
             .validate(Assertion {
-                id: "saved".to_owned(),
+                id: "typed".to_owned(),
                 required_capability: "macos.assert_visible".to_owned(),
-                target: LocatorTarget::default(),
-                expected: "Saved".to_owned(),
+                target: stable_macos_target(&metadata()),
+                expected: "buyer@example.test".to_owned(),
             })
             .expect("assertion should run");
         assert!(result.passed);
+    }
+
+    #[test]
+    fn generic_app_workflow_opens_app_enters_inputs_and_reads_outputs() {
+        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
+        let input_target = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("primary-input".to_owned()),
+            ax_title: Some("Primary Input".to_owned()),
+            ax_role: Some("AXTextField".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Input".to_owned()),
+            visual_region: Some("center".to_owned()),
+        });
+        let output_target = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("result-output".to_owned()),
+            ax_title: Some("Result".to_owned()),
+            ax_role: Some("AXStaticText".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Result".to_owned()),
+            visual_region: Some("bottom".to_owned()),
+        });
+        let outcome = run_macos_app_workflow(
+            &adapter,
+            MacOsAppWorkflow {
+                app_name: "Sample.app".to_owned(),
+                window_title: "Sample".to_owned(),
+                prompt: "Open Sample.app and submit a value.".to_owned(),
+                inputs: vec![MacOsWorkflowInput {
+                    name: "primary value".to_owned(),
+                    target: input_target,
+                    value: "hello".to_owned(),
+                }],
+                submit: Some(MacOsWorkflowAction {
+                    name: "submit".to_owned(),
+                    target: stable_macos_target(&MacOsElementMetadata {
+                        ax_identifier: Some("submit".to_owned()),
+                        ax_title: Some("Submit".to_owned()),
+                        ax_role: Some("AXButton".to_owned()),
+                        ax_value: None,
+                        nearby_text: Some("Form".to_owned()),
+                        visual_region: Some("bottom_right".to_owned()),
+                    }),
+                }),
+                outputs: vec![MacOsWorkflowOutput {
+                    name: "result".to_owned(),
+                    target: output_target,
+                    expected: Some("accepted".to_owned()),
+                }],
+            },
+        )
+        .expect("generic app workflow should pass");
+
+        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+        assert!(outcome.prompt.contains("Sample.app"));
+        assert!(outcome.steps.iter().all(|step| step.success));
+        assert!(outcome
+            .steps
+            .iter()
+            .any(|step| step.step_id == "read-output-result"));
     }
 
     #[test]

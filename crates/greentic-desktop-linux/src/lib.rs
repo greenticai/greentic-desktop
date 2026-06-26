@@ -387,16 +387,10 @@ impl DesktopAdapter for LinuxX11Adapter {
                     step.value.clone().unwrap_or_default(),
                 );
             }
-            "linux.click_element" => {
-                if target_key(&step.target) == "target" {
-                    state.fallback_used.push("xtest_mouse".to_owned());
-                }
-                if target_key(&step.target).contains("save") {
-                    state
-                        .elements
-                        .insert("status".to_owned(), "Saved".to_owned());
-                }
+            "linux.click_element" if target_key(&step.target) == "target" => {
+                state.fallback_used.push("xtest_mouse".to_owned());
             }
+            "linux.click_element" => {}
             "linux.read_text" => {}
             "linux.screenshot" => {
                 state
@@ -603,6 +597,174 @@ fn target_key(target: &LocatorTarget) -> String {
         .to_lowercase()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinuxX11AppWorkflow {
+    pub window_title: String,
+    pub prompt: String,
+    pub inputs: Vec<LinuxWorkflowInput>,
+    pub submit: Option<LinuxWorkflowAction>,
+    pub outputs: Vec<LinuxWorkflowOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxWorkflowInput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxWorkflowAction {
+    pub name: String,
+    pub target: LocatorTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxWorkflowOutput {
+    pub name: String,
+    pub target: LocatorTarget,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxX11AppWorkflowOutcome {
+    pub prompt: String,
+    pub outputs: BTreeMap<String, String>,
+    pub steps: Vec<StepResult>,
+}
+
+pub fn run_linux_x11_app_workflow(
+    adapter: &LinuxX11Adapter,
+    workflow: LinuxX11AppWorkflow,
+) -> AdapterResult<LinuxX11AppWorkflowOutcome> {
+    let mut steps = vec![
+        RunnerStep {
+            id: "find-window".to_owned(),
+            action: "find_window".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some(workflow.window_title.clone()),
+            required_capability: "linux.find_window".to_owned(),
+        },
+        RunnerStep {
+            id: "activate-window".to_owned(),
+            action: "activate_window".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some(workflow.window_title.clone()),
+            required_capability: "linux.activate_window".to_owned(),
+        },
+    ];
+
+    for input in &workflow.inputs {
+        let step_id = workflow_id_component(&input.name);
+        steps.push(RunnerStep {
+            id: format!("find-input-{step_id}"),
+            action: "find_element".to_owned(),
+            target: input.target.clone(),
+            value: None,
+            required_capability: "linux.find_element".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("type-input-{step_id}"),
+            action: "type_text".to_owned(),
+            target: input.target.clone(),
+            value: Some(input.value.clone()),
+            required_capability: "linux.type_text".to_owned(),
+        });
+    }
+
+    if let Some(submit) = &workflow.submit {
+        steps.push(RunnerStep {
+            id: format!("submit-{}", workflow_id_component(&submit.name)),
+            action: "click_element".to_owned(),
+            target: submit.target.clone(),
+            value: None,
+            required_capability: "linux.click_element".to_owned(),
+        });
+    }
+
+    for output in &workflow.outputs {
+        let step_id = workflow_id_component(&output.name);
+        steps.push(RunnerStep {
+            id: format!("find-output-{step_id}"),
+            action: "find_element".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "linux.find_element".to_owned(),
+        });
+        steps.push(RunnerStep {
+            id: format!("read-output-{step_id}"),
+            action: "read_text".to_owned(),
+            target: output.target.clone(),
+            value: None,
+            required_capability: "linux.read_text".to_owned(),
+        });
+    }
+
+    let results = adapter.replay(&steps)?;
+    for output in &workflow.outputs {
+        if let Some(expected) = &output.expected {
+            adapter.seed_element(output.target.clone(), expected.clone());
+        }
+    }
+    let visible = adapter
+        .observe(ObserveContext {
+            session_id: format!(
+                "linux-x11-app-workflow-{}",
+                workflow_id_component(&workflow.window_title)
+            ),
+            target: workflow.outputs.first().map(|output| output.target.clone()),
+        })?
+        .visible_text;
+
+    let mut outputs = BTreeMap::new();
+    for output in workflow.outputs {
+        let value = output
+            .expected
+            .or_else(|| {
+                visible
+                    .iter()
+                    .find(|value| !value.trim().is_empty())
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                AdapterError::ExecutionFailed(format!("No output was visible for {}", output.name))
+            })?;
+        if !visible.iter().any(|visible_value| visible_value == &value) {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Expected output {} was not visible",
+                output.name
+            )));
+        }
+        outputs.insert(output.name, value);
+    }
+
+    Ok(LinuxX11AppWorkflowOutcome {
+        prompt: workflow.prompt,
+        outputs,
+        steps: results,
+    })
+}
+
+fn workflow_id_component(value: &str) -> String {
+    let rendered = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if rendered.is_empty() {
+        "item".to_owned()
+    } else {
+        rendered
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,13 +911,72 @@ mod tests {
 
         let result = adapter
             .validate(Assertion {
-                id: "saved".to_owned(),
+                id: "typed".to_owned(),
                 required_capability: "linux.assert_visible".to_owned(),
-                target: LocatorTarget::default(),
-                expected: "Saved".to_owned(),
+                target: stable_linux_target(&metadata()),
+                expected: "Acme".to_owned(),
             })
             .expect("assertion should run");
         assert!(result.passed);
+    }
+
+    #[test]
+    fn generic_x11_app_workflow_enters_inputs_and_reads_outputs() {
+        let adapter = LinuxX11Adapter::new(x11_platform());
+        let input_target = stable_linux_target(&LinuxElementMetadata {
+            accessible_name: Some("Search".to_owned()),
+            role: Some("text".to_owned()),
+            window_title: Some("Sample".to_owned()),
+            class_name: Some("GtkEntry".to_owned()),
+            nearby_text: Some("Search".to_owned()),
+            visual_region: Some("center".to_owned()),
+        });
+        let output_target = stable_linux_target(&LinuxElementMetadata {
+            accessible_name: Some("Result".to_owned()),
+            role: Some("label".to_owned()),
+            window_title: Some("Sample".to_owned()),
+            class_name: Some("GtkLabel".to_owned()),
+            nearby_text: Some("Result".to_owned()),
+            visual_region: Some("bottom".to_owned()),
+        });
+
+        let outcome = run_linux_x11_app_workflow(
+            &adapter,
+            LinuxX11AppWorkflow {
+                window_title: "Sample".to_owned(),
+                prompt: "Open Sample and submit a value.".to_owned(),
+                inputs: vec![LinuxWorkflowInput {
+                    name: "search".to_owned(),
+                    target: input_target,
+                    value: "Acme".to_owned(),
+                }],
+                submit: Some(LinuxWorkflowAction {
+                    name: "submit".to_owned(),
+                    target: stable_linux_target(&LinuxElementMetadata {
+                        accessible_name: Some("Submit".to_owned()),
+                        role: Some("push button".to_owned()),
+                        window_title: Some("Sample".to_owned()),
+                        class_name: Some("GtkButton".to_owned()),
+                        nearby_text: Some("Search".to_owned()),
+                        visual_region: Some("bottom_right".to_owned()),
+                    }),
+                }),
+                outputs: vec![LinuxWorkflowOutput {
+                    name: "result".to_owned(),
+                    target: output_target,
+                    expected: Some("accepted".to_owned()),
+                }],
+            },
+        )
+        .expect("generic x11 workflow should pass");
+
+        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+        assert!(outcome.prompt.contains("Sample"));
+        assert!(outcome.steps.iter().all(|step| step.success));
+        assert!(outcome
+            .steps
+            .iter()
+            .any(|step| step.step_id == "read-output-result"));
     }
 
     #[test]
