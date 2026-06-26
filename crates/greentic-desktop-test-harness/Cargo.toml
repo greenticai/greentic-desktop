@@ -11,6 +11,8 @@ categories.workspace = true
 publish = false
 
 [dependencies]
+greentic-desktop-config.workspace = true
 greentic-desktop-linux.workspace = true
 greentic-desktop-macos.workspace = true
 greentic-desktop-platform.workspace = true
+greentic-desktop-runtime.workspace = true

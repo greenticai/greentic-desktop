@@ -212,6 +212,31 @@ impl StoreIndex {
                     permissions: vec!["screen_capture".to_owned(), "keyboard_mouse".to_owned()],
                 },
                 StoreExtension {
+                    id: "greentic.desktop.macos.ax".to_owned(),
+                    aliases: vec![
+                        "macos".to_owned(),
+                        "macos-ax".to_owned(),
+                        "calculator".to_owned(),
+                    ],
+                    name: "macOS Accessibility Adapter".to_owned(),
+                    description: "Drive native macOS apps through Accessibility.".to_owned(),
+                    latest: "1.0.0".to_owned(),
+                    versions: vec!["1.0.0".to_owned()],
+                    source: "oci://ghcr.io/greenticai/greentic-desktop/extensions/macos-ax:1.0.0"
+                        .to_owned(),
+                    publisher: "greenticai".to_owned(),
+                    platforms: vec!["macos".to_owned()],
+                    capabilities: vec![
+                        "macos.activate_app".to_owned(),
+                        "macos.find_window".to_owned(),
+                        "macos.find_element".to_owned(),
+                        "macos.type_text".to_owned(),
+                        "macos.click_element".to_owned(),
+                        "macos.read_text".to_owned(),
+                    ],
+                    permissions: vec!["screen_capture".to_owned(), "keyboard_mouse".to_owned()],
+                },
+                StoreExtension {
                     id: "greentic.desktop.terminal-tn3270".to_owned(),
                     aliases: vec!["terminal".to_owned(), "tn3270".to_owned()],
                     name: "Terminal TN3270 Adapter".to_owned(),
@@ -335,6 +360,15 @@ mod tests {
             .versions("playwright")
             .expect("friendly alias should have versions");
         assert_eq!(versions, vec!["1.0.0"]);
+
+        let macos = client
+            .resolve("calculator")
+            .expect("calculator alias should resolve to macOS adapter");
+        assert_eq!(macos.extension_id, "greentic.desktop.macos.ax");
+        assert_eq!(
+            macos.resolved_uri,
+            "oci://ghcr.io/greenticai/greentic-desktop/extensions/macos-ax:1.0.0"
+        );
     }
 
     #[test]

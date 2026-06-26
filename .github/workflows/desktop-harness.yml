@@ -26,6 +26,9 @@ jobs:
           - name: macos-unit
             os: macos-latest
             command: cargo test -p greentic-desktop-macos -p greentic-desktop-platform
+          - name: macos-calculator-e2e
+            os: macos-latest
+            command: cargo test -p greentic-desktop-test-harness macos_calculator_e2e_installs_extension_and_returns_result
           - name: ubuntu-wayland-detection
             os: ubuntu-latest
             command: cargo test -p greentic-desktop-linux -- detects_wayland_and_reports_global_restrictions wayland_requires_manual_approval_when_portal_is_missing

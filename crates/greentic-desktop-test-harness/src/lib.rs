@@ -1,6 +1,10 @@
 use greentic_desktop_linux::{detect_wayland_support, detect_x11_session, WaylandCompositor};
-use greentic_desktop_macos::first_run_permission_check;
+use greentic_desktop_macos::{
+    first_run_permission_check, run_macos_calculator_e2e, MacOsAccessibilityAdapter,
+    MacOsCalculatorOperation, MacOsCalculatorOutcome, MacOsCalculatorRequest,
+};
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_runtime::DesktopRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessEnvironment {
@@ -67,6 +71,12 @@ pub fn desktop_harness_plan() -> HarnessPlan {
                 permission_gated: true,
             },
             HarnessJob {
+                name: "macos-calculator-e2e".to_owned(),
+                environment: HarnessEnvironment::MacOsGithubActions,
+                command: "cargo test -p greentic-desktop-test-harness macos_calculator_e2e_installs_extension_and_returns_result".to_owned(),
+                permission_gated: false,
+            },
+            HarnessJob {
                 name: "ubuntu-x11-virtual-display".to_owned(),
                 environment: HarnessEnvironment::UbuntuX11VirtualDisplay,
                 command: "xvfb-run -a cargo test -p greentic-desktop-linux -- can_detect_x11_session can_list_windows_and_inspect_at_spi_tree"
@@ -122,6 +132,60 @@ pub fn macos_unit_harness_result() -> Vec<String> {
         permissions: Vec::new(),
     };
     first_run_permission_check(&info).messages
+}
+
+pub fn macos_calculator_e2e_result(
+    number_1: f64,
+    number_2: f64,
+    operation: &str,
+) -> Result<MacOsCalculatorOutcome, String> {
+    let operation = MacOsCalculatorOperation::parse(operation)
+        .ok_or_else(|| format!("unsupported calculator operation: {operation}"))?;
+    let root = std::env::temp_dir().join(format!(
+        "greentic-macos-calculator-e2e-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|err| err.to_string())?;
+    }
+    let mut config = greentic_desktop_config::RuntimeConfig::default();
+    config.runner.home = root.clone();
+    config.evidence.store = root.join("evidence");
+    let runtime = DesktopRuntime::new(config);
+    let manifest = runtime
+        .install_extension("calculator")
+        .map_err(|err| err.to_string())?;
+    if manifest.id != "greentic.desktop.macos.ax" {
+        return Err(format!(
+            "expected greentic.desktop.macos.ax, installed {}",
+            manifest.id
+        ));
+    }
+
+    let adapter = MacOsAccessibilityAdapter::new(PlatformInfo {
+        os: DesktopPlatform::MacOS,
+        version: "github-actions".to_owned(),
+        desktop_environment: Some("Aqua".to_owned()),
+        display_server: Some("quartz".to_owned()),
+        permissions: vec![
+            PlatformPermission::Accessibility,
+            PlatformPermission::ScreenRecording,
+            PlatformPermission::KeyboardInput,
+            PlatformPermission::MouseInput,
+            PlatformPermission::WindowManagement,
+        ],
+    });
+    let outcome = run_macos_calculator_e2e(
+        &adapter,
+        MacOsCalculatorRequest {
+            number_1,
+            number_2,
+            operation,
+        },
+    )
+    .map_err(|err| err.to_string());
+    let _ = std::fs::remove_dir_all(root);
+    outcome
 }
 
 pub fn ubuntu_x11_harness_detects_x11() -> bool {
@@ -214,14 +278,29 @@ mod tests {
     fn macos_has_unit_and_manual_permission_gated_harnesses() {
         let plan = desktop_harness_plan();
         let unit = plan.job("macos-unit").expect("macos unit job");
+        let calculator = plan
+            .job("macos-calculator-e2e")
+            .expect("macos calculator e2e job");
         let manual = plan
             .job("macos-manual-permission")
             .expect("macos manual job");
 
         assert!(!unit.permission_gated);
+        assert!(!calculator.permission_gated);
+        assert!(calculator.command.contains("macos_calculator_e2e"));
         assert!(manual.permission_gated);
         assert!(macos_unit_harness_result()
             .iter()
             .any(|message| message.contains("Accessibility")));
+    }
+
+    #[test]
+    fn macos_calculator_e2e_installs_extension_and_returns_result() {
+        let outcome =
+            macos_calculator_e2e_result(1.0, 1.0, "+").expect("macos calculator e2e should pass");
+
+        assert_eq!(outcome.result, "2");
+        assert!(outcome.prompt.contains("Open Calculator"));
+        assert!(outcome.steps.iter().all(|step| step.success));
     }
 }
