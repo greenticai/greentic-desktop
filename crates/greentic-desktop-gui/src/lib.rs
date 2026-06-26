@@ -753,6 +753,21 @@ fn setup_checklist_json(state: &GuiApiState) -> String {
         .installed_extension_ids
         .iter()
         .any(|id| id == "greentic.desktop.playwright");
+    let screen_capture = permission_setup_status(
+        state,
+        "screen_capture",
+        "Allow screen capture for the app that is running Greentic.",
+    );
+    let accessibility = permission_setup_status(
+        state,
+        "accessibility",
+        "Allow accessibility or UI automation for the app that is running Greentic.",
+    );
+    let input_control = permission_setup_status(
+        state,
+        "input_control",
+        "Allow input monitoring or keyboard/mouse control for the app that is running Greentic.",
+    );
     format!(
         r#"{{"items":[{}, {}, {}, {}, {}, {}]}}"#,
         checklist_item_json(
@@ -776,31 +791,22 @@ fn setup_checklist_json(state: &GuiApiState) -> String {
         checklist_item_json(
             "screen_capture_permission",
             "Screen capture permission",
-            "warning",
-            &permission_help(
-                &state.platform,
-                "Allow screen capture for the app that is running Greentic.",
-            ),
+            &screen_capture.status,
+            &screen_capture.help,
             "open_system_settings",
         ),
         checklist_item_json(
             "accessibility_permission",
             "Accessibility permission",
-            "warning",
-            &permission_help(
-                &state.platform,
-                "Allow accessibility or UI automation for the app that is running Greentic.",
-            ),
+            &accessibility.status,
+            &accessibility.help,
             "open_system_settings",
         ),
         checklist_item_json(
             "input_control_permission",
             "Keyboard/mouse control permission",
-            "warning",
-            &permission_help(
-                &state.platform,
-                "Allow input monitoring or keyboard/mouse control for the app that is running Greentic.",
-            ),
+            &input_control.status,
+            &input_control.help,
             "open_system_settings",
         ),
         checklist_item_json(
@@ -883,6 +889,107 @@ fn setup_fix_json(body: &str, state: &GuiApiState) -> Result<String, String> {
         }
     };
     Ok(result)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PermissionSetupStatus {
+    status: String,
+    help: String,
+}
+
+fn permission_setup_status(
+    state: &GuiApiState,
+    permission: &str,
+    missing_help: &str,
+) -> PermissionSetupStatus {
+    let available = native_permission_available(&state.platform, permission);
+    let status = if available { "ready" } else { "warning" }.to_owned();
+    let help = if available {
+        permission_ready_help(&state.platform, permission)
+    } else {
+        permission_help(&state.platform, missing_help)
+    };
+    PermissionSetupStatus { status, help }
+}
+
+fn permission_ready_help(platform: &str, permission: &str) -> String {
+    let label = match permission {
+        "screen_capture" => "Screen capture",
+        "accessibility" => "Accessibility",
+        "input_control" => "Keyboard and mouse control",
+        _ => "Permission",
+    };
+    match platform {
+        "macos" => format!("{label} is already granted for the current Greentic launcher."),
+        "linux" => {
+            format!("{label} does not need an additional setup step for this Linux session.")
+        }
+        "windows" => format!("{label} does not need an additional setup step on Windows."),
+        _ => format!("{label} does not need an additional setup step on this platform."),
+    }
+}
+
+fn native_permission_available(platform: &str, permission: &str) -> bool {
+    match platform {
+        "macos" => native_macos_permission_available(permission),
+        "windows" => true,
+        "linux" => native_linux_permission_available(permission),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_macos_permission_available(permission: &str) -> bool {
+    match permission {
+        "screen_capture" => macos_screen_capture_granted(),
+        "accessibility" | "input_control" => macos_accessibility_granted(),
+        _ => false,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_macos_permission_available(_permission: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accessibility_granted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_screen_capture_granted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+fn native_linux_permission_available(permission: &str) -> bool {
+    let session = linux_session_type();
+    match permission {
+        "accessibility" => true,
+        "screen_capture" | "input_control" => session.as_deref() == Some("x11"),
+        _ => false,
+    }
+}
+
+fn linux_session_type() -> Option<String> {
+    std::env::var("XDG_SESSION_TYPE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| {
+            std::env::var("WAYLAND_DISPLAY")
+                .ok()
+                .map(|_| "wayland".to_owned())
+        })
+        .or_else(|| std::env::var("DISPLAY").ok().map(|_| "x11".to_owned()))
 }
 
 fn permission_help(platform: &str, purpose: &str) -> String {
@@ -3375,6 +3482,35 @@ mod tests {
         let setup = String::from_utf8_lossy(&setup);
         assert!(setup.contains("\"items\""));
         assert!(setup.contains("runtime_home"));
+    }
+
+    #[test]
+    fn setup_checklist_marks_non_gated_windows_permissions_ready() {
+        let state = GuiApiState {
+            platform: "windows".to_owned(),
+            mcp_bind: "127.0.0.1:8799".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let setup = setup_checklist_json(&state);
+
+        assert!(setup.contains("\"id\":\"screen_capture_permission\""));
+        assert!(setup.contains("\"id\":\"accessibility_permission\""));
+        assert!(setup.contains("\"id\":\"input_control_permission\""));
+        assert_eq!(setup.matches("\"status\":\"warning\"").count(), 0);
+    }
+
+    #[test]
+    fn setup_permission_status_warns_when_platform_probe_is_unavailable() {
+        let state = GuiApiState {
+            platform: "plan9".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let status = permission_setup_status(&state, "screen_capture", "Allow screen capture.");
+
+        assert_eq!(status.status, "warning");
+        assert!(status.help.contains("Allow screen capture."));
     }
 
     #[test]
