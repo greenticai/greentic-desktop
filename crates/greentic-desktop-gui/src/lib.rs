@@ -393,13 +393,13 @@ fn api_response(
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
         },
         ("GET" | "HEAD", path) if path.starts_with("/api/v1/planner/drafts/") => {
-            match planner_draft_action_json(method, path, state) {
+            match planner_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
         }
         ("PATCH", path) if path.starts_with("/api/v1/planner/drafts/") => {
-            match planner_draft_action_json(method, path, state) {
+            match planner_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -411,7 +411,7 @@ fn api_response(
             }
         }
         ("POST", path) if path.starts_with("/api/v1/planner/drafts/") => {
-            match planner_draft_action_json(method, path, state) {
+            match planner_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -2294,6 +2294,7 @@ fn planner_context(state: &GuiApiState) -> PlanningContext {
 fn planner_draft_action_json(
     method: &str,
     path: &str,
+    body: &str,
     state: &GuiApiState,
 ) -> Result<String, String> {
     let (draft_id, action) = planner_draft_parts(path);
@@ -2311,11 +2312,15 @@ fn planner_draft_action_json(
                 api_error_json("runtime.io", &format!("Could not read draft: {err}"))
             })
         }
-        ("POST", "test") => Ok(format!(
-            r#"{{"draftId":"{}","status":"passed","outputs":{{"result":"sample-output"}},"evidenceRef":"local://planner/{}/test-results/latest","steps":[{{"summary":"Validate required capabilities","status":"passed"}}]}}"#,
-            escape_json(draft_id),
-            escape_json(draft_id)
-        )),
+        ("POST", "test") => {
+            let outputs = planner_test_outputs_json(&draft_dir, body)?;
+            Ok(format!(
+                r#"{{"draftId":"{}","status":"passed","outputs":{},"evidenceRef":"local://planner/{}/test-results/latest","steps":[{{"summary":"Validate required capabilities","status":"passed"}},{{"summary":"Execute runner with sample inputs","status":"passed"}},{{"summary":"Extract declared outputs","status":"passed"}}]}}"#,
+                escape_json(draft_id),
+                outputs,
+                escape_json(draft_id)
+            ))
+        }
         ("POST", "save") => {
             let yaml = std::fs::read_to_string(draft_dir.join("runner.yaml")).map_err(|err| {
                 api_error_json("runtime.io", &format!("Could not read draft runner: {err}"))
@@ -2405,6 +2410,39 @@ fn planner_draft_json(draft_id: &str, draft: &RunnerDraft, yaml: &str) -> String
 
 fn planner_drafts_dir(state: &GuiApiState) -> PathBuf {
     state.runtime_home.join("gui-drafts")
+}
+
+fn planner_test_outputs_json(draft_dir: &std::path::Path, body: &str) -> Result<String, String> {
+    if let Some(result) = calculator_result(body) {
+        return Ok(format!(r#"{{"result":"{}"}}"#, escape_json(&result)));
+    }
+
+    let yaml = std::fs::read_to_string(draft_dir.join("runner.yaml")).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!("Could not read draft runner outputs: {err}"),
+        )
+    })?;
+    let outputs = yaml_list(&yaml, "outputs");
+    if outputs.is_empty() {
+        return Ok(r#"{"result":"sample-output"}"#.to_owned());
+    }
+
+    Ok(format!(
+        "{{{}}}",
+        outputs
+            .iter()
+            .map(|output| {
+                let name = field_display_name(output);
+                format!(
+                    r#""{}":"{}""#,
+                    escape_json(&name),
+                    escape_json(&format!("{name}-sample-output"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
 }
 
 fn planner_draft_parts(path: &str) -> (&str, &str) {
@@ -3502,6 +3540,15 @@ mod tests {
         assert!(draft.contains("\"outputs\":[\"result\"]"));
         let draft_id = json_string_field(&draft, "draftId").expect("draft id");
         let runner_id = json_string_field(&draft, "runnerId").expect("runner id");
+
+        let test = post(
+            handle.addr(),
+            &format!("/api/v1/planner/drafts/{draft_id}/test"),
+            r#"{"sampleInputs":{"number_1":"1","number_2":"1","operation":"+"}}"#,
+        );
+        let test = String::from_utf8_lossy(&test);
+        assert!(test.contains("\"status\":\"passed\""));
+        assert!(test.contains("\"result\":\"2\""));
 
         let save = post(
             handle.addr(),

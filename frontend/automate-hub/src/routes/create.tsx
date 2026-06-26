@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -158,7 +158,8 @@ function PromptWizard({ onBack }: { onBack: () => void }) {
     onError: (error) => setMessage(error instanceof Error ? error.message : "Draft failed"),
   });
   const testDraft = useMutation({
-    mutationFn: () => api.testPlannerDraft(draft!.draftId, {}),
+    mutationFn: (sampleInputs: Record<string, string>) =>
+      api.testPlannerDraft(draft!.draftId, sampleInputs),
     onSuccess: (result) => {
       setTestResult(result);
       setMessage(null);
@@ -236,7 +237,7 @@ function PromptWizard({ onBack }: { onBack: () => void }) {
           draft={draft}
           result={testResult}
           busy={testDraft.isPending}
-          onRun={() => testDraft.mutate()}
+          onRun={(sampleInputs) => testDraft.mutate(sampleInputs)}
         />
       )}
       {step === 4 && <SaveStep draft={draft} />}
@@ -370,22 +371,51 @@ function TestStep({
   draft?: PlannerDraftDto | null;
   result?: PlannerTestResultDto | null;
   busy?: boolean;
-  onRun?: () => void;
+  onRun?: (sampleInputs: Record<string, string>) => void;
 }) {
+  const [sampleInputs, setSampleInputs] = useState<Record<string, string>>({});
+  const inputNames = useMemo(() => draft?.inputs ?? [], [draft?.inputs]);
+  const inputKey = inputNames.join("\n");
+
+  useEffect(() => {
+    setSampleInputs((current) => {
+      const next: Record<string, string> = {};
+      for (const input of inputNames) {
+        next[input] = current[input] ?? sampleValueForInput(input);
+      }
+      return next;
+    });
+  }, [inputKey, inputNames]);
+
+  if (!draft) {
+    return <div className="text-sm text-muted-foreground">Generate a draft first.</div>;
+  }
+
   return (
     <div className="space-y-5">
-      <div className="grid md:grid-cols-2 gap-3">
-        <div>
-          <Label>Company name</Label>
-          <Input defaultValue="Acme Corp" className="mt-1.5" />
+      {inputNames.length > 0 ? (
+        <div className="grid md:grid-cols-2 gap-3">
+          {inputNames.map((input) => (
+            <div key={input}>
+              <Label>{fieldLabel(input)}</Label>
+              <Input
+                data-testid={`test-input-${input}`}
+                value={sampleInputs[input] ?? ""}
+                className="mt-1.5"
+                onChange={(event) =>
+                  setSampleInputs((current) => ({ ...current, [input]: event.target.value }))
+                }
+              />
+            </div>
+          ))}
         </div>
-        <div>
-          <Label>Email address</Label>
-          <Input defaultValue="hello@acme.com" className="mt-1.5" />
+      ) : (
+        <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
+          This runner does not declare any inputs.
         </div>
-      </div>
+      )}
       <div className="flex gap-2">
-        <Button onClick={onRun ?? (() => undefined)} className="gap-2" disabled={busy}>
+        <Button onClick={() => onRun?.(sampleInputs)} className="gap-2" disabled={busy || !draft}>
           <Play className="h-4 w-4" /> Run Test
         </Button>
       </div>
@@ -395,6 +425,15 @@ function TestStep({
           <div>
             <div className="font-medium text-sm">Test passed</div>
             <div className="text-xs text-muted-foreground mt-1">Evidence: {result.evidenceRef}</div>
+            {Object.keys(result.outputs).length > 0 && (
+              <div className="mt-3 grid gap-1 text-xs">
+                {Object.entries(result.outputs).map(([key, value]) => (
+                  <div key={key}>
+                    {key}: <span className="font-medium text-foreground">{value}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -422,6 +461,33 @@ function TestStep({
       )}
     </div>
   );
+}
+
+function fieldLabel(field: string) {
+  return field
+    .replace(/^inputs\./, "")
+    .replace(/^outputs\./, "")
+    .replace(/_/g, " ");
+}
+
+function sampleValueForInput(input: string) {
+  const name = input.toLowerCase();
+  if (name.includes("number_1") || name.includes("value_1")) {
+    return "1";
+  }
+  if (name.includes("number_2") || name.includes("value_2")) {
+    return "1";
+  }
+  if (name.includes("operation")) {
+    return "+";
+  }
+  if (name.includes("email")) {
+    return "hello@example.com";
+  }
+  if (name.includes("company")) {
+    return "Example Company";
+  }
+  return "";
 }
 
 function SaveStep({ draft }: { draft: PlannerDraftDto | null }) {
