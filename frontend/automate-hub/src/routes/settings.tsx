@@ -157,10 +157,21 @@ function SettingsPage() {
   });
 
   const setupItems = setup.data?.items ?? (setup.isLoading ? desktopSetup : []);
-  const installedIds = new Set((installed.data?.extensions ?? []).map((extension) => extension.id));
+  const installedById = new Map(
+    (installed.data?.extensions ?? []).map((extension) => [extension.id, extension]),
+  );
   const extensions = (recommended.data?.extensions ?? []).map((extension) => ({
     ...extension,
-    installed: extension.installed || installedIds.has(extension.id),
+    ...(installedById.has(extension.id)
+      ? {
+          installed: true,
+          enabled: installedById.get(extension.id)?.enabled ?? extension.enabled,
+          status: installedById.get(extension.id)?.status ?? extension.status,
+          health: installedById.get(extension.id)?.health ?? extension.health,
+          version: installedById.get(extension.id)?.version ?? extension.version,
+          trust: installedById.get(extension.id)?.trust ?? extension.trust,
+        }
+      : { installed: extension.installed }),
   }));
   const llmProviders = llmDraft?.providers ?? llm.data?.providers ?? [];
   const selectedProvider = llmProviders.find((provider) => provider.id === llmDraft?.provider);
@@ -212,7 +223,11 @@ function SettingsPage() {
         )}
         <ul className="divide-y">
           {setupItems.map((s) => (
-            <li key={s.id} className="flex items-start justify-between gap-4 py-3">
+            <li
+              key={s.id}
+              data-testid={`setup-${s.id}`}
+              className="flex items-start justify-between gap-4 py-3"
+            >
               <div className="flex items-start gap-3 min-w-0">
                 {s.ok ? (
                   <CheckCircle2 className="h-5 w-5 text-success mt-0.5 shrink-0" />
@@ -280,7 +295,7 @@ function SettingsPage() {
               value={llmDraft?.provider ?? "local"}
               onValueChange={(provider) => updateLlmProvider(provider)}
             >
-              <SelectTrigger className="mt-1.5">
+              <SelectTrigger className="mt-1.5" data-testid="llm-provider-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -296,6 +311,7 @@ function SettingsPage() {
             <Label>Model</Label>
             <Input
               className="mt-1.5"
+              data-testid="llm-model-input"
               value={llmDraft?.model ?? ""}
               placeholder={selectedProvider?.defaultModel ?? "heuristic-planner"}
               onChange={(event) => updateLlmField("model", event.target.value)}
@@ -306,6 +322,7 @@ function SettingsPage() {
           <Label>Endpoint</Label>
           <Input
             className="mt-1.5"
+            data-testid="llm-endpoint-input"
             value={llmDraft?.endpoint ?? ""}
             placeholder={selectedProvider?.endpoint ?? "Provider default"}
             onChange={(event) => updateLlmField("endpoint", event.target.value)}
@@ -315,12 +332,13 @@ function SettingsPage() {
           <div className="mt-4 grid gap-2">
             <div className="flex items-center justify-between gap-3">
               <Label>API key</Label>
-              <span className="text-xs text-muted-foreground">
+              <span className="text-xs text-muted-foreground" data-testid="llm-api-key-status">
                 {llmDraft.hasApiKey && !clearApiKey ? "Saved" : "Not saved"}
               </span>
             </div>
             <Input
               type="password"
+              data-testid="llm-api-key-input"
               value={apiKey}
               placeholder={llmDraft.hasApiKey ? "Leave blank to keep existing key" : "Paste API key"}
               onChange={(event) => {
@@ -332,6 +350,7 @@ function SettingsPage() {
               <label className="flex items-center gap-2 text-xs text-muted-foreground">
                 <input
                   type="checkbox"
+                  data-testid="llm-clear-api-key"
                   checked={clearApiKey}
                   onChange={(event) => {
                     setClearApiKey(event.target.checked);
@@ -352,6 +371,7 @@ function SettingsPage() {
           <Button
             variant="outline"
             size="sm"
+            data-testid="llm-test-button"
             disabled={testLlm.isPending}
             onClick={() => testLlm.mutate()}
           >
@@ -360,6 +380,7 @@ function SettingsPage() {
           <Button
             variant="outline"
             size="sm"
+            data-testid="llm-save-button"
             disabled={!llmDraft || saveLlm.isPending}
             onClick={() => saveLlm.mutate()}
           >
@@ -433,7 +454,10 @@ function ExtensionRow({
   onAction: (action: string) => void;
 }) {
   return (
-    <li className="flex items-start justify-between gap-4 py-3">
+    <li
+      data-testid={`extension-${extension.id}`}
+      className="flex items-start justify-between gap-4 py-3"
+    >
       <div className="min-w-0">
         <div className="text-sm font-medium">{extension.name}</div>
         <div className="text-xs text-muted-foreground mt-0.5">{extension.description}</div>
@@ -478,7 +502,16 @@ function ExtensionRow({
             >
               {extension.enabled === false ? "Enable" : "Disable"}
             </Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("remove")}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                if (window.confirm(`Remove ${extension.name}?`)) {
+                  onAction("remove");
+                }
+              }}
+            >
               Remove
             </Button>
           </>

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+npm --prefix frontend/automate-hub run build
+
 cargo build --bin greentic-desktop
 
 export GREENTIC_DESKTOP_BINARY="${GREENTIC_DESKTOP_BINARY:-$ROOT/target/debug/greentic-desktop}"

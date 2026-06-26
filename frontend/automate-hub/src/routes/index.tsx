@@ -133,7 +133,11 @@ function Home() {
         {checklist.length > 0 && (
           <ul className="divide-y">
             {checklist.map((c) => (
-              <li key={c.label} className="flex items-start justify-between gap-4 py-3">
+              <li
+                key={c.label}
+                data-testid={`setup-${c.id}`}
+                className="flex items-start justify-between gap-4 py-3"
+              >
                 <div className="flex items-start gap-3 text-sm min-w-0">
                   {c.ok ? (
                     <CheckCircle2 className="h-5 w-5 text-success mt-0.5 shrink-0" />

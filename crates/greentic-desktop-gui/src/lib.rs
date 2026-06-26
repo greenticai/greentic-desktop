@@ -980,6 +980,15 @@ fn permission_setup_status(
     permission: &str,
     missing_help: &str,
 ) -> PermissionSetupStatus {
+    if let Some(available) = e2e_permission_override(permission) {
+        let status = if available { "ready" } else { "warning" }.to_owned();
+        let help = if available {
+            permission_ready_help(&state.platform, permission)
+        } else {
+            permission_help(&state.platform, missing_help)
+        };
+        return PermissionSetupStatus { status, help };
+    }
     let available = native_permission_available(&state.platform, permission);
     let status = if available { "ready" } else { "warning" }.to_owned();
     let help = if available {
@@ -988,6 +997,23 @@ fn permission_setup_status(
         permission_help(&state.platform, missing_help)
     };
     PermissionSetupStatus { status, help }
+}
+
+fn e2e_permission_override(permission: &str) -> Option<bool> {
+    if std::env::var("GREENTIC_DESKTOP_E2E").ok().as_deref() != Some("1") {
+        return None;
+    }
+    match std::env::var("GREENTIC_DESKTOP_TEST_PERMISSIONS")
+        .ok()?
+        .as_str()
+    {
+        "all_ready" => Some(true),
+        "all_missing" => Some(false),
+        "screen_capture_missing" => Some(permission != "screen_capture"),
+        "accessibility_missing" => Some(permission != "accessibility"),
+        "input_control_missing" => Some(permission != "input_control"),
+        _ => None,
+    }
 }
 
 fn permission_ready_help(platform: &str, permission: &str) -> String {
@@ -1143,6 +1169,9 @@ fn permission_fix_message(platform: &str, permission: &str, purpose: &str) -> St
 }
 
 fn open_platform_settings(platform: &str, permission: &str) -> Result<(), String> {
+    if std::env::var("GREENTIC_DESKTOP_E2E").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
     match platform {
         "macos" => open_macos_settings(permission),
         "windows" => open_windows_settings(permission),

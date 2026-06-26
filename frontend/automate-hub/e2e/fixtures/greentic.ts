@@ -24,11 +24,17 @@ type GreenticFixtures = {
   snapshot: (label: string) => Promise<void>;
 };
 
+type GreenticOptions = {
+  testPermissions?: string;
+};
+
 const fixtureDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(fixtureDir, "..", "..");
 const repoRoot = path.resolve(frontendRoot, "..", "..");
 
-export const test = base.extend<GreenticFixtures>({
+export const test = base.extend<GreenticFixtures & GreenticOptions>({
+  testPermissions: [undefined, { option: true }],
+
   runtimeHome: async ({}, use, testInfo) => {
     const runtimeHome = path.join(tmpdir(), `greentic-desktop-e2e-${process.pid}-${testInfo.workerIndex}-${Date.now()}`);
     mkdirSync(runtimeHome, { recursive: true });
@@ -43,9 +49,9 @@ export const test = base.extend<GreenticFixtures>({
     await use(logs);
   },
 
-  guiUrl: async ({ runtimeHome, processLogs }, use, testInfo) => {
+  guiUrl: async ({ runtimeHome, processLogs, testPermissions }, use, testInfo) => {
     const binary = ensureGreenticBinary();
-    const process = spawnGreentic(binary, runtimeHome, processLogs);
+    const process = spawnGreentic(binary, runtimeHome, processLogs, testPermissions);
     try {
       const guiUrl = await waitForGuiUrl(process, processLogs);
       await use(guiUrl);
@@ -150,7 +156,12 @@ function apiPath(pathname: string): string {
   return `/api/v1${pathname.startsWith("/") ? "" : "/"}${pathname}`;
 }
 
-function spawnGreentic(binary: string, runtimeHome: string, logPath: string): ChildProcessWithoutNullStreams {
+function spawnGreentic(
+  binary: string,
+  runtimeHome: string,
+  logPath: string,
+  testPermissions?: string,
+): ChildProcessWithoutNullStreams {
   writeFileSync(logPath, "");
   const child = spawn(binary, ["gui", "--no-open", "--bind", "127.0.0.1:0"], {
     cwd: repoRoot,
@@ -158,6 +169,7 @@ function spawnGreentic(binary: string, runtimeHome: string, logPath: string): Ch
       ...process.env,
       GREENTIC_DESKTOP_E2E: "1",
       GREENTIC_DESKTOP_HOME: runtimeHome,
+      ...(testPermissions ? { GREENTIC_DESKTOP_TEST_PERMISSIONS: testPermissions } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
