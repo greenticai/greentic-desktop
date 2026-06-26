@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -83,6 +83,7 @@ function Card({
 }
 
 function SettingsPage() {
+  const queryClient = useQueryClient();
   const [advanced, setAdvanced] = useState(false);
   const [query, setQuery] = useState("");
   const [setupStatus, setSetupStatus] = useState<string | null>(null);
@@ -106,7 +107,13 @@ function SettingsPage() {
       action === "install"
         ? api.installExtension(`store://${extension.id}`, "latest", approvalForExtension(extension))
         : api.extensionAction(extension.id, action),
-    onSuccess: (result) => setActionStatus(`${result.id ?? "extension"}: ${result.status}`),
+    onSuccess: (result) => {
+      setActionStatus(`${result.id ?? "extension"}: ${result.status}`);
+      void queryClient.invalidateQueries({ queryKey: ["extensions-installed"] });
+      void queryClient.invalidateQueries({ queryKey: ["extensions-recommended"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup-checklist"] });
+      void queryClient.invalidateQueries({ queryKey: ["activity"] });
+    },
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Action failed"),
   });
   const testLlm = useMutation({
