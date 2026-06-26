@@ -12,8 +12,10 @@ publish = false
 
 [dependencies]
 greentic-desktop-config.workspace = true
+greentic-desktop-java.workspace = true
 greentic-desktop-linux.workspace = true
 greentic-desktop-macos.workspace = true
 greentic-desktop-platform.workspace = true
 greentic-desktop-runtime.workspace = true
+greentic-desktop-terminal.workspace = true
 greentic-desktop-windows.workspace = true

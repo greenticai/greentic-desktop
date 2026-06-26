@@ -1,3 +1,6 @@
+use greentic_desktop_java::{
+    run_java_app_workflow, JavaAppWorkflow, JavaAppWorkflowOutcome, JavaDesktopAdapter,
+};
 use greentic_desktop_linux::{
     detect_wayland_support, detect_x11_session, run_linux_x11_app_workflow, LinuxX11Adapter,
     LinuxX11AppWorkflow, LinuxX11AppWorkflowOutcome, WaylandCompositor,
@@ -8,6 +11,9 @@ use greentic_desktop_macos::{
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
 use greentic_desktop_runtime::DesktopRuntime;
+use greentic_desktop_terminal::{
+    run_terminal_workflow, TerminalAdapter, TerminalWorkflow, TerminalWorkflowOutcome,
+};
 use greentic_desktop_windows::{
     run_windows_app_workflow, WindowsAppWorkflow, WindowsAppWorkflowOutcome, WindowsUiAdapter,
 };
@@ -99,7 +105,7 @@ pub fn desktop_harness_plan() -> HarnessPlan {
             HarnessJob {
                 name: "windows-unit".to_owned(),
                 environment: HarnessEnvironment::WindowsGithubActions,
-                command: "cargo test -p greentic-desktop-windows -p greentic-desktop-java && cargo test -p greentic-desktop-test-harness windows_app_workflow_e2e_installs_extension_and_returns_output"
+                command: "cargo test -p greentic-desktop-windows -p greentic-desktop-java -p greentic-desktop-terminal && cargo test -p greentic-desktop-test-harness windows_app_workflow_e2e_installs_extension_and_returns_output && cargo test -p greentic-desktop-test-harness java_app_workflow_e2e_installs_extension_and_returns_output && cargo test -p greentic-desktop-test-harness terminal_workflow_e2e_installs_extension_and_returns_output"
                     .to_owned(),
                 permission_gated: false,
             },
@@ -254,6 +260,66 @@ pub fn windows_app_workflow_e2e_result(
     outcome
 }
 
+pub fn java_app_workflow_e2e_result(
+    workflow: JavaAppWorkflow,
+) -> Result<JavaAppWorkflowOutcome, String> {
+    let root = std::env::temp_dir().join(format!(
+        "greentic-java-app-workflow-e2e-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|err| err.to_string())?;
+    }
+    let mut config = greentic_desktop_config::RuntimeConfig::default();
+    config.runner.home = root.clone();
+    config.evidence.store = root.join("evidence");
+    let runtime = DesktopRuntime::new(config);
+    let manifest = runtime
+        .install_extension("java")
+        .map_err(|err| err.to_string())?;
+    if manifest.id != "greentic.desktop.java-accessibility" {
+        return Err(format!(
+            "expected greentic.desktop.java-accessibility, installed {}",
+            manifest.id
+        ));
+    }
+
+    let adapter = JavaDesktopAdapter::new(true);
+    let outcome = run_java_app_workflow(&adapter, workflow).map_err(|err| err.to_string());
+    let _ = std::fs::remove_dir_all(root);
+    outcome
+}
+
+pub fn terminal_workflow_e2e_result(
+    workflow: TerminalWorkflow,
+) -> Result<TerminalWorkflowOutcome, String> {
+    let root = std::env::temp_dir().join(format!(
+        "greentic-terminal-workflow-e2e-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|err| err.to_string())?;
+    }
+    let mut config = greentic_desktop_config::RuntimeConfig::default();
+    config.runner.home = root.clone();
+    config.evidence.store = root.join("evidence");
+    let runtime = DesktopRuntime::new(config);
+    let manifest = runtime
+        .install_extension("terminal")
+        .map_err(|err| err.to_string())?;
+    if manifest.id != "greentic.desktop.terminal-tn3270" {
+        return Err(format!(
+            "expected greentic.desktop.terminal-tn3270, installed {}",
+            manifest.id
+        ));
+    }
+
+    let adapter = TerminalAdapter::new();
+    let outcome = run_terminal_workflow(&adapter, workflow).map_err(|err| err.to_string());
+    let _ = std::fs::remove_dir_all(root);
+    outcome
+}
+
 pub fn ubuntu_x11_harness_detects_x11() -> bool {
     let info = PlatformInfo {
         os: DesktopPlatform::Linux,
@@ -284,6 +350,10 @@ pub fn ubuntu_wayland_harness_detects_limitations() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use greentic_desktop_java::{
+        stable_java_target, JavaComponentMetadata, JavaWorkflowAction, JavaWorkflowInput,
+        JavaWorkflowOutput,
+    };
     use greentic_desktop_linux::{
         stable_linux_target, LinuxElementMetadata, LinuxWorkflowAction, LinuxWorkflowInput,
         LinuxWorkflowOutput,
@@ -291,6 +361,10 @@ mod tests {
     use greentic_desktop_macos::{
         stable_macos_target, MacOsElementMetadata, MacOsWorkflowAction, MacOsWorkflowInput,
         MacOsWorkflowOutput,
+    };
+    use greentic_desktop_terminal::{
+        ScreenField, TerminalFieldOutput, TerminalProfile, TerminalProtocol, TerminalTextOutput,
+        TerminalWorkflowAction,
     };
     use greentic_desktop_windows::{
         stable_windows_target, WindowsElementMetadata, WindowsWorkflowAction, WindowsWorkflowInput,
@@ -444,6 +518,91 @@ mod tests {
         }
     }
 
+    fn java_sample_workflow_fixture() -> JavaAppWorkflow {
+        let result = stable_java_target(&JavaComponentMetadata {
+            window_title: Some("Sample".to_owned()),
+            component_name: Some("result".to_owned()),
+            role: Some("label".to_owned()),
+            text: Some("Result".to_owned()),
+            keyboard_shortcut: None,
+            visual_region: Some("bottom".to_owned()),
+        });
+
+        JavaAppWorkflow {
+            window_title: "Sample".to_owned(),
+            prompt: "Open Sample and complete the supplied Java workflow.".to_owned(),
+            inputs: vec![JavaWorkflowInput {
+                name: "input".to_owned(),
+                target: stable_java_target(&JavaComponentMetadata {
+                    window_title: Some("Sample".to_owned()),
+                    component_name: Some("input".to_owned()),
+                    role: Some("text".to_owned()),
+                    text: Some("Input".to_owned()),
+                    keyboard_shortcut: Some("Alt+I".to_owned()),
+                    visual_region: Some("center".to_owned()),
+                }),
+                value: "hello".to_owned(),
+            }],
+            submit: Some(JavaWorkflowAction {
+                name: "submit".to_owned(),
+                target: stable_java_target(&JavaComponentMetadata {
+                    window_title: Some("Sample".to_owned()),
+                    component_name: Some("submit".to_owned()),
+                    role: Some("push button".to_owned()),
+                    text: Some("Submit".to_owned()),
+                    keyboard_shortcut: Some("Alt+S".to_owned()),
+                    visual_region: Some("bottom_right".to_owned()),
+                }),
+            }),
+            outputs: vec![JavaWorkflowOutput {
+                name: "result".to_owned(),
+                target: result,
+                expected: Some("accepted".to_owned()),
+            }],
+        }
+    }
+
+    fn terminal_sample_workflow_fixture() -> TerminalWorkflow {
+        TerminalWorkflow {
+            profile: TerminalProfile {
+                name: "sample".to_owned(),
+                protocol: TerminalProtocol::Tn3270,
+                host: "terminal.test".to_owned(),
+            },
+            prompt: "Connect to a terminal and complete the supplied workflow.".to_owned(),
+            initial_screen: vec!["LOGIN".to_owned()],
+            actions: vec![
+                TerminalWorkflowAction {
+                    name: "username".to_owned(),
+                    required_capability: "terminal.type_text".to_owned(),
+                    value: Some("USER1".to_owned()),
+                },
+                TerminalWorkflowAction {
+                    name: "enter".to_owned(),
+                    required_capability: "terminal.send_keys".to_owned(),
+                    value: Some("ENTER".to_owned()),
+                },
+            ],
+            final_screen: vec![
+                "ACCOUNT STATUS: ACTIVE".to_owned(),
+                "BALANCE: 100.00".to_owned(),
+            ],
+            text_outputs: vec![TerminalTextOutput {
+                name: "status-line".to_owned(),
+                expected: "ACCOUNT STATUS".to_owned(),
+            }],
+            field_outputs: vec![TerminalFieldOutput {
+                name: "status".to_owned(),
+                field: ScreenField {
+                    row: 0,
+                    col: 16,
+                    len: 6,
+                },
+                expected: Some("ACTIVE".to_owned()),
+            }],
+        }
+    }
+
     #[test]
     fn ci_plan_covers_windows_macos_and_linux() {
         let plan = desktop_harness_plan();
@@ -509,6 +668,26 @@ mod tests {
     }
 
     #[test]
+    fn java_app_workflow_e2e_installs_extension_and_returns_output() {
+        let outcome = java_app_workflow_e2e_result(java_sample_workflow_fixture())
+            .expect("java app workflow e2e should pass");
+
+        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+        assert!(outcome.prompt.contains("Java workflow"));
+        assert!(outcome.steps.iter().all(|step| step.success));
+    }
+
+    #[test]
+    fn terminal_workflow_e2e_installs_extension_and_returns_output() {
+        let outcome = terminal_workflow_e2e_result(terminal_sample_workflow_fixture())
+            .expect("terminal workflow e2e should pass");
+
+        assert_eq!(outcome.outputs.get("status"), Some(&"ACTIVE".to_owned()));
+        assert!(outcome.prompt.contains("terminal"));
+        assert!(outcome.steps.iter().all(|step| step.success));
+    }
+
+    #[test]
     fn wayland_harness_verifies_graceful_limitation() {
         let diagnostics = ubuntu_wayland_harness_detects_limitations();
 
@@ -528,6 +707,8 @@ mod tests {
         assert!(!job.permission_gated);
         assert!(job.command.contains("greentic-desktop-windows"));
         assert!(job.command.contains("windows_app_workflow_e2e"));
+        assert!(job.command.contains("java_app_workflow_e2e"));
+        assert!(job.command.contains("terminal_workflow_e2e"));
     }
 
     #[test]

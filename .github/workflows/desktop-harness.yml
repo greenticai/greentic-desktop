@@ -22,7 +22,7 @@ jobs:
         include:
           - name: windows-unit
             os: windows-latest
-            command: cargo test -p greentic-desktop-windows -p greentic-desktop-java && cargo test -p greentic-desktop-test-harness windows_app_workflow_e2e_installs_extension_and_returns_output
+            command: cargo test -p greentic-desktop-windows -p greentic-desktop-java -p greentic-desktop-terminal && cargo test -p greentic-desktop-test-harness windows_app_workflow_e2e_installs_extension_and_returns_output && cargo test -p greentic-desktop-test-harness java_app_workflow_e2e_installs_extension_and_returns_output && cargo test -p greentic-desktop-test-harness terminal_workflow_e2e_installs_extension_and_returns_output
           - name: macos-unit
             os: macos-latest
             command: cargo test -p greentic-desktop-macos -p greentic-desktop-platform

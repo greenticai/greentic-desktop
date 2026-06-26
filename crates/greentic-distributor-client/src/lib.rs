@@ -279,6 +279,28 @@ impl StoreIndex {
                     permissions: vec!["desktop.ui_automation".to_owned()],
                 },
                 StoreExtension {
+                    id: "greentic.desktop.java-accessibility".to_owned(),
+                    aliases: vec!["java".to_owned(), "java-accessibility".to_owned()],
+                    name: "Java Accessibility Adapter".to_owned(),
+                    description: "Drive Java Swing and AWT apps through Java Accessibility."
+                        .to_owned(),
+                    latest: "1.0.0".to_owned(),
+                    versions: vec!["1.0.0".to_owned()],
+                    source:
+                        "oci://ghcr.io/greenticai/greentic-desktop/extensions/java-accessibility:1.0.0"
+                            .to_owned(),
+                    publisher: "greenticai".to_owned(),
+                    platforms: vec!["windows".to_owned(), "macos".to_owned(), "linux".to_owned()],
+                    capabilities: vec![
+                        "java.find_window".to_owned(),
+                        "java.find_component".to_owned(),
+                        "java.type_text".to_owned(),
+                        "java.click_component".to_owned(),
+                        "java.read_text".to_owned(),
+                    ],
+                    permissions: vec!["desktop.java_accessibility".to_owned()],
+                },
+                StoreExtension {
                     id: "greentic.desktop.terminal-tn3270".to_owned(),
                     aliases: vec!["terminal".to_owned(), "tn3270".to_owned()],
                     name: "Terminal TN3270 Adapter".to_owned(),
@@ -421,6 +443,11 @@ mod tests {
             .resolve("windows")
             .expect("windows alias should resolve to Windows adapter");
         assert_eq!(windows.extension_id, "greentic.desktop.windows-ui");
+
+        let java = client
+            .resolve("java")
+            .expect("java alias should resolve to Java adapter");
+        assert_eq!(java.extension_id, "greentic.desktop.java-accessibility");
     }
 
     #[test]
