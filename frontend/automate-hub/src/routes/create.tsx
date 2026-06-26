@@ -37,6 +37,8 @@ export const Route = createFileRoute("/create")({
       search.mode === "prompt" || search.mode === "record"
         ? (search.mode as CreateMode)
         : undefined,
+    prompt: typeof search.prompt === "string" ? search.prompt : undefined,
+    runnerId: typeof search.runnerId === "string" ? search.runnerId : undefined,
   }),
   head: () => ({ meta: [{ title: "Create Runner · Greentic Desktop" }] }),
   component: CreatePage,
@@ -48,7 +50,13 @@ function CreatePage() {
   return (
     <div className="p-8 md:p-12 max-w-5xl mx-auto">
       {mode === null && <ChooseMode onPick={setMode} />}
-      {mode === "prompt" && <PromptWizard onBack={() => setMode(null)} />}
+      {mode === "prompt" && (
+        <PromptWizard
+          initialPrompt={search.prompt ?? ""}
+          editingRunnerId={search.runnerId}
+          onBack={() => setMode(null)}
+        />
+      )}
       {mode === "record" && <RecordWizard onBack={() => setMode(null)} />}
     </div>
   );
@@ -150,9 +158,17 @@ function WizardShell({
   );
 }
 
-function PromptWizard({ onBack }: { onBack: () => void }) {
+function PromptWizard({
+  initialPrompt,
+  editingRunnerId,
+  onBack,
+}: {
+  initialPrompt?: string;
+  editingRunnerId?: string;
+  onBack: () => void;
+}) {
   const [step, setStep] = useState(0);
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(initialPrompt ?? "");
   const [draft, setDraft] = useState<PlannerDraftDto | null>(null);
   const [testResult, setTestResult] = useState<PlannerTestResultDto | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -235,6 +251,11 @@ function PromptWizard({ onBack }: { onBack: () => void }) {
         </>
       }
     >
+      {editingRunnerId && (
+        <div className="mb-4 rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          Updating {editingRunnerId}
+        </div>
+      )}
       {message && <div className="mb-4 text-sm text-destructive">{message}</div>}
       {step === 0 && <PromptStep prompt={prompt} onPromptChange={setPrompt} />}
       {step === 1 && <IOStep draft={draft} />}

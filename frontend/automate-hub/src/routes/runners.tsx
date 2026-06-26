@@ -171,6 +171,14 @@ function RunnersPage() {
     runAction(runner, "rename", { name: renameValue });
   }
 
+  function runnerTaskPrompt(runner: RunnerSummaryDto) {
+    const description = runner.description?.trim();
+    if (description && description !== "Local runner package managed by Greentic Desktop.") {
+      return description;
+    }
+    return runner.name;
+  }
+
   return (
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
       <div className="flex items-start justify-between gap-6 mb-8">
@@ -181,7 +189,7 @@ function RunnersPage() {
           </p>
         </div>
         <Button asChild className="gap-2">
-          <Link to="/create" search={{ mode: undefined }}>
+          <Link to="/create" search={{ mode: undefined, prompt: undefined, runnerId: undefined }}>
             <Plus className="h-4 w-4" /> New runner
           </Link>
         </Button>
@@ -397,7 +405,14 @@ function RunnersPage() {
                 {activeAction?.id === r.id && activeAction.action === "test" ? "Testing" : "Test"}
               </Button>
               <Button size="sm" variant="outline" className="gap-1.5" asChild>
-                <Link to="/create" search={{ mode: undefined }}>
+                <Link
+                  to="/create"
+                  search={{
+                    mode: "prompt",
+                    runnerId: r.id,
+                    prompt: runnerTaskPrompt(r),
+                  }}
+                >
                   <Pencil className="h-3.5 w-3.5" /> Edit steps
                 </Link>
               </Button>
