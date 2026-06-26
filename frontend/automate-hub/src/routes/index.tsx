@@ -1,16 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { BrandLogo } from "@/components/brand-logo";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import {
-  Wand2,
-  Video,
-  Workflow,
-  ArrowRight,
-  CheckCircle2,
-  AlertTriangle,
-  Leaf,
-} from "lucide-react";
+import { Wand2, Video, Workflow, ArrowRight, CheckCircle2, AlertTriangle } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "Home · Greentic Desktop" }] }),
@@ -61,10 +54,9 @@ function Home() {
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
       <div className="text-center mb-12">
         <div
-          className="inline-flex h-14 w-14 rounded-2xl items-center justify-center mb-5"
-          style={{ background: "var(--gradient-primary)" }}
+          className="inline-flex h-14 w-14 rounded-2xl items-center justify-center mb-5 bg-background border shadow-[var(--shadow-card)]"
         >
-          <Leaf className="h-7 w-7 text-primary-foreground" />
+          <BrandLogo className="h-11 w-11" />
         </div>
         <h1 className="text-4xl font-semibold tracking-tight">
           Automate desktop tasks, no code needed
