@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { BrandLogo } from "@/components/brand-logo";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -35,6 +36,7 @@ const actions = [
 ] as const;
 
 function Home() {
+  const [setupStatus, setSetupStatus] = useState<string | null>(null);
   const runtime = useQuery({
     queryKey: ["runtime-info"],
     queryFn: api.runtimeInfo,
@@ -49,6 +51,12 @@ function Home() {
   });
   const checklist = setup.data?.items ?? [];
   const events = activity.data?.events ?? [];
+  const setupAction = useMutation({
+    mutationFn: ({ id, action }: { id: string; action?: string }) => api.setupFix(id, action),
+    onSuccess: (result) => setSetupStatus(result.message),
+    onError: (error) =>
+      setSetupStatus(error instanceof Error ? error.message : "Setup action failed"),
+  });
 
   return (
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
@@ -133,7 +141,12 @@ function Home() {
                 {c.ok ? (
                   <span className="text-xs text-muted-foreground">Ready</span>
                 ) : (
-                  <Button size="sm" variant="outline">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={setupAction.isPending}
+                    onClick={() => setupAction.mutate({ id: c.id, action: c.action })}
+                  >
                     Set up
                   </Button>
                 )}
@@ -141,6 +154,7 @@ function Home() {
             ))}
           </ul>
         )}
+        {setupStatus && <div className="mt-3 text-xs text-muted-foreground">{setupStatus}</div>}
       </div>
 
       <div className="mt-6 rounded-2xl border bg-card p-6 shadow-[var(--shadow-card)]">
