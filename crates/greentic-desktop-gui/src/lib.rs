@@ -217,6 +217,7 @@ fn handle_connection(
     addr: SocketAddr,
     api_state: &GuiApiState,
 ) -> Result<(), GuiError> {
+    stream.set_nonblocking(false)?;
     let mut buffer = [0; 8192];
     let read = stream.read(&mut buffer)?;
     if read == 0 {
@@ -2625,13 +2626,15 @@ fn llm_providers_json() -> String {
 
 fn llm_provider_json(provider: &LlmProvider) -> String {
     format!(
-        r#"{{"id":"{}","name":"{}","defaultModel":"{}","mode":"{}","endpoint":{},"secretName":{}}}"#,
+        r#"{{"id":"{}","name":"{}","label":"{}","defaultModel":"{}","mode":"{}","endpoint":{},"secretName":{},"requiresApiKey":{},"hasApiKey":false}}"#,
         escape_json(provider.id),
+        escape_json(provider.name),
         escape_json(provider.name),
         escape_json(provider.default_model),
         escape_json(provider.mode),
         json_option(provider.endpoint),
         json_option(provider.secret_name),
+        provider.secret_name.is_some(),
     )
 }
 
@@ -2915,6 +2918,22 @@ mod tests {
         String::from_utf8_lossy(&response[..header_end]).into_owned()
     }
 
+    fn response_body(response: &[u8]) -> &[u8] {
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("response should contain headers");
+        &response[(header_end + 4)..]
+    }
+
+    fn content_length(head: &str) -> usize {
+        head.lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .expect("response should include content-length")
+            .parse()
+            .expect("content-length should be numeric")
+    }
+
     #[test]
     fn serves_index_assets_and_spa_routes() {
         let handle = GuiHost::start(GuiHostOptions::default()).expect("GUI host should start");
@@ -2934,6 +2953,27 @@ mod tests {
         let favicon_head = response_head(&favicon);
         assert!(favicon_head.starts_with("HTTP/1.1 200 OK"));
         assert!(favicon_head.contains("content-type: image/x-icon"));
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn serves_large_assets_without_truncating() {
+        let handle = GuiHost::start(GuiHostOptions::default()).expect("GUI host should start");
+        let largest_asset = greentic_desktop_gui_assets::asset_manifest()
+            .into_iter()
+            .filter_map(greentic_desktop_gui_assets::asset)
+            .max_by_key(|asset| asset.bytes.len())
+            .expect("embedded assets should not be empty");
+
+        let response = get(handle.addr(), largest_asset.path);
+        let head = response_head(&response);
+        let body = response_body(&response);
+
+        assert!(head.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(content_length(&head), largest_asset.bytes.len());
+        assert_eq!(body.len(), largest_asset.bytes.len());
+        assert_eq!(body, largest_asset.bytes);
 
         handle.shutdown();
     }
@@ -3018,8 +3058,11 @@ mod tests {
         assert!(response.contains(r#""provider":"local""#));
         assert!(response.contains(r#""providers":["#));
         assert!(response.contains(r#""id":"deepseek""#));
+        assert!(response.contains(r#""name":"DeepSeek""#));
+        assert!(response.contains(r#""label":"DeepSeek""#));
         assert!(response.contains(r#""defaultModel":"deepseek-chat""#));
         assert!(response.contains(r#""secretName":"DEEPSEEK_API_KEY""#));
+        assert!(response.contains(r#""requiresApiKey":true"#));
 
         let saved = save_llm_settings_json(r#"{"provider":"deepseek"}"#)
             .expect("deepseek settings should save");

@@ -248,7 +248,7 @@ function SettingsPage() {
               <SelectContent>
                 {llmProviders.map((provider) => (
                   <SelectItem key={provider.id} value={provider.id}>
-                    {provider.name}
+                    {llmProviderName(provider)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -419,4 +419,8 @@ function ExtensionRow({
       </div>
     </li>
   );
+}
+
+function llmProviderName(provider: { name?: string; label?: string; id: string }) {
+  return provider.name || provider.label || provider.id;
 }

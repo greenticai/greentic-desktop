@@ -290,10 +290,13 @@ export interface LlmSettingsDto {
 export interface LlmProviderDto {
   id: string;
   name: string;
+  label?: string;
   defaultModel: string;
   endpoint: string | null;
   mode: "heuristic" | "remote" | string;
   secretName: string | null;
+  requiresApiKey?: boolean;
+  hasApiKey?: boolean;
 }
 
 export interface LlmTestResultDto {
