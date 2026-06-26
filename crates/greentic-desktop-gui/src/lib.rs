@@ -1898,6 +1898,31 @@ fn runner_action_json_with_body(
     let input_names = runner_input_fields(&runner);
     let inputs = runner_input_values(body, &input_names);
     let output_names = runner_output_fields(&runner);
+    if matches!(action, "run" | "test" | "validate") {
+        let missing = input_names
+            .iter()
+            .filter(|name| {
+                inputs
+                    .get(*name)
+                    .map(|value| value.trim().is_empty())
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let message = format!("Missing required input: {}", missing.join(", "));
+            persist_evidence_bundle(state, &runner, action, "failed", Some(&message))?;
+            persist_runner_state(state, &runner.id, "failed", "failed", &evidence_ref)?;
+            return Ok(format!(
+                r#"{{"runnerId":"{}","action":"{}","status":"failed","evidenceRef":"{}","outputs":{{"missingInputs":"{}"}},"steps":[{{"summary":"Validate required inputs","status":"failed","message":"{}"}}]}}"#,
+                escape_json(&runner.id),
+                escape_json(action),
+                escape_json(&evidence_ref),
+                escape_json(&missing.join(",")),
+                escape_json(&message)
+            ));
+        }
+    }
     let status = match action {
         "validate" | "test" => {
             persist_evidence_bundle(state, &runner, action, "success", None)?;
@@ -2049,19 +2074,48 @@ fn refinement_action_json(path: &str, body: &str, state: &GuiApiState) -> Result
         .unwrap_or_else(|| "Use the corrected selector.".to_owned());
     let refinement_id = format!("refine-{:016x}", fnv1a64(correction.as_bytes()));
     if rest.starts_with('/') && rest.ends_with("/apply") {
+        let apply_refinement_id = rest
+            .trim_start_matches('/')
+            .trim_end_matches("/apply")
+            .to_owned();
+        let stored = std::fs::read_to_string(
+            refinements_dir(state).join(format!("{apply_refinement_id}.json")),
+        )
+        .unwrap_or_default();
+        let applied_correction =
+            json_string_field(&stored, "after").unwrap_or_else(|| correction.clone());
+        if let Some(path) = &runner.path {
+            let mut yaml = std::fs::read_to_string(path).map_err(|err| {
+                api_error_json(
+                    "runtime.io",
+                    &format!("Could not read runner before applying refinement: {err}"),
+                )
+            })?;
+            yaml.push_str(&format!(
+                "\n# refinement {}: {}\n",
+                apply_refinement_id,
+                applied_correction.replace('\n', " ")
+            ));
+            std::fs::write(path, yaml).map_err(|err| {
+                api_error_json(
+                    "runtime.io",
+                    &format!("Could not write refined runner: {err}"),
+                )
+            })?;
+        }
         persist_runner_state(
             state,
             &runner.id,
             "validated",
             "passed",
-            &format!("local://refinements/{refinement_id}"),
+            &format!("local://refinements/{apply_refinement_id}"),
         )?;
         return Ok(format!(
             r#"{{"refinementId":"{}","runnerId":"{}","status":"applied","applied":true,"evidenceRef":"local://refinements/{}","diff":{{"stepId":"step-1","before":"click old target","after":"{}"}}}}"#,
-            escape_json(&refinement_id),
+            escape_json(&apply_refinement_id),
             escape_json(&runner.id),
-            escape_json(&refinement_id),
-            escape_json(&correction)
+            escape_json(&apply_refinement_id),
+            escape_json(&applied_correction)
         ));
     }
     let path = refinements_dir(state).join(format!("{refinement_id}.json"));
