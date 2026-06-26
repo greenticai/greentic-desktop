@@ -1710,6 +1710,16 @@ fn runner_action_json_with_body(
             delete_runner(state, &runner)?;
             "deleted"
         }
+        "rename" => {
+            let name = json_string_field(body, "name")
+                .map(|value| value.trim().to_owned())
+                .unwrap_or_default();
+            rename_runner(state, &runner, &name)?;
+            if let Some(updated) = find_runner(state, &runner.id) {
+                persist_mcp_tool(state, &updated)?;
+            }
+            "renamed"
+        }
         "refine" => {
             persist_runner_state(state, &runner.id, "draft", "unknown", &evidence_ref)?;
             "draft"
@@ -1750,6 +1760,28 @@ fn delete_runner(state: &GuiApiState, runner: &RunnerFile) -> Result<(), String>
     let _ = std::fs::remove_file(mcp_tool_path(state, &runner.id));
     remove_runner_approvals(state, &runner.id);
     remove_runner_refinements(state, &runner.id);
+    Ok(())
+}
+
+fn rename_runner(state: &GuiApiState, runner: &RunnerFile, name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err(api_error_json(
+            "runner.invalid_name",
+            "Runner name must not be empty.",
+        ));
+    }
+    let path = runner.path.as_ref().ok_or_else(|| {
+        api_error_json(
+            "runner.rename_unavailable",
+            "This runner is built in and cannot be renamed from local storage.",
+        )
+    })?;
+    let yaml = std::fs::read_to_string(path)
+        .map_err(|err| api_error_json("runtime.io", &format!("Could not read runner: {err}")))?;
+    let yaml = replace_yaml_scalar(&yaml, "name", name);
+    std::fs::write(path, yaml)
+        .map_err(|err| api_error_json("runtime.io", &format!("Could not rename runner: {err}")))?;
+    let _ = std::fs::remove_file(mcp_tool_path(state, &runner.id));
     Ok(())
 }
 
@@ -2146,6 +2178,30 @@ fn yaml_scalar(yaml: &str, key: &str) -> Option<String> {
         let value = trimmed.strip_prefix(&needle)?.trim();
         Some(value.trim_matches('"').trim_matches('\'').to_owned())
     })
+}
+
+fn replace_yaml_scalar(yaml: &str, key: &str, value: &str) -> String {
+    let needle = format!("{key}:");
+    let replacement = format!(r#"{key}: "{}""#, value.replace('"', "\\\""));
+    let mut replaced = false;
+    let mut lines = yaml
+        .lines()
+        .map(|line| {
+            if !replaced && line.trim_start().starts_with(&needle) {
+                replaced = true;
+                let indent_len = line.len() - line.trim_start().len();
+                format!("{}{}", &line[..indent_len], replacement)
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !replaced {
+        lines.insert(0, replacement);
+    }
+    let mut output = lines.join("\n");
+    output.push('\n');
+    output
 }
 
 fn recording_targets_json() -> String {
@@ -3419,6 +3475,16 @@ mod tests {
         assert!(String::from_utf8_lossy(&validate).contains("\"status\":\"passed\""));
         assert!(String::from_utf8_lossy(&validate).contains("\"customer_id\":\"Acme\""));
 
+        let rename = post(
+            handle.addr(),
+            "/api/v1/runners/crm.create_customer/rename",
+            r#"{"name":"Create CRM Customer v2"}"#,
+        );
+        assert!(String::from_utf8_lossy(&rename).contains("\"status\":\"renamed\""));
+        let list = get(handle.addr(), "/api/v1/runners");
+        let list = String::from_utf8_lossy(&list);
+        assert!(list.contains("Create CRM Customer v2"));
+
         let publish = post(
             handle.addr(),
             "/api/v1/runners/crm.create_customer/publish",
@@ -3429,6 +3495,7 @@ mod tests {
         let tools = get(handle.addr(), "/api/v1/mcp/tools");
         let tools = String::from_utf8_lossy(&tools);
         assert!(tools.contains("\"name\":\"runner.crm.create_customer\""));
+        assert!(tools.contains("\"runner\":\"Create CRM Customer v2\""));
         assert!(tools.contains("\"status\":\"enabled\""));
 
         let tool_delete = post(

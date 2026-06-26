@@ -62,6 +62,8 @@ function RunnersPage() {
   const [runnerInputs, setRunnerInputs] = useState<Record<string, Record<string, string>>>({});
   const [runnerResults, setRunnerResults] = useState<Record<string, RunnerActionResultDto>>({});
   const [runnerErrors, setRunnerErrors] = useState<Record<string, string>>({});
+  const [renamingRunnerId, setRenamingRunnerId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const runnersQuery = useQuery({ queryKey: ["runners"], queryFn: api.runners });
   const mcpStatus = useQuery({ queryKey: ["mcp-status"], queryFn: api.mcpStatus });
   const mcpConfig = useQuery({ queryKey: ["mcp-client-config"], queryFn: api.mcpClientConfig });
@@ -85,6 +87,10 @@ function RunnersPage() {
         return next;
       });
       setExecution(null);
+      if (result.action === "rename") {
+        setRenamingRunnerId(null);
+        setRenameValue("");
+      }
       void queryClient.invalidateQueries({ queryKey: ["runners"] });
       void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
       void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] });
@@ -154,6 +160,15 @@ function RunnersPage() {
       ...current,
       [runnerId]: { ...(current[runnerId] ?? {}), [field]: value },
     }));
+  }
+
+  function startRename(runner: RunnerSummaryDto) {
+    setRenamingRunnerId(runner.id);
+    setRenameValue(runner.name);
+  }
+
+  function saveRename(runner: RunnerSummaryDto) {
+    runAction(runner, "rename", { name: renameValue });
   }
 
   return (
@@ -291,7 +306,46 @@ function RunnersPage() {
                   <FileCog className="h-5 w-5 text-primary" />
                 </div>
                 <div className="min-w-0">
-                  <div className="font-semibold truncate">{r.name}</div>
+                  {renamingRunnerId === r.id ? (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        className="h-8"
+                        value={renameValue}
+                        onChange={(event) => setRenameValue(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") saveRename(r);
+                          if (event.key === "Escape") setRenamingRunnerId(null);
+                        }}
+                        autoFocus
+                      />
+                      <Button
+                        size="sm"
+                        disabled={busy || !renameValue.trim()}
+                        onClick={() => saveRename(r)}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setRenamingRunnerId(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="font-semibold truncate">{r.name}</div>
+                      <button
+                        type="button"
+                        className="shrink-0 text-muted-foreground hover:text-foreground"
+                        aria-label={`Rename ${r.name}`}
+                        onClick={() => startRename(r)}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
                   <div className="text-xs text-muted-foreground">
                     Last tested {r.lastTest || "unknown"}
                   </div>
@@ -308,7 +362,7 @@ function RunnersPage() {
               </div>
             )}
             <div className="mt-3 text-xs text-muted-foreground">
-              MCP tool runner.{r.id.replaceAll("-", ".")} · enabled
+              MCP tool runner.{r.id.replaceAll("-", ".")} · {r.name}
             </div>
             <div className="mt-5 flex flex-wrap gap-2">
               {r.friendly.tone === "fix" ? (
@@ -344,7 +398,7 @@ function RunnersPage() {
               </Button>
               <Button size="sm" variant="outline" className="gap-1.5" asChild>
                 <Link to="/create" search={{ mode: undefined }}>
-                  <Pencil className="h-3.5 w-3.5" /> Edit
+                  <Pencil className="h-3.5 w-3.5" /> Edit steps
                 </Link>
               </Button>
               <Button
