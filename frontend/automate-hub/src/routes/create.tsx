@@ -456,6 +456,12 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
   const [recordingTest, setRecordingTest] = useState<RecordingTestResultDto | null>(null);
   const [finalised, setFinalised] = useState<RecordingFinaliseResultDto | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const setupPermission = useMutation({
+    mutationFn: () => api.setupFix("screen_capture_permission", "open_system_settings"),
+    onSuccess: (result) => setMessage(result.message),
+    onError: (error) =>
+      setMessage(error instanceof Error ? error.message : "Could not open permission settings"),
+  });
   const start = useMutation({
     mutationFn: () => api.startRecording(name, target),
     onSuccess: (result) => {
@@ -501,6 +507,7 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
     setStep((s) => Math.min(s + 1, 4));
   };
   const prev = () => (step === 0 ? onBack() : setStep((s) => s - 1));
+  const needsScreenRecording = target === "desktop" || target === "remote";
 
   const titles = [
     { t: "Name your runner", s: "Give it something memorable." },
@@ -563,28 +570,50 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
         </div>
       )}
       {step === 1 && (
-        <div className="grid sm:grid-cols-2 gap-3">
-          {[
-            ["browser", "Browser task"],
-            ["desktop", "Desktop app task"],
-            ["remote", "Remote desktop task"],
-            ["terminal", "Terminal/mainframe task"],
-          ].map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => setTarget(id)}
-              className={`rounded-xl border p-4 text-left hover:border-primary/40 hover:bg-accent/40 ${
-                target === id ? "border-primary bg-accent/50" : ""
-              }`}
-            >
-              <div className="font-medium text-sm">{label}</div>
-            </button>
-          ))}
+        <div className="space-y-4">
+          <div className="grid sm:grid-cols-2 gap-3">
+            {[
+              ["browser", "Browser task"],
+              ["desktop", "Desktop app task"],
+              ["remote", "Remote desktop task"],
+              ["terminal", "Terminal/mainframe task"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setTarget(id)}
+                className={`rounded-xl border p-4 text-left hover:border-primary/40 hover:bg-accent/40 ${
+                  target === id ? "border-primary bg-accent/50" : ""
+                }`}
+              >
+                <div className="font-medium text-sm">{label}</div>
+              </button>
+            ))}
+          </div>
+          {needsScreenRecording && (
+            <div className="rounded-xl border border-warning/30 bg-warning/10 p-4 text-sm">
+              <div className="font-medium">Screen recording permission required</div>
+              <p className="mt-1 text-muted-foreground">
+                Desktop and remote recording need OS screen sharing/screen recording permission.
+                Until that is granted and the native capture adapter is active, this flow can only
+                create a session and markers, not capture the real desktop steps.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                disabled={setupPermission.isPending}
+                onClick={() => setupPermission.mutate()}
+              >
+                Open permission settings
+              </Button>
+            </div>
+          )}
         </div>
       )}
       {step === 2 && (
         <RecordingScreen
           session={session}
+          target={target}
           onAction={(name, value) => action.mutate({ action: name, value })}
         />
       )}
@@ -603,11 +632,15 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
 
 function RecordingScreen({
   session,
+  target,
   onAction,
 }: {
   session: RecordingSummaryDto | null;
+  target: string;
   onAction: (action: string, value?: string) => void;
 }) {
+  const needsScreenRecording = target === "desktop" || target === "remote";
+  const noCapturedEvents = (session?.rawEvents ?? 0) === 0;
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border-2 border-destructive/30 bg-destructive/5 p-8 text-center">
@@ -618,10 +651,22 @@ function RecordingScreen({
           </span>
           Recording
         </div>
-        <div className="text-4xl font-semibold tabular-nums mt-4">00:42</div>
+        <div className="text-4xl font-semibold tabular-nums mt-4">
+          {noCapturedEvents ? "00:00" : "00:42"}
+        </div>
         <div className="text-sm text-muted-foreground mt-2">
           {session?.sessionId ?? "Starting"} - {session?.state ?? "starting"}
         </div>
+        {needsScreenRecording && noCapturedEvents && (
+          <div className="mx-auto mt-4 max-w-xl rounded-xl border border-warning/30 bg-background/80 p-4 text-left text-sm">
+            <div className="font-medium">No desktop events captured yet</div>
+            <p className="mt-1 text-muted-foreground">
+              This recorder session is running, but it is not seeing screen/desktop events. Grant
+              Screen Recording or Screen Sharing permission for the app that launched Greentic, then
+              restart Greentic Desktop and try again.
+            </p>
+          </div>
+        )}
         <div className="mt-6 flex justify-center gap-2">
           <Button
             variant="outline"
