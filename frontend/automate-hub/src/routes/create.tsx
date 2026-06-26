@@ -194,6 +194,14 @@ function PromptWizard({
     onSuccess: (result) => setMessage(`Saved ${result.runnerId}`),
     onError: (error) => setMessage(error instanceof Error ? error.message : "Save failed"),
   });
+  const patchDraft = useMutation({
+    mutationFn: (patch: Partial<PlannerDraftDto>) => api.patchPlannerDraft(draft!.draftId, patch),
+    onSuccess: (result) => {
+      setDraft(result);
+      setMessage(null);
+    },
+    onError: (error) => setMessage(error instanceof Error ? error.message : "Update failed"),
+  });
   const next = () => {
     if (step === 0) {
       createDraft.mutate();
@@ -258,7 +266,23 @@ function PromptWizard({
       )}
       {message && <div className="mb-4 text-sm text-destructive">{message}</div>}
       {step === 0 && <PromptStep prompt={prompt} onPromptChange={setPrompt} />}
-      {step === 1 && <IOStep draft={draft} />}
+      {step === 1 && (
+        <IOStep
+          draft={draft}
+          busy={patchDraft.isPending}
+          onInputsChange={(inputs) => {
+            if (draft) {
+              setDraft({ ...draft, inputs });
+            }
+          }}
+          onOutputsChange={(outputs) => {
+            if (draft) {
+              setDraft({ ...draft, outputs });
+            }
+          }}
+          onPersist={(patch) => patchDraft.mutate(patch)}
+        />
+      )}
       {step === 2 && <StepsStep draft={draft} />}
       {step === 3 && (
         <TestStep
@@ -315,17 +339,51 @@ function PromptStep({
   );
 }
 
-function FieldList({ title, items }: { title: string; items: string[] }) {
-  const [list, setList] = useState(items);
+function normalizeFields(items: string[]) {
+  return items.map((item) => item.trim()).filter(Boolean);
+}
+
+function FieldList({
+  title,
+  items,
+  busy,
+  onChange,
+  onPersist,
+}: {
+  title: string;
+  items: string[];
+  busy: boolean;
+  onChange: (items: string[]) => void;
+  onPersist: (items: string[]) => void;
+}) {
+  const persist = (next: string[]) => onPersist(normalizeFields(next));
+  const update = (next: string[]) => {
+    onChange(next);
+  };
   return (
     <div className="rounded-xl border p-4">
       <div className="font-medium text-sm mb-3">{title}</div>
       <ul className="space-y-2">
-        {list.map((f, i) => (
-          <li key={i} className="flex items-center gap-2">
-            <Input defaultValue={f} className="h-9" />
+        {items.map((field, index) => (
+          <li key={index} className="flex items-center gap-2">
+            <Input
+              value={field}
+              className="h-9"
+              onChange={(event) => {
+                const next = items.map((item, i) => (i === index ? event.target.value : item));
+                update(next);
+              }}
+              onBlur={(event) => {
+                const next = items.map((item, i) => (i === index ? event.target.value : item));
+                persist(next);
+              }}
+            />
             <button
-              onClick={() => setList(list.filter((_, j) => j !== i))}
+              onClick={() => {
+                const next = items.filter((_, i) => i !== index);
+                update(next);
+                persist(next);
+              }}
               className="h-9 w-9 rounded-md hover:bg-muted flex items-center justify-center text-muted-foreground"
             >
               <X className="h-4 w-4" />
@@ -337,22 +395,56 @@ function FieldList({ title, items }: { title: string; items: string[] }) {
         variant="outline"
         size="sm"
         className="mt-3 gap-1.5"
-        onClick={() => setList([...list, ""])}
+        disabled={busy}
+        onClick={() => update([...items, ""])}
       >
         <Plus className="h-3.5 w-3.5" /> Add field
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="mt-3 ml-2"
+        disabled={busy}
+        onClick={() => persist(items)}
+      >
+        Save {title.toLowerCase()}
       </Button>
     </div>
   );
 }
 
-function IOStep({ draft }: { draft: PlannerDraftDto | null }) {
+function IOStep({
+  draft,
+  busy,
+  onInputsChange,
+  onOutputsChange,
+  onPersist,
+}: {
+  draft: PlannerDraftDto | null;
+  busy: boolean;
+  onInputsChange: (inputs: string[]) => void;
+  onOutputsChange: (outputs: string[]) => void;
+  onPersist: (patch: Partial<PlannerDraftDto>) => void;
+}) {
   if (!draft) {
     return <div className="text-sm text-muted-foreground">Generate a draft first.</div>;
   }
   return (
     <div className="grid md:grid-cols-2 gap-4">
-      <FieldList title="Inputs" items={draft.inputs} />
-      <FieldList title="Outputs" items={draft.outputs} />
+      <FieldList
+        title="Inputs"
+        items={draft.inputs}
+        busy={busy}
+        onChange={onInputsChange}
+        onPersist={(inputs) => onPersist({ inputs })}
+      />
+      <FieldList
+        title="Outputs"
+        items={draft.outputs}
+        busy={busy}
+        onChange={onOutputsChange}
+        onPersist={(outputs) => onPersist({ outputs })}
+      />
     </div>
   );
 }

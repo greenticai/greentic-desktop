@@ -403,13 +403,13 @@ fn api_response(
             Err(error) => return json_response(400, "Bad Request", &error, head_only),
         },
         ("GET" | "HEAD", path) if path.starts_with("/api/v1/planner/drafts/") => {
-            match planner_draft_action_json(method, path, state) {
+            match planner_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
         }
         ("PATCH", path) if path.starts_with("/api/v1/planner/drafts/") => {
-            match planner_draft_action_json(method, path, state) {
+            match planner_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -421,7 +421,7 @@ fn api_response(
             }
         }
         ("POST", path) if path.starts_with("/api/v1/planner/drafts/") => {
-            match planner_draft_action_json(method, path, state) {
+            match planner_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
@@ -2556,6 +2556,7 @@ fn create_planner_draft_json(body: &str, state: &GuiApiState) -> Result<String, 
 fn planner_draft_action_json(
     method: &str,
     path: &str,
+    body: &str,
     state: &GuiApiState,
 ) -> Result<String, String> {
     let (draft_id, action) = planner_draft_parts(path);
@@ -2568,11 +2569,9 @@ fn planner_draft_action_json(
     }
 
     match (method, action) {
-        ("GET" | "HEAD", "") | ("PATCH", "") => {
-            std::fs::read_to_string(draft_dir.join("draft.json")).map_err(|err| {
-                api_error_json("runtime.io", &format!("Could not read draft: {err}"))
-            })
-        }
+        ("GET" | "HEAD", "") => std::fs::read_to_string(draft_dir.join("draft.json"))
+            .map_err(|err| api_error_json("runtime.io", &format!("Could not read draft: {err}"))),
+        ("PATCH", "") => patch_planner_draft_json(&draft_dir, body),
         ("POST", "test") => Ok(format!(
             r#"{{"draftId":"{}","status":"passed","outputs":{{"result":"sample-output"}},"evidenceRef":"local://planner/{}/test-results/latest","steps":[{{"summary":"Validate required capabilities","status":"passed"}}]}}"#,
             escape_json(draft_id),
@@ -2623,6 +2622,33 @@ fn planner_draft_action_json(
             "Planner action not found.",
         )),
     }
+}
+
+fn patch_planner_draft_json(draft_dir: &std::path::Path, body: &str) -> Result<String, String> {
+    let draft_path = draft_dir.join("draft.json");
+    let yaml_path = draft_dir.join("runner.yaml");
+    let mut draft_json = std::fs::read_to_string(&draft_path)
+        .map_err(|err| api_error_json("runtime.io", &format!("Could not read draft: {err}")))?;
+    let mut yaml = std::fs::read_to_string(&yaml_path).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!("Could not read draft runner YAML: {err}"),
+        )
+    })?;
+
+    if let Some(inputs) = json_string_array_field(body, "inputs") {
+        draft_json = replace_json_string_array(&draft_json, "inputs", &inputs);
+        yaml = replace_yaml_list(&yaml, "inputs", &inputs);
+    }
+    if let Some(outputs) = json_string_array_field(body, "outputs") {
+        draft_json = replace_json_string_array(&draft_json, "outputs", &outputs);
+        yaml = replace_yaml_list(&yaml, "outputs", &outputs);
+    }
+
+    std::fs::write(&draft_path, &draft_json)
+        .and_then(|_| std::fs::write(&yaml_path, yaml))
+        .map_err(|err| api_error_json("runtime.io", &format!("Could not update draft: {err}")))?;
+    Ok(draft_json)
 }
 
 fn delete_planner_draft_json(path: &str, state: &GuiApiState) -> Result<String, String> {
@@ -3461,6 +3487,110 @@ fn json_bool_field(body: &str, field: &str) -> Option<bool> {
     }
 }
 
+fn json_string_array_field(body: &str, field: &str) -> Option<Vec<String>> {
+    let needle = format!(r#""{field}""#);
+    let after_field = body.split_once(&needle)?.1;
+    let mut chars = after_field
+        .split_once(':')?
+        .1
+        .trim_start()
+        .chars()
+        .peekable();
+    if chars.next()? != '[' {
+        return None;
+    }
+    let mut values = Vec::new();
+    loop {
+        while matches!(chars.peek(), Some(ch) if ch.is_whitespace() || *ch == ',') {
+            chars.next();
+        }
+        match chars.peek() {
+            Some(']') => return Some(values),
+            Some('"') => {
+                chars.next();
+                let mut value = String::new();
+                let mut escaped = false;
+                for ch in chars.by_ref() {
+                    if escaped {
+                        value.push(match ch {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            '"' => '"',
+                            '\\' => '\\',
+                            other => other,
+                        });
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        break;
+                    } else {
+                        value.push(ch);
+                    }
+                }
+                let value = value.trim();
+                if !value.is_empty() {
+                    values.push(value.to_owned());
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn replace_json_string_array(json: &str, field: &str, values: &[String]) -> String {
+    let needle = format!(r#""{field}":"#);
+    let Some(start) = json.find(&needle) else {
+        return json.to_owned();
+    };
+    let array_start = start + needle.len();
+    let Some(relative_end) = json[array_start..].find(']') else {
+        return json.to_owned();
+    };
+    let array_end = array_start + relative_end + 1;
+    format!(
+        "{}{}{}",
+        &json[..array_start],
+        string_array_json(values),
+        &json[array_end..]
+    )
+}
+
+fn replace_yaml_list(yaml: &str, key: &str, values: &[String]) -> String {
+    let mut output = String::new();
+    let mut lines = yaml.lines().peekable();
+    let marker = format!("{key}:");
+    let mut replaced = false;
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with(&marker) {
+            replaced = true;
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = &line[..indent_len];
+            output.push_str(&format!("{indent}{key}:\n"));
+            for value in values {
+                output.push_str(&format!("{indent}  - {}\n", value));
+            }
+            while let Some(next) = lines.peek() {
+                if !next.starts_with(' ') && !next.starts_with('\t') {
+                    break;
+                }
+                lines.next();
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !replaced {
+        output.push_str(&format!("{key}:\n"));
+        for value in values {
+            output.push_str(&format!("  - {}\n", value));
+        }
+    }
+    output
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -3562,11 +3692,15 @@ mod tests {
     }
 
     fn post(addr: SocketAddr, path: &str, body: &str) -> Vec<u8> {
+        json_request(addr, "POST", path, body)
+    }
+
+    fn json_request(addr: SocketAddr, method: &str, path: &str, body: &str) -> Vec<u8> {
         for _ in 0..10 {
             let mut stream = TcpStream::connect(addr).expect("connect to GUI host");
             if write!(
                 stream,
-                "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "{method} {path} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
@@ -4054,6 +4188,16 @@ mod tests {
         assert!(response.contains("\"ok\":true"));
         let draft_id = json_string_field(&response, "draftId").expect("draft id");
 
+        let patched = json_request(
+            handle.addr(),
+            "PATCH",
+            &format!("/api/v1/planner/drafts/{draft_id}"),
+            r#"{"inputs":["company_name","email"],"outputs":["customer_id","confirmation_number"]}"#,
+        );
+        let patched = String::from_utf8_lossy(&patched);
+        assert!(patched.contains("\"inputs\":[\"company_name\",\"email\"]"));
+        assert!(patched.contains("\"outputs\":[\"customer_id\",\"confirmation_number\"]"));
+
         let test = post(
             handle.addr(),
             &format!("/api/v1/planner/drafts/{draft_id}/test"),
@@ -4066,7 +4210,16 @@ mod tests {
             &format!("/api/v1/planner/drafts/{draft_id}/save"),
             "{}",
         );
-        assert!(String::from_utf8_lossy(&save).contains("\"saved\":true"));
+        let save = String::from_utf8_lossy(&save);
+        assert!(save.contains("\"saved\":true"));
+        let runner_id = json_string_field(&save, "runnerId").expect("runner id");
+        let yaml =
+            std::fs::read_to_string(root.join("runners").join(format!("{runner_id}.draft.yaml")))
+                .expect("saved runner yaml");
+        assert!(yaml.contains("  - company_name"));
+        assert!(yaml.contains("  - email"));
+        assert!(yaml.contains("  - customer_id"));
+        assert!(yaml.contains("  - confirmation_number"));
         assert!(root.join("runners").is_dir());
 
         let _ = std::fs::remove_dir_all(root);
