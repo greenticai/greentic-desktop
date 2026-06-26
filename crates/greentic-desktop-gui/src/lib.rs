@@ -770,21 +770,30 @@ fn setup_checklist_json(state: &GuiApiState) -> String {
             "screen_capture_permission",
             "Screen capture permission",
             "warning",
-            "Your platform may ask for permission before recording or visual fallback works.",
+            &permission_help(
+                &state.platform,
+                "Allow screen capture for the app that is running Greentic.",
+            ),
             "open_system_settings",
         ),
         checklist_item_json(
             "accessibility_permission",
             "Accessibility permission",
             "warning",
-            "Native desktop automation may require Accessibility or UI Automation access.",
+            &permission_help(
+                &state.platform,
+                "Allow accessibility or UI automation for the app that is running Greentic.",
+            ),
             "open_system_settings",
         ),
         checklist_item_json(
             "input_control_permission",
             "Keyboard/mouse control permission",
             "warning",
-            "Input control may require an operating-system permission prompt.",
+            &permission_help(
+                &state.platform,
+                "Allow input monitoring or keyboard/mouse control for the app that is running Greentic.",
+            ),
             "open_system_settings",
         ),
         checklist_item_json(
@@ -837,24 +846,27 @@ fn setup_fix_json(body: &str, state: &GuiApiState) -> Result<String, String> {
             state,
             &id,
             "screen_capture",
-            "Open the screen capture or screen recording permission page and grant access to the terminal or Greentic Desktop app you are running.",
+            "Screen capture lets Greentic observe app state while recording and replaying.",
         ),
         "accessibility_permission" => open_permission_settings(
             state,
             &id,
             "accessibility",
-            "Open the accessibility permission page and grant access to the terminal or Greentic Desktop app you are running.",
+            "Accessibility lets Greentic inspect and operate native app controls.",
         ),
         "input_control_permission" => open_permission_settings(
             state,
             &id,
             "input_control",
-            "Open the keyboard, mouse, or input monitoring permission page and grant access to the terminal or Greentic Desktop app you are running.",
+            "Input control lets Greentic send keyboard and mouse events.",
         ),
         "mcp_server" => setup_fix_result_json(
             &id,
             "manual",
-            &format!("Start or configure the local MCP endpoint at {}.", state.mcp_bind),
+            &format!(
+                "Start or configure the local MCP endpoint at {}.",
+                state.mcp_bind
+            ),
         ),
         _ => {
             return Err(api_error_json(
@@ -864,6 +876,33 @@ fn setup_fix_json(body: &str, state: &GuiApiState) -> Result<String, String> {
         }
     };
     Ok(result)
+}
+
+fn permission_help(platform: &str, purpose: &str) -> String {
+    format!("{purpose} {}", permission_target_hint(platform))
+}
+
+fn permission_target_hint(platform: &str) -> String {
+    match platform {
+        "macos" => format!(
+            "On macOS, enable Greentic Desktop if installed as an app. If you launched with cargo run, enable your launcher app, such as Terminal, iTerm2, VS Code, or Cursor. If nothing appears, add {} manually.",
+            permission_binary_label()
+        ),
+        "windows" => {
+            "On Windows, allow the Greentic Desktop executable in the relevant privacy or accessibility prompt.".to_owned()
+        }
+        "linux" => {
+            "On Linux, grant the permission in your desktop environment or portal dialog for the Greentic Desktop process.".to_owned()
+        }
+        _ => "Grant the permission to the Greentic Desktop process or the app that launched it.".to_owned(),
+    }
+}
+
+fn permission_binary_label() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the greentic-desktop executable".to_owned())
 }
 
 fn setup_fix_result_json(id: &str, status: &str, message: &str) -> String {
@@ -879,16 +918,36 @@ fn open_permission_settings(
     state: &GuiApiState,
     id: &str,
     permission: &str,
-    manual_message: &str,
+    purpose: &str,
 ) -> String {
+    let instruction = permission_fix_message(&state.platform, permission, purpose);
     match open_platform_settings(&state.platform, permission) {
-        Ok(()) => setup_fix_result_json(id, "opened", "Opened the relevant operating-system settings page. Grant the permission, then restart Greentic Desktop if the OS asks you to."),
+        Ok(()) => setup_fix_result_json(id, "opened", &instruction),
         Err(reason) => setup_fix_result_json(
             id,
             "manual",
-            &format!("{manual_message} Automatic opening was not available: {reason}."),
+            &format!("{instruction} Automatic opening was not available: {reason}."),
         ),
     }
+}
+
+fn permission_fix_message(platform: &str, permission: &str, purpose: &str) -> String {
+    let setting_name = match (platform, permission) {
+        ("macos", "screen_capture") => "Screen & System Audio Recording",
+        ("macos", "accessibility") => "Accessibility",
+        ("macos", "input_control") => "Input Monitoring",
+        ("windows", "screen_capture") => "Privacy",
+        ("windows", "accessibility") => "Accessibility",
+        ("windows", "input_control") => "Keyboard or input privacy",
+        ("linux", "screen_capture") => "Privacy or screen sharing",
+        ("linux", "accessibility") => "Accessibility",
+        ("linux", "input_control") => "Keyboard or input settings",
+        _ => "the relevant operating-system permission",
+    };
+    format!(
+        "Opened {setting_name}. {purpose} {} After granting it, restart Greentic Desktop if the OS asks you to.",
+        permission_target_hint(platform)
+    )
 }
 
 fn open_platform_settings(platform: &str, permission: &str) -> Result<(), String> {

@@ -129,21 +129,25 @@ function Home() {
         {checklist.length > 0 && (
           <ul className="divide-y">
             {checklist.map((c) => (
-              <li key={c.label} className="flex items-center justify-between py-3">
-                <div className="flex items-center gap-3 text-sm">
+              <li key={c.label} className="flex items-start justify-between gap-4 py-3">
+                <div className="flex items-start gap-3 text-sm min-w-0">
                   {c.ok ? (
-                    <CheckCircle2 className="h-5 w-5 text-success" />
+                    <CheckCircle2 className="h-5 w-5 text-success mt-0.5 shrink-0" />
                   ) : (
-                    <AlertTriangle className="h-5 w-5 text-warning" />
+                    <AlertTriangle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
                   )}
-                  <span className={c.ok ? "text-foreground" : "text-foreground"}>{c.label}</span>
+                  <div className="min-w-0">
+                    <div className="text-foreground">{c.label}</div>
+                    <div className="text-xs text-muted-foreground leading-relaxed">{c.help}</div>
+                  </div>
                 </div>
                 {c.ok ? (
-                  <span className="text-xs text-muted-foreground">Ready</span>
+                  <span className="text-xs text-muted-foreground shrink-0">Ready</span>
                 ) : (
                   <Button
                     size="sm"
                     variant="outline"
+                    className="shrink-0"
                     disabled={setupAction.isPending}
                     onClick={() => setupAction.mutate({ id: c.id, action: c.action })}
                   >
