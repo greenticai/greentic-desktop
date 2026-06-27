@@ -86,6 +86,16 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 60. PR-60 Generic Web Adapter Semantics
 61. PR-61 Generic MCP Published Runner Fixtures
 62. PR-62 Store Index Generation from Extension Manifests
+63. PR-63 Real Recording Capture Runtime
+64. PR-64 Web Recording With Playwright/CDP
+65. PR-65 Native Desktop App Recording on macOS, Windows, and Linux
+66. PR-66 Java App Recording Through Java Accessibility
+67. PR-67 Terminal and Mainframe Recording
+68. PR-68 Remote Desktop Recording Through Vision and Input
+69. PR-69 Recording GUI With No Placeholder States
+70. PR-70 Recording Normalization to Generic Workflows
+71. PR-71 Recording End-to-End Test Matrix
+72. PR-72 Recording Documentation and Operational Runbooks
 
 ## Roadmap Alignment
 
@@ -95,3 +105,4 @@ The desktop automation runtime is intentionally generic. AWS WorkSpaces is one e
 - **Create and operate runners:** PR-39 through PR-43 connect prompt, recording, runners, MCP, evidence, approvals, and refinement to the same backend.
 - **Shipping and hardening:** PR-44 through PR-46 cover Windows click-to-run, GUI security, and user documentation, including extension trust prompts and store workflows.
 - **Generic automation foundation:** PR-54 through PR-62 remove app-specific assumptions from workflow authoring, planning, replay, MCP publication, web automation, and store metadata so Greentic Desktop can prompt, record, execute, and expose automations across desktop technologies.
+- **Real recording:** PR-63 through PR-72 replace placeholder recording sessions with target-specific capture backends, generic normalization, honest GUI states, and end-to-end tests for web, native desktop, Java, terminal/mainframe, and remote desktop workflows.
