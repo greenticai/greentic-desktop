@@ -14,3 +14,6 @@ include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 [lib]
 name = "greentic_desktop_llm"
 path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

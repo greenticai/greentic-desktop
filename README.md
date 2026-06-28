@@ -29,8 +29,8 @@ Greentic Desktop is not a general-purpose screen macro recorder. It is a control
 
 The usual path is:
 
-1. **Record the task once.** Start from a clear, repeatable task such as "create a customer in the CRM". Greentic Desktop observes the app, the fields you use, the buttons you press, and the checks that prove the task finished.
-2. **Turn the recording into a runner.** The recording is normalized into a runner package. The runner keeps stable targets, inputs such as `company_name` or `email`, required secrets such as a login, expected outputs such as `customer_id`, and evidence rules.
+1. **Record or describe the task once.** Start from a clear, repeatable task such as "open a resource table, ask for `resource_name`, `name`, and `email`, append a row, save, and return `saved_status`." Greentic Desktop observes or plans the app target, inputs, commands, outputs, assertions, and evidence checks.
+2. **Turn it into a runner.** The recording or prompt is normalized into a runner package. The runner keeps stable targets, typed inputs, required secrets, expected outputs, output extractors, assertions, and evidence rules.
 3. **Review and approve the runner.** A person checks the runner before it is used by others. Published runners are expected to be signed so production systems do not run unapproved desktop automation.
 4. **Expose it as an MCP tool forwarder.** The approved runner is converted into a tool with a stable name, input schema, output schema, permissions, approval policy, and evidence settings. A local or forwarded MCP client can then call that tool instead of driving the desktop directly.
 5. **Use it from an assistant or workflow.** The caller supplies the required inputs, Greentic Desktop replays the desktop task, and the response includes structured outputs plus an evidence reference.
@@ -72,8 +72,8 @@ greentic-desktop init
 greentic-desktop extension install greentic.desktop.playwright
 greentic-desktop extension list
 greentic-desktop runner list
-greentic-desktop runner plan --prompt "Create CRM customer with company name and email" --dry-run
-greentic-desktop record start --name crm.create_customer --profile local-crm --adapter greentic.desktop.playwright --out ./recordings/crm.create_customer
+greentic-desktop runner plan --prompt "Open a resource table, ask for resource_name, name, and email, append a row, save, and return saved_status" --dry-run
+greentic-desktop record start --name generic.resource_append --profile local-web --adapter greentic.desktop.playwright --out ./recordings/generic.resource_append
 greentic-desktop mcp serve
 ```
 
@@ -98,6 +98,7 @@ gtc desktop info
   - [Linux X11 Adapter](docs/adapters/linux-x11.md)
   - [Linux Wayland Adapter](docs/adapters/linux-wayland.md)
 - [Recording and Refinement](docs/recording-and-refinement.md)
+- [Recording Runbooks](docs/recording-runbooks.md)
 - [MCP Tools](docs/mcp-tools.md)
 - [Security, Approvals, and Secrets](docs/security.md)
 - [Evidence and Audit Trail](docs/evidence.md)
@@ -116,12 +117,18 @@ gtc desktop info
 
 This repository contains the Rust workspace for Greentic Desktop. The current implementation includes:
 
-- A runtime and CLI for local initialization, extension management, prompt planning, recording session lifecycle, runner discovery, and MCP serving.
+- A runtime and CLI for local initialization, extension management, prompt planning, recording session lifecycle, runner discovery, replay, and MCP serving.
 - Models for runner packages, portable desktop steps, replay validation, evidence, registry signing, security policy, deployment, rollout, and business flows.
 - Built-in extension manifests for web, terminal, Windows UI Automation, Java accessibility, vision fallback, macOS accessibility, Linux X11, and Linux Wayland compatibility.
 - Test coverage for the modeled workflows and local validation through CI.
 
 Some feature areas are implemented as domain models and tests rather than a finished end-user desktop application. The docs describe the intended user workflow and call out the current command-line surface where it exists.
+
+## Execution Truthfulness
+
+Runner execution is visible when the selected adapter drives a visible desktop, browser, Java app, terminal, or remote viewport in the current user session. Web and terminal adapters can also run in controlled contexts that do not mirror every click in an unrelated user tab or shell. Native desktop recording and replay require the operating system permissions and session access listed in the adapter docs; if those checks fail, Greentic Desktop should block with a concrete reason instead of claiming success.
+
+Release validation must fail if product runtime paths fabricate outputs such as `sample-output`, use fixed company names, or pass without declared inputs, secrets, output extractors, and evidence.
 
 ## Local Validation
 

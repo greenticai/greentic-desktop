@@ -6,19 +6,19 @@ A runner is a reusable description of a desktop task. It says what the task need
 
 A runner package includes:
 
-- **ID and version**: the stable name of the task, such as `crm.create_customer`.
+- **ID and version**: the stable name of the task, such as `generic.resource_append`.
 - **Mode**: whether it came from a prompt, a human demonstration, or both.
-- **Inputs**: values supplied by the caller, such as `email` or `company_name`.
+- **Inputs**: values supplied by the caller, such as `resource_name`, `name`, or `email`.
 - **Secrets**: sensitive values resolved at run time, such as passwords or tokens.
 - **Steps**: actions such as opening an app, clicking a button, typing text, reading a field, or asserting that something is visible.
 - **Assertions**: checks that confirm the run reached the expected state.
-- **Outputs**: values returned to the caller, such as a created customer ID.
+- **Outputs**: values returned to the caller, such as `saved_status`.
 
 ## Portable Runners
 
 Some desktop tasks need to work across more than one operating system. Portable runners can keep platform-specific launch details and locators for Windows, macOS, Linux X11, and Linux Wayland.
 
-For example, the same logical step can open the CRM app through:
+For example, the same logical step can open a generic desktop resource editor through:
 
 - a Windows executable path,
 - a macOS bundle ID,
@@ -46,25 +46,25 @@ Use prompt planning when you can describe the task before recording it:
 
 ```bash
 greentic-desktop runner plan \
-  --prompt "Create CRM customer with company name and email and return customer id" \
-  --profile local-crm \
-  --out ./runners/crm.create_customer.draft.yaml
+  --prompt "Open a resource table, ask for resource_name, name, and email, append a row, save, and return saved_status" \
+  --profile local-web \
+  --out ./runners/generic.resource_append.draft.yaml
 ```
 
 Use recording when the task is easier to demonstrate:
 
 ```bash
 greentic-desktop record start \
-  --name crm.create_customer \
-  --profile local-crm \
+  --name generic.resource_append \
+  --profile local-web \
   --adapter greentic.desktop.playwright \
-  --out ./recordings/crm.create_customer
+  --out ./recordings/generic.resource_append
 
 greentic-desktop record stop --session rec_123
 
 greentic-desktop record normalise \
-  --recording ./recordings/crm.create_customer/raw \
-  --out ./runners/crm.create_customer.draft.yaml
+  --recording ./recordings/generic.resource_append/raw \
+  --out ./runners/generic.resource_append.draft.yaml
 ```
 
 Both paths produce a draft runner YAML file that should be reviewed before production use.
@@ -93,7 +93,7 @@ After a runner is approved and exposed as an MCP tool, start the MCP endpoint:
 greentic-desktop mcp serve
 ```
 
-An MCP client can list tools and call the runner by name. A call for a CRM customer runner uses the normal MCP `tools/call` shape:
+An MCP client can list tools and call the runner by name. A call for a generic resource append runner uses the normal MCP `tools/call` shape:
 
 ```json
 {
@@ -101,10 +101,11 @@ An MCP client can list tools and call the runner by name. A call for a CRM custo
   "id": 2,
   "method": "tools/call",
   "params": {
-    "name": "crm.create_customer",
+    "name": "generic.resource_append",
     "arguments": {
-      "company_name": "Example Ltd",
-      "email": "buyer@example.com"
+      "resource_name": "contacts",
+      "name": "Maarten",
+      "email": "maarten@example.test"
     }
   }
 }

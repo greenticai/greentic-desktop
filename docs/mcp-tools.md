@@ -19,7 +19,7 @@ Runner IDs are normalized into stable tool names so they can be safely listed an
 
 ## Listing Tools
 
-Automate Hub has an **MCP Tools** page for starting, stopping, restarting, enabling, disabling, testing, and copying published runner tools. It also shows local client configuration.
+Automate Hub manages MCP from **My Runners**. Start, stop, or restart the managed MCP server there; each saved ready runner is the MCP tool contract. Run, edit, delete, and MCP calls use the same runner definition.
 
 The CLI can also start the MCP endpoint:
 
@@ -63,16 +63,17 @@ A runner tool call uses the standard MCP `tools/call` request shape:
   "id": 2,
   "method": "tools/call",
   "params": {
-    "name": "crm.create_customer",
+    "name": "generic.resource_append",
     "arguments": {
-      "company_name": "Example Ltd",
-      "email": "buyer@example.com"
+      "resource_name": "contacts",
+      "name": "Maarten",
+      "email": "maarten@example.test"
     }
   }
 }
 ```
 
-The GUI-managed MCP service lists published and enabled runner tools. Disabled tools remain visible in the GUI but are not exposed through MCP `tools/list`.
+The GUI-managed MCP service lists saved ready runners. Deleted or disabled runners are not exposed through MCP `tools/list`.
 
 ## From Prompt Or Recording To Tool
 
@@ -80,23 +81,23 @@ Create a draft runner from a prompt:
 
 ```bash
 greentic-desktop runner plan \
-  --prompt "Create CRM customer with company name and email and return customer id" \
-  --profile local-crm \
-  --out ./runners/crm.create_customer.draft.yaml
+  --prompt "Open a resource table, ask for resource_name, name, and email, append a row, save, and return saved_status" \
+  --profile local-web \
+  --out ./runners/generic.resource_append.draft.yaml
 ```
 
 Or create it from a recording:
 
 ```bash
 greentic-desktop record start \
-  --name crm.create_customer \
-  --profile local-crm \
+  --name generic.resource_append \
+  --profile local-web \
   --adapter greentic.desktop.playwright \
-  --out ./recordings/crm.create_customer
+  --out ./recordings/generic.resource_append
 
 greentic-desktop record normalise \
-  --recording ./recordings/crm.create_customer/raw \
-  --out ./runners/crm.create_customer.draft.yaml
+  --recording ./recordings/generic.resource_append/raw \
+  --out ./runners/generic.resource_append.draft.yaml
 ```
 
 After review, approval, packaging, and signing, the runner can be published as an MCP tool or converted into a forwarded tool for a managed desktop environment.

@@ -23,7 +23,11 @@ import type {
   RecordingTargetsDto,
   RecordingTestResultDto,
   RefinementResultDto,
+  RunnerDetailDto,
+  RunnerEditApplyResultDto,
+  RunnerEditDraftDto,
   RunnerActionResultDto,
+  RunnerVersionsDto,
   RunnersDto,
   RuntimeInfoDto,
   SetupChecklistDto,
@@ -31,8 +35,17 @@ import type {
 } from "./types";
 
 const API_BASE = "/api/v1";
-const guiToken =
-  typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("token");
+function guiToken() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const current = new URLSearchParams(window.location.search).get("token");
+  if (current) {
+    window.sessionStorage.setItem("greentic.gui.token", current);
+    return current;
+  }
+  return window.sessionStorage.getItem("greentic.gui.token") ?? "";
+}
 
 export class ApiClientError extends Error {
   readonly code: string;
@@ -47,13 +60,16 @@ export class ApiClientError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = guiToken();
+  // API_BASE is a same-origin constant and callers pass application route paths, not absolute user-controlled URLs.
+  // foxguard: ignore[js/no-ssrf]
   const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
     headers: {
       accept: "application/json",
-      ...(guiToken ? { "x-greentic-gui-token": guiToken } : {}),
+      ...(token ? { "x-greentic-gui-token": token } : {}),
       ...(init?.headers ?? {}),
     },
-    ...init,
   });
 
   const payload = (await response.json()) as ApiResponse<T>;
@@ -163,10 +179,52 @@ export const api = {
       jsonInit("POST"),
     ),
   runners: () => request<RunnersDto>("/runners"),
+  runner: (id: string) => request<RunnerDetailDto>(`/runners/${encodeURIComponent(id)}`),
   runnerAction: (id: string, action: string, inputs?: Record<string, string>) =>
     request<RunnerActionResultDto>(
       `/runners/${encodeURIComponent(id)}/${action}`,
       jsonInit("POST", inputs ? { inputs, ...inputs } : undefined),
+    ),
+  createRunnerEditDraft: (runnerId: string, instruction: string, mode = "extend") =>
+    request<RunnerEditDraftDto>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts`,
+      jsonInit("POST", { instruction, mode }),
+    ),
+  getRunnerEditDraft: (runnerId: string, draftId: string) =>
+    request<RunnerEditDraftDto>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts/${encodeURIComponent(draftId)}`,
+    ),
+  patchRunnerEditDraft: (runnerId: string, draftId: string, patch: Partial<RunnerEditDraftDto>) =>
+    request<RunnerEditDraftDto>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts/${encodeURIComponent(draftId)}`,
+      jsonInit("PATCH", patch),
+    ),
+  planRunnerEditDraft: (runnerId: string, draftId: string, instruction: string) =>
+    request<RunnerEditDraftDto>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts/${encodeURIComponent(draftId)}/plan`,
+      jsonInit("POST", { instruction }),
+    ),
+  testRunnerEditDraft: (runnerId: string, draftId: string, sampleInputs: Record<string, string>) =>
+    request<PlannerTestResultDto>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts/${encodeURIComponent(draftId)}/test`,
+      jsonInit("POST", { sampleInputs, ...sampleInputs }),
+    ),
+  applyRunnerEditDraft: (runnerId: string, draftId: string) =>
+    request<RunnerEditApplyResultDto>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts/${encodeURIComponent(draftId)}/apply`,
+      jsonInit("POST"),
+    ),
+  runnerVersions: (runnerId: string) =>
+    request<RunnerVersionsDto>(`/runners/${encodeURIComponent(runnerId)}/versions`),
+  restoreRunnerVersion: (runnerId: string, versionId: string) =>
+    request<RunnerEditApplyResultDto>(
+      `/runners/${encodeURIComponent(runnerId)}/versions/${encodeURIComponent(versionId)}/restore`,
+      jsonInit("POST"),
+    ),
+  deleteRunnerEditDraft: (runnerId: string, draftId: string) =>
+    request<{ draftId: string; sourceRunnerId: string; deleted: boolean }>(
+      `/runners/${encodeURIComponent(runnerId)}/edit-drafts/${encodeURIComponent(draftId)}`,
+      { method: "DELETE" },
     ),
   createRefinement: (runnerId: string, correction: string) =>
     request<RefinementResultDto>(
@@ -180,8 +238,8 @@ export const api = {
     ),
   recordings: () => request<RecordingsDto>("/recordings"),
   recordingTargets: () => request<RecordingTargetsDto>("/recording-targets"),
-  startRecording: (name: string, target: string) =>
-    request<RecordingSummaryDto>("/recordings", jsonInit("POST", { name, target })),
+  startRecording: (name: string, target: string, initialUrl?: string) =>
+    request<RecordingSummaryDto>("/recordings", jsonInit("POST", { name, target, initialUrl })),
   recording: (sessionId: string) =>
     request<RecordingSummaryDto>(`/recordings/${encodeURIComponent(sessionId)}`),
   recordingAction: (sessionId: string, action: string, value?: string) =>
@@ -194,10 +252,10 @@ export const api = {
       `/recordings/${encodeURIComponent(sessionId)}/normalise`,
       jsonInit("POST"),
     ),
-  testRecording: (sessionId: string) =>
+  testRecording: (sessionId: string, sampleInputs?: Record<string, string>) =>
     request<RecordingTestResultDto>(
       `/recordings/${encodeURIComponent(sessionId)}/test`,
-      jsonInit("POST"),
+      jsonInit("POST", sampleInputs ? { sampleInputs, ...sampleInputs } : undefined),
     ),
   finaliseRecording: (sessionId: string) =>
     request<RecordingFinaliseResultDto>(

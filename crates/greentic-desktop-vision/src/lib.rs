@@ -2,9 +2,14 @@ use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterError, AdapterResult, Assertion, AssertionResult, DesktopAdapter,
     Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
 };
+use greentic_desktop_recorder::{
+    RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
+    RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
+};
 use std::sync::{Arc, Mutex};
 
 pub const VISION_ADAPTER_ID: &str = "greentic.desktop.vision";
+pub const REMOTE_RECORDER_BACKEND_ID: &str = "greentic.recording.remote.vision";
 
 pub fn vision_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -44,6 +49,146 @@ pub struct VisualEvidence {
     pub confidence: f32,
     pub after_screenshot: String,
     pub explanation: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteViewportCalibration {
+    pub origin_x: u32,
+    pub origin_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub scale_percent: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteVisionRecordingBackend {
+    greentic_owned_session: bool,
+    screen_capture_available: bool,
+    input_control_available: bool,
+    calibration: Option<RemoteViewportCalibration>,
+}
+
+impl RemoteVisionRecordingBackend {
+    pub fn new(
+        greentic_owned_session: bool,
+        screen_capture_available: bool,
+        input_control_available: bool,
+        calibration: Option<RemoteViewportCalibration>,
+    ) -> Self {
+        Self {
+            greentic_owned_session,
+            screen_capture_available,
+            input_control_available,
+            calibration,
+        }
+    }
+}
+
+impl RecordingBackend for RemoteVisionRecordingBackend {
+    fn id(&self) -> &'static str {
+        REMOTE_RECORDER_BACKEND_ID
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        RecordingTargetKind::Remote
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        let mut reasons = Vec::new();
+        if !self.greentic_owned_session {
+            reasons.push(
+                "Remote recording requires a Greentic-owned RDP/VNC/WorkSpaces/browser canvas session."
+                    .to_owned(),
+            );
+        }
+        if !self.screen_capture_available {
+            reasons.push("Screen capture permission is required for remote recording.".to_owned());
+        }
+        if !self.input_control_available {
+            reasons.push(
+                "Keyboard and mouse control permission is required for replayable remote recording."
+                    .to_owned(),
+            );
+        }
+        if self.calibration.is_none() {
+            reasons.push(
+                "Remote viewport calibration is required before recording input coordinates."
+                    .to_owned(),
+            );
+        }
+
+        if reasons.is_empty() {
+            RecordingPreflight::ready()
+        } else {
+            RecordingPreflight {
+                available: false,
+                blocked_reasons: reasons,
+            }
+        }
+    }
+
+    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        let calibration = self.calibration.unwrap_or(RemoteViewportCalibration {
+            origin_x: 0,
+            origin_y: 0,
+            width: 0,
+            height: 0,
+            scale_percent: 100,
+        });
+        let mut event = RecordingEventEnvelope::new(
+            sink.session_id(),
+            REMOTE_RECORDER_BACKEND_ID,
+            RecordingTargetKind::Remote,
+            1,
+            "focus_session",
+        );
+        event.target_json = format!(
+            r#"{{"viewport":{{"x":{},"y":{},"width":{},"height":{},"scale_percent":{}}},"ownership":"greentic-owned"}}"#,
+            calibration.origin_x,
+            calibration.origin_y,
+            calibration.width,
+            calibration.height,
+            calibration.scale_percent
+        );
+        event.value = Some("remote viewport focused".to_owned());
+        event.screenshot_ref = Some("evidence://remote/initial.png".to_owned());
+        let _ = sink.append_event(event);
+        let _ = sink.update_heartbeat();
+
+        RecordingHandle {
+            backend_id: REMOTE_RECORDER_BACKEND_ID.to_owned(),
+            capture_state: RecordingCaptureState::Recording,
+        }
+    }
+}
+
+pub fn remote_recording_event(
+    session_id: &str,
+    sequence: u64,
+    kind: &str,
+    region: Region,
+    value: Option<String>,
+    screenshot_ref: Option<String>,
+) -> RecordingEventEnvelope {
+    let mut event = RecordingEventEnvelope::new(
+        session_id,
+        REMOTE_RECORDER_BACKEND_ID,
+        RecordingTargetKind::Remote,
+        sequence,
+        kind,
+    );
+    event.target_json = format!(
+        r#"{{"region":{{"x":{},"y":{},"width":{},"height":{}}}}}"#,
+        region.x, region.y, region.width, region.height
+    );
+    event.value = value;
+    event.redaction = if event.value.is_some() {
+        "input_candidate".to_owned()
+    } else {
+        "none".to_owned()
+    };
+    event.screenshot_ref = screenshot_ref;
+    event
 }
 
 #[derive(Debug, Clone, Default)]
@@ -309,5 +454,52 @@ mod tests {
 
         assert!(!result.passed);
         assert!(result.message.contains("differs"));
+    }
+
+    #[test]
+    fn remote_recording_backend_blocks_missing_screen_capture_and_calibration() {
+        let backend = RemoteVisionRecordingBackend::new(true, false, true, None);
+        let preflight = backend.preflight(&RecordingStartRequest {
+            name: "remote.record".to_owned(),
+            profile: "remote".to_owned(),
+            adapter: VISION_ADAPTER_ID.to_owned(),
+            target_kind: RecordingTargetKind::Remote,
+            out: std::env::temp_dir().join("remote-record"),
+            runtime_home: std::env::temp_dir().join("remote-record-home"),
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        });
+
+        assert!(!preflight.available);
+        assert!(preflight
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("Screen capture permission")));
+        assert!(preflight
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("viewport calibration")));
+    }
+
+    #[test]
+    fn remote_recording_event_includes_region_and_screenshot_evidence() {
+        let event = remote_recording_event(
+            "rec_remote",
+            4,
+            "click_region",
+            Region {
+                x: 12,
+                y: 20,
+                width: 80,
+                height: 24,
+            },
+            None,
+            Some("evidence://remote/after-click.png".to_owned()),
+        );
+
+        let json = event.render_json();
+        assert!(json.contains("\"target_kind\":\"remote\""));
+        assert!(json.contains("\"x\":12"));
+        assert!(json.contains("after-click.png"));
     }
 }

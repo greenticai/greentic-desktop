@@ -1,4 +1,4 @@
-use greentic_desktop_adapter::{LocatorTarget, RunnerStep};
+use greentic_desktop_adapter::{AdapterCapabilities, LocatorTarget, RunnerStep};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -231,6 +231,7 @@ pub enum WorkflowCompileError {
     MissingOutputExtractor(String),
     UnsupportedTargetKind(String),
     UnsupportedAction { target: String, action: String },
+    MissingSemanticCapability(String),
 }
 
 impl fmt::Display for WorkflowCompileError {
@@ -251,6 +252,9 @@ impl fmt::Display for WorkflowCompileError {
                     "unsupported action {action} for workflow target {target}"
                 )
             }
+            Self::MissingSemanticCapability(capability) => {
+                write!(f, "no adapter supports semantic capability {capability}")
+            }
         }
     }
 }
@@ -258,6 +262,154 @@ impl fmt::Display for WorkflowCompileError {
 impl std::error::Error for WorkflowCompileError {}
 
 pub type WorkflowCompileOutcome<T> = Result<T, WorkflowCompileError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticCapability {
+    OpenTarget,
+    OpenResource,
+    CreateResourceIfMissing,
+    Attach,
+    Find,
+    Input,
+    Command,
+    Save,
+    Extract,
+    Assert,
+}
+
+impl SemanticCapability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OpenTarget => "open.target",
+            Self::OpenResource => "open.resource",
+            Self::CreateResourceIfMissing => "resource.create_if_missing",
+            Self::Attach => "app.attach",
+            Self::Find => "ui.find",
+            Self::Input => "ui.input",
+            Self::Command => "ui.command",
+            Self::Save => "ui.save",
+            Self::Extract => "ui.extract",
+            Self::Assert => "ui.assert",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticCapabilityRoute {
+    pub semantic: SemanticCapability,
+    pub adapter_id: String,
+    pub concrete_capability: String,
+}
+
+pub fn route_semantic_capability(
+    semantic: SemanticCapability,
+    adapters: &[AdapterCapabilities],
+) -> WorkflowCompileOutcome<SemanticCapabilityRoute> {
+    for adapter in adapters {
+        for candidate in semantic_capability_candidates(semantic) {
+            if adapter.supports(candidate) {
+                return Ok(SemanticCapabilityRoute {
+                    semantic,
+                    adapter_id: adapter.adapter_id.clone(),
+                    concrete_capability: (*candidate).to_owned(),
+                });
+            }
+        }
+    }
+    Err(WorkflowCompileError::MissingSemanticCapability(
+        semantic.as_str().to_owned(),
+    ))
+}
+
+pub fn route_semantic_capabilities(
+    semantics: &[SemanticCapability],
+    adapters: &[AdapterCapabilities],
+) -> WorkflowCompileOutcome<Vec<SemanticCapabilityRoute>> {
+    semantics
+        .iter()
+        .copied()
+        .map(|semantic| route_semantic_capability(semantic, adapters))
+        .collect()
+}
+
+fn semantic_capability_candidates(semantic: SemanticCapability) -> &'static [&'static str] {
+    match semantic {
+        SemanticCapability::OpenTarget => &[
+            "web.goto",
+            "windows.open_app",
+            "macos.activate_app",
+            "linux.find_window",
+            "java.find_window",
+            "terminal.connect",
+        ],
+        SemanticCapability::OpenResource => &[
+            "web.goto",
+            "windows.open_app",
+            "macos.activate_app",
+            "linux.find_window",
+            "terminal.connect",
+        ],
+        SemanticCapability::CreateResourceIfMissing => &[
+            "web.fill",
+            "windows.type_text",
+            "macos.type_text",
+            "linux.type_text",
+            "terminal.send_text",
+        ],
+        SemanticCapability::Attach => &[
+            "windows.find_window",
+            "macos.find_window",
+            "linux.find_window",
+            "java.find_window",
+        ],
+        SemanticCapability::Find => &[
+            "web.wait_for",
+            "windows.find_element",
+            "macos.find_element",
+            "linux.find_element",
+            "java.find_component",
+            "vision.find_text",
+        ],
+        SemanticCapability::Input => &[
+            "web.fill",
+            "web.press",
+            "windows.type_text",
+            "macos.type_text",
+            "linux.type_text",
+            "java.type_text",
+            "terminal.send_text",
+        ],
+        SemanticCapability::Command | SemanticCapability::Save => &[
+            "web.click",
+            "web.press",
+            "windows.click_element",
+            "macos.click_element",
+            "linux.click_element",
+            "terminal.send_keys",
+            "terminal.send_text",
+        ],
+        SemanticCapability::Extract => &[
+            "web.extract_text",
+            "web.extract_regex",
+            "windows.read_text",
+            "macos.read_text",
+            "linux.read_text",
+            "java.read_text",
+            "terminal.extract_field",
+            "vision.extract_text",
+        ],
+        SemanticCapability::Assert => &[
+            "web.assert_visible",
+            "web.assert_url",
+            "windows.assert_visible",
+            "macos.assert_visible",
+            "linux.assert_visible",
+            "java.assert_visible",
+            "terminal.wait_for_screen",
+            "vision.assert_visible",
+        ],
+    }
+}
 
 pub fn compile_workflow(
     workflow: &DesktopWorkflow,
@@ -899,6 +1051,77 @@ mod tests {
         assert!(matches!(
             compile_workflow(&workflow),
             Err(WorkflowCompileError::MissingOpenTarget("app_name"))
+        ));
+    }
+
+    #[test]
+    fn routes_semantic_capabilities_to_web_adapter() {
+        let adapters = vec![AdapterCapabilities::new(
+            "greentic.desktop.playwright",
+            "1.0.0",
+            ["web.goto", "web.fill", "web.click", "web.extract_text"],
+        )];
+
+        let routes = route_semantic_capabilities(
+            &[
+                SemanticCapability::OpenTarget,
+                SemanticCapability::Input,
+                SemanticCapability::Save,
+                SemanticCapability::Extract,
+            ],
+            &adapters,
+        )
+        .expect("web semantic capabilities should route");
+
+        assert_eq!(routes[0].concrete_capability, "web.goto");
+        assert_eq!(routes[1].concrete_capability, "web.fill");
+        assert_eq!(routes[2].concrete_capability, "web.click");
+        assert_eq!(routes[3].concrete_capability, "web.extract_text");
+    }
+
+    #[test]
+    fn routes_semantic_capabilities_to_native_adapter() {
+        let adapters = vec![AdapterCapabilities::new(
+            "greentic.desktop.macos.ax",
+            "1.0.0",
+            [
+                "macos.activate_app",
+                "macos.find_element",
+                "macos.type_text",
+                "macos.click_element",
+                "macos.read_text",
+            ],
+        )];
+
+        assert_eq!(
+            route_semantic_capability(SemanticCapability::OpenTarget, &adapters)
+                .expect("open should route")
+                .concrete_capability,
+            "macos.activate_app"
+        );
+        assert_eq!(
+            route_semantic_capability(SemanticCapability::Input, &adapters)
+                .expect("input should route")
+                .concrete_capability,
+            "macos.type_text"
+        );
+        assert_eq!(
+            route_semantic_capability(SemanticCapability::Extract, &adapters)
+                .expect("extract should route")
+                .concrete_capability,
+            "macos.read_text"
+        );
+    }
+
+    #[test]
+    fn reports_missing_semantic_capability() {
+        let err = route_semantic_capability(SemanticCapability::Save, &[])
+            .expect_err("missing semantic capability should fail");
+
+        assert!(matches!(
+            err,
+            WorkflowCompileError::MissingSemanticCapability(capability)
+                if capability == "ui.save"
         ));
     }
 }

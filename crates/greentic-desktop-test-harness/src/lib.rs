@@ -10,6 +10,7 @@ use greentic_desktop_macos::{
     MacOsAppWorkflow, MacOsAppWorkflowOutcome,
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_recorder::normalise_recording;
 use greentic_desktop_runtime::DesktopRuntime;
 use greentic_desktop_terminal::{
     run_terminal_workflow, TerminalAdapter, TerminalWorkflow, TerminalWorkflowOutcome,
@@ -347,6 +348,89 @@ pub fn ubuntu_wayland_harness_detects_limitations() -> Vec<String> {
     detect_wayland_support(&info, WaylandCompositor::GnomeMutter, false, false).diagnostics
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingMatrixCase {
+    pub target: String,
+    pub fixture: String,
+    pub expected_capability: String,
+    pub expected_output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingMatrixResult {
+    pub target: String,
+    pub passed: bool,
+    pub semantic_steps: usize,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+pub fn recording_e2e_matrix_cases() -> Vec<RecordingMatrixCase> {
+    vec![
+        RecordingMatrixCase {
+            target: "web".to_owned(),
+            fixture: "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"navigate\",\"target\":{},\"value\":\"http://fixture/generic-resource-table\",\"redaction\":\"none\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"input\",\"target\":{\"label\":\"resource name\"},\"value\":\"{{inputs.resource_name}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"input\",\"target\":{\"label\":\"name\"},\"value\":\"{{inputs.name}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"input\",\"target\":{\"label\":\"email\"},\"value\":\"{{inputs.email}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"click\",\"target\":{\"role\":\"button\",\"name\":\"Save row\"},\"value\":null,\"redaction\":\"none\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"read_text\",\"target\":{\"label\":\"saved status\"},\"value\":\"Saved row\",\"redaction\":\"none\"},\"evidence\":{}}\n".to_owned(),
+            expected_capability: "web.click".to_owned(),
+            expected_output: "outputs.saved_status".to_owned(),
+        },
+        RecordingMatrixCase {
+            target: "terminal".to_owned(),
+            fixture: "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"terminal\",\"event\":{\"kind\":\"send_text\",\"target\":{\"label\":\"resource name\"},\"value\":\"{{inputs.resource_name}}\",\"redaction\":\"input_candidate\"},\"evidence\":{\"terminal_buffer_ref\":\"evidence://terminal/before.txt\"}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"terminal\",\"event\":{\"kind\":\"send_text\",\"target\":{\"label\":\"name\"},\"value\":\"{{inputs.name}}\",\"redaction\":\"input_candidate\"},\"evidence\":{\"terminal_buffer_ref\":\"evidence://terminal/name.txt\"}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"terminal\",\"event\":{\"kind\":\"send_text\",\"target\":{\"label\":\"email\"},\"value\":\"{{inputs.email}}\",\"redaction\":\"input_candidate\"},\"evidence\":{\"terminal_buffer_ref\":\"evidence://terminal/email.txt\"}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"terminal\",\"event\":{\"kind\":\"extract_field\",\"target\":{\"label\":\"saved status\"},\"value\":\"Saved row\",\"redaction\":\"none\"},\"evidence\":{\"terminal_buffer_ref\":\"evidence://terminal/after.txt\"}}\n".to_owned(),
+            expected_capability: "terminal.wait_for_screen".to_owned(),
+            expected_output: "outputs.saved_status".to_owned(),
+        },
+        RecordingMatrixCase {
+            target: "remote".to_owned(),
+            fixture: "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"remote\",\"event\":{\"kind\":\"click_region\",\"target\":{\"label\":\"open resource\",\"region\":{\"x\":10,\"y\":10,\"width\":120,\"height\":24}},\"value\":null,\"redaction\":\"none\"},\"evidence\":{\"screenshot_ref\":\"evidence://remote/open-resource.png\"}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"remote\",\"event\":{\"kind\":\"extract_text_region\",\"target\":{\"label\":\"saved status\",\"region\":{\"x\":40,\"y\":40,\"width\":160,\"height\":24}},\"value\":\"Saved row\",\"redaction\":\"none\"},\"evidence\":{\"screenshot_ref\":\"evidence://remote/saved-status.png\"}}\n".to_owned(),
+            expected_capability: "remote.click_region".to_owned(),
+            expected_output: "outputs.saved_status".to_owned(),
+        },
+    ]
+}
+
+pub fn run_recording_e2e_matrix() -> Result<Vec<RecordingMatrixResult>, String> {
+    recording_e2e_matrix_cases()
+        .into_iter()
+        .map(|case| {
+            let root = std::env::temp_dir().join(format!(
+                "greentic-recording-matrix-{}-{}",
+                case.target,
+                std::process::id()
+            ));
+            if root.exists() {
+                std::fs::remove_dir_all(&root).map_err(|err| err.to_string())?;
+            }
+            let raw = root.join("raw");
+            std::fs::create_dir_all(&raw).map_err(|err| err.to_string())?;
+            std::fs::write(raw.join("events.jsonl"), &case.fixture)
+                .map_err(|err| err.to_string())?;
+            let package = normalise_recording(&raw, &root.join("runner.yaml"))
+                .map_err(|err| err.to_string())?;
+            let yaml =
+                std::fs::read_to_string(root.join("runner.yaml")).map_err(|err| err.to_string())?;
+            let passed = package
+                .steps
+                .iter()
+                .any(|step| step.required_capability == case.expected_capability)
+                && package.outputs.contains(&case.expected_output)
+                && !yaml.contains("sample-output")
+                && !yaml.contains("recording.recorded")
+                && !yaml.contains("company_name")
+                && !yaml.contains("acme")
+                && !yaml.contains("calculator");
+            let result = RecordingMatrixResult {
+                target: case.target,
+                passed,
+                semantic_steps: package.steps.len(),
+                inputs: package.inputs,
+                outputs: package.outputs,
+            };
+            let _ = std::fs::remove_dir_all(root);
+            Ok(result)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,57 +455,83 @@ mod tests {
         WindowsWorkflowOutput,
     };
 
-    fn calculator_workflow_fixture(
-        number_1: &str,
-        operation: &str,
-        number_2: &str,
-        expected_result: &str,
+    fn macos_generic_resource_workflow_fixture(
+        resource_name: &str,
+        name: &str,
+        email: &str,
+        expected_status: &str,
     ) -> MacOsAppWorkflow {
-        let calculator_display = stable_macos_target(&MacOsElementMetadata {
-            ax_identifier: Some("calculator-display".to_owned()),
-            ax_title: Some("Display".to_owned()),
+        let resource_field = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("resource-name-field".to_owned()),
+            ax_title: Some("Resource name".to_owned()),
+            ax_role: Some("AXTextField".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Resource name".to_owned()),
+            visual_region: Some("top".to_owned()),
+        });
+        let name_field = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("row-name-field".to_owned()),
+            ax_title: Some("Name".to_owned()),
+            ax_role: Some("AXTextField".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Name".to_owned()),
+            visual_region: Some("center".to_owned()),
+        });
+        let email_field = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("row-email-field".to_owned()),
+            ax_title: Some("Email".to_owned()),
+            ax_role: Some("AXTextField".to_owned()),
+            ax_value: None,
+            nearby_text: Some("Email".to_owned()),
+            visual_region: Some("center".to_owned()),
+        });
+        let status_label = stable_macos_target(&MacOsElementMetadata {
+            ax_identifier: Some("saved-status".to_owned()),
+            ax_title: Some("Saved status".to_owned()),
             ax_role: Some("AXStaticText".to_owned()),
             ax_value: None,
-            nearby_text: Some("Calculator".to_owned()),
-            visual_region: Some("top".to_owned()),
+            nearby_text: Some("Saved status".to_owned()),
+            visual_region: Some("bottom".to_owned()),
         });
 
         MacOsAppWorkflow {
-            app_name: "Calculator".to_owned(),
-            window_title: "Calculator".to_owned(),
-            prompt: "Open Calculator and complete the supplied operation.".to_owned(),
+            app_name: "Generic Resource Fixture".to_owned(),
+            window_title: "Generic Resource Fixture".to_owned(),
+            prompt:
+                "Open a generic resource editor, create or open the resource, append row fields, and save."
+                    .to_owned(),
             inputs: vec![
                 MacOsWorkflowInput {
-                    name: "number 1".to_owned(),
-                    target: calculator_display.clone(),
-                    value: number_1.to_owned(),
+                    name: "resource_name".to_owned(),
+                    target: resource_field,
+                    value: resource_name.to_owned(),
                 },
                 MacOsWorkflowInput {
-                    name: "operation".to_owned(),
-                    target: calculator_display.clone(),
-                    value: operation.to_owned(),
+                    name: "name".to_owned(),
+                    target: name_field,
+                    value: name.to_owned(),
                 },
                 MacOsWorkflowInput {
-                    name: "number 2".to_owned(),
-                    target: calculator_display.clone(),
-                    value: number_2.to_owned(),
+                    name: "email".to_owned(),
+                    target: email_field,
+                    value: email.to_owned(),
                 },
             ],
             submit: Some(MacOsWorkflowAction {
-                name: "equals".to_owned(),
+                name: "save row".to_owned(),
                 target: stable_macos_target(&MacOsElementMetadata {
-                    ax_identifier: Some("equals".to_owned()),
-                    ax_title: Some("Equals".to_owned()),
+                    ax_identifier: Some("save-row-button".to_owned()),
+                    ax_title: Some("Save row".to_owned()),
                     ax_role: Some("AXButton".to_owned()),
                     ax_value: None,
-                    nearby_text: Some("Calculator".to_owned()),
-                    visual_region: Some("keypad".to_owned()),
+                    nearby_text: Some("Email".to_owned()),
+                    visual_region: Some("bottom_right".to_owned()),
                 }),
             }),
             outputs: vec![MacOsWorkflowOutput {
-                name: "result".to_owned(),
-                target: calculator_display,
-                expected: Some(expected_result.to_owned()),
+                name: "saved_status".to_owned(),
+                target: status_label,
+                expected: Some(expected_status.to_owned()),
             }],
         }
     }
@@ -515,6 +625,33 @@ mod tests {
                 target: result,
                 expected: Some("accepted".to_owned()),
             }],
+        }
+    }
+
+    #[test]
+    fn recording_e2e_matrix_normalises_semantic_runners_without_placeholders() {
+        let results = run_recording_e2e_matrix().expect("recording matrix should run");
+
+        assert_eq!(results.len(), 3);
+        for result in results {
+            assert!(result.passed, "{result:?}");
+            assert!(result.semantic_steps > 0, "{result:?}");
+            assert!(!result.outputs.is_empty(), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn recording_e2e_matrix_uses_generic_resource_fixtures() {
+        for case in recording_e2e_matrix_cases() {
+            let lower = case.fixture.to_ascii_lowercase();
+            assert!(lower.contains("resource") || lower.contains("saved row"));
+            assert!(!lower.contains("calculator"), "{lower}");
+            assert!(!lower.contains("acme"), "{lower}");
+            assert!(!lower.contains("sample-output"), "{lower}");
+            assert!(
+                lower.contains("{{inputs.resource_name}}") || case.target == "remote",
+                "{lower}"
+            );
         }
     }
 
@@ -733,12 +870,19 @@ mod tests {
 
     #[test]
     fn macos_app_workflow_e2e_installs_extension_and_returns_output() {
-        let outcome =
-            macos_app_workflow_e2e_result(calculator_workflow_fixture("1", "+", "1", "2"))
-                .expect("macos app workflow e2e should pass");
+        let outcome = macos_app_workflow_e2e_result(macos_generic_resource_workflow_fixture(
+            "contacts",
+            "Maarten",
+            "maarten@example.test",
+            "Saved row",
+        ))
+        .expect("macos app workflow e2e should pass");
 
-        assert_eq!(outcome.outputs.get("result"), Some(&"2".to_owned()));
-        assert!(outcome.prompt.contains("Open Calculator"));
+        assert_eq!(
+            outcome.outputs.get("saved_status"),
+            Some(&"Saved row".to_owned())
+        );
+        assert!(outcome.prompt.contains("generic resource editor"));
         assert!(outcome.steps.iter().all(|step| step.success));
     }
 }

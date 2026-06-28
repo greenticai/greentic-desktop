@@ -4,6 +4,10 @@ use greentic_desktop_adapter::{
     StepResult, VisualLocator,
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_recorder::{
+    RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
+    RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
@@ -14,6 +18,8 @@ use std::sync::{Arc, Mutex};
 
 pub const LINUX_X11_ADAPTER_ID: &str = "greentic.desktop.linux.x11";
 pub const LINUX_WAYLAND_ADAPTER_ID: &str = "greentic.desktop.linux.wayland";
+pub const LINUX_X11_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.linux.x11";
+pub const LINUX_WAYLAND_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.linux.wayland";
 
 pub fn linux_x11_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -76,6 +82,136 @@ pub fn stable_linux_target(metadata: &LinuxElementMetadata) -> LocatorTarget {
             nearby_text: metadata.nearby_text.clone(),
         }),
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinuxX11RecordingBackend {
+    platform: PlatformInfo,
+}
+
+impl LinuxX11RecordingBackend {
+    pub fn new(platform: PlatformInfo) -> Self {
+        Self { platform }
+    }
+}
+
+impl RecordingBackend for LinuxX11RecordingBackend {
+    fn id(&self) -> &'static str {
+        LINUX_X11_RECORDER_BACKEND_ID
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        RecordingTargetKind::Desktop
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        let status = detect_x11_session(&self.platform);
+        if !linux_event_source_configured("x11") {
+            RecordingPreflight::blocked(
+                "Install or start the Linux X11/AT-SPI event source before desktop recording.",
+            )
+        } else if status.is_x11 && status.diagnostics.is_empty() {
+            RecordingPreflight::ready()
+        } else {
+            RecordingPreflight {
+                available: false,
+                blocked_reasons: status.diagnostics,
+            }
+        }
+    }
+
+    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        let mut event = RecordingEventEnvelope::new(
+            sink.session_id(),
+            LINUX_X11_RECORDER_BACKEND_ID,
+            RecordingTargetKind::Desktop,
+            1,
+            "activate_window",
+        );
+        event.target_json =
+            r#"{"platform":"linux","display_server":"x11","api":"AT-SPI/XTest"}"#.to_owned();
+        event.value = Some("focused X11 application".to_owned());
+        event.ui_tree_ref = Some("evidence://ui-tree/linux-x11/focused.json".to_owned());
+        let _ = sink.append_event(event);
+        let _ = sink.update_heartbeat();
+
+        RecordingHandle {
+            backend_id: LINUX_X11_RECORDER_BACKEND_ID.to_owned(),
+            capture_state: RecordingCaptureState::Recording,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinuxWaylandRecordingBackend {
+    support: WaylandSupport,
+}
+
+impl LinuxWaylandRecordingBackend {
+    pub fn new(support: WaylandSupport) -> Self {
+        Self { support }
+    }
+}
+
+impl RecordingBackend for LinuxWaylandRecordingBackend {
+    fn id(&self) -> &'static str {
+        LINUX_WAYLAND_RECORDER_BACKEND_ID
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        RecordingTargetKind::Desktop
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        if !linux_event_source_configured("wayland") {
+            RecordingPreflight::blocked(
+                "Install or start the Linux Wayland portal/AT-SPI event source before desktop recording.",
+            )
+        } else if self.support.is_wayland
+            && self.support.portal_screenshot_available
+            && self.support.at_spi_available
+            && self.support.global_window_introspection_supported
+        {
+            RecordingPreflight::ready()
+        } else {
+            RecordingPreflight {
+                available: false,
+                blocked_reasons: self.support.diagnostics.clone(),
+            }
+        }
+    }
+
+    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        let mut event = RecordingEventEnvelope::new(
+            sink.session_id(),
+            LINUX_WAYLAND_RECORDER_BACKEND_ID,
+            RecordingTargetKind::Desktop,
+            1,
+            "observe",
+        );
+        event.target_json =
+            r#"{"platform":"linux","display_server":"wayland","api":"portal"}"#.to_owned();
+        event.value = Some("Wayland portal observation started".to_owned());
+        event.screenshot_ref = Some("evidence://screenshots/linux-wayland/initial.png".to_owned());
+        let _ = sink.append_event(event);
+        let _ = sink.update_heartbeat();
+
+        RecordingHandle {
+            backend_id: LINUX_WAYLAND_RECORDER_BACKEND_ID.to_owned(),
+            capture_state: RecordingCaptureState::Recording,
+        }
+    }
+}
+
+fn linux_event_source_configured(display: &str) -> bool {
+    let specific = format!(
+        "GREENTIC_LINUX_{}_EVENT_SOURCE",
+        display.to_ascii_uppercase()
+    );
+    std::env::var(&specific)
+        .or_else(|_| std::env::var("GREENTIC_LINUX_EVENT_SOURCE"))
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1168,5 +1304,53 @@ mod tests {
             .expect("safe shortcut should pass");
 
         assert!(result.success);
+    }
+
+    #[test]
+    fn x11_recording_backend_is_available_with_required_permissions() {
+        std::env::set_var("GREENTIC_LINUX_X11_EVENT_SOURCE", "1");
+        let backend = LinuxX11RecordingBackend::new(x11_platform());
+        let preflight = backend.preflight(&RecordingStartRequest {
+            name: "linux.record".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: LINUX_X11_ADAPTER_ID.to_owned(),
+            target_kind: RecordingTargetKind::Desktop,
+            out: std::env::temp_dir().join("linux-record"),
+            runtime_home: std::env::temp_dir().join("linux-record-home"),
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        });
+
+        assert!(preflight.available);
+        std::env::remove_var("GREENTIC_LINUX_X11_EVENT_SOURCE");
+    }
+
+    #[test]
+    fn wayland_recording_backend_blocks_global_capture_limitations() {
+        std::env::set_var("GREENTIC_LINUX_WAYLAND_EVENT_SOURCE", "1");
+        let support = detect_wayland_support(
+            &wayland_platform(),
+            WaylandCompositor::GnomeMutter,
+            true,
+            true,
+        );
+        let backend = LinuxWaylandRecordingBackend::new(support);
+        let preflight = backend.preflight(&RecordingStartRequest {
+            name: "linux.wayland.record".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: LINUX_WAYLAND_ADAPTER_ID.to_owned(),
+            target_kind: RecordingTargetKind::Desktop,
+            out: std::env::temp_dir().join("linux-wayland-record"),
+            runtime_home: std::env::temp_dir().join("linux-wayland-record-home"),
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        });
+
+        assert!(!preflight.available);
+        assert!(preflight
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("Global input injection")));
+        std::env::remove_var("GREENTIC_LINUX_WAYLAND_EVENT_SOURCE");
     }
 }

@@ -14,6 +14,7 @@ import { Route as RunnersRouteImport } from './routes/runners'
 import { Route as McpRouteImport } from './routes/mcp'
 import { Route as CreateRouteImport } from './routes/create'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as RunnersRunnerIdEditRouteImport } from './routes/runners.$runnerId.edit'
 
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
@@ -40,42 +41,69 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RunnersRunnerIdEditRoute = RunnersRunnerIdEditRouteImport.update({
+  id: '/$runnerId/edit',
+  path: '/$runnerId/edit',
+  getParentRoute: () => RunnersRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/create': typeof CreateRoute
   '/mcp': typeof McpRoute
-  '/runners': typeof RunnersRoute
+  '/runners': typeof RunnersRouteWithChildren
   '/settings': typeof SettingsRoute
+  '/runners/$runnerId/edit': typeof RunnersRunnerIdEditRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/create': typeof CreateRoute
   '/mcp': typeof McpRoute
-  '/runners': typeof RunnersRoute
+  '/runners': typeof RunnersRouteWithChildren
   '/settings': typeof SettingsRoute
+  '/runners/$runnerId/edit': typeof RunnersRunnerIdEditRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/create': typeof CreateRoute
   '/mcp': typeof McpRoute
-  '/runners': typeof RunnersRoute
+  '/runners': typeof RunnersRouteWithChildren
   '/settings': typeof SettingsRoute
+  '/runners/$runnerId/edit': typeof RunnersRunnerIdEditRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/create' | '/mcp' | '/runners' | '/settings'
+  fullPaths:
+    | '/'
+    | '/create'
+    | '/mcp'
+    | '/runners'
+    | '/settings'
+    | '/runners/$runnerId/edit'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/create' | '/mcp' | '/runners' | '/settings'
-  id: '__root__' | '/' | '/create' | '/mcp' | '/runners' | '/settings'
+  to:
+    | '/'
+    | '/create'
+    | '/mcp'
+    | '/runners'
+    | '/settings'
+    | '/runners/$runnerId/edit'
+  id:
+    | '__root__'
+    | '/'
+    | '/create'
+    | '/mcp'
+    | '/runners'
+    | '/settings'
+    | '/runners/$runnerId/edit'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CreateRoute: typeof CreateRoute
   McpRoute: typeof McpRoute
-  RunnersRoute: typeof RunnersRoute
+  RunnersRoute: typeof RunnersRouteWithChildren
   SettingsRoute: typeof SettingsRoute
 }
 
@@ -116,14 +144,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/runners/$runnerId/edit': {
+      id: '/runners/$runnerId/edit'
+      path: '/$runnerId/edit'
+      fullPath: '/runners/$runnerId/edit'
+      preLoaderRoute: typeof RunnersRunnerIdEditRouteImport
+      parentRoute: typeof RunnersRoute
+    }
   }
 }
+
+interface RunnersRouteChildren {
+  RunnersRunnerIdEditRoute: typeof RunnersRunnerIdEditRoute
+}
+
+const RunnersRouteChildren: RunnersRouteChildren = {
+  RunnersRunnerIdEditRoute: RunnersRunnerIdEditRoute,
+}
+
+const RunnersRouteWithChildren =
+  RunnersRoute._addFileChildren(RunnersRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CreateRoute: CreateRoute,
   McpRoute: McpRoute,
-  RunnersRoute: RunnersRoute,
+  RunnersRoute: RunnersRouteWithChildren,
   SettingsRoute: SettingsRoute,
 }
 export const routeTree = rootRouteImport

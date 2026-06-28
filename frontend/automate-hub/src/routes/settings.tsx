@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,8 +41,8 @@ function approvalForExtension(extension: ExtensionDto) {
   }
 
   const requiresApproval =
-    permissions.has("screen_capture") ||
-    permissions.has("keyboard_mouse") ||
+    needsScreenCaptureApproval(permissions) ||
+    needsKeyboardMouseApproval(permissions) ||
     permissions.has("filesystem.write");
   if (!requiresApproval) {
     return {};
@@ -56,10 +56,27 @@ function approvalForExtension(extension: ExtensionDto) {
   }
 
   return {
-    approveScreenCapture: permissions.has("screen_capture"),
-    approveKeyboardMouse: permissions.has("keyboard_mouse"),
+    approveScreenCapture: needsScreenCaptureApproval(permissions),
+    approveKeyboardMouse: needsKeyboardMouseApproval(permissions),
     approveFilesystemWrite: permissions.has("filesystem.write"),
   };
+}
+
+function needsScreenCaptureApproval(permissions: Set<string>) {
+  return (
+    permissions.has("screen_capture") ||
+    permissions.has("desktop.screenshot") ||
+    permissions.has("desktop.screen_recording") ||
+    permissions.has("desktop.portal_screenshot")
+  );
+}
+
+function needsKeyboardMouseApproval(permissions: Set<string>) {
+  return (
+    permissions.has("keyboard_mouse") ||
+    permissions.has("desktop.input") ||
+    permissions.has("desktop.input_monitoring")
+  );
 }
 
 function Card({
@@ -83,6 +100,7 @@ function Card({
 }
 
 function SettingsPage() {
+  const queryClient = useQueryClient();
   const [advanced, setAdvanced] = useState(false);
   const [query, setQuery] = useState("");
   const [actionStatus, setActionStatus] = useState<string | null>(null);
@@ -100,10 +118,12 @@ function SettingsPage() {
   });
   const llm = useQuery({ queryKey: ["llm-settings"], queryFn: api.llmSettings });
   const [llmDraft, setLlmDraft] = useState<LlmSettingsDto | null>(null);
+  const [llmApiKey, setLlmApiKey] = useState("");
 
   useEffect(() => {
     if (llm.data) {
       setLlmDraft(llm.data);
+      setLlmApiKey("");
     }
   }, [llm.data]);
 
@@ -112,7 +132,15 @@ function SettingsPage() {
       action === "install"
         ? api.installExtension(`store://${extension.id}`, "latest", approvalForExtension(extension))
         : api.extensionAction(extension.id, action),
-    onSuccess: (result) => setActionStatus(`${result.id ?? "extension"}: ${result.status}`),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["extensions-installed"] }),
+        queryClient.refetchQueries({ queryKey: ["extensions-recommended"] }),
+        queryClient.refetchQueries({ queryKey: ["setup-checklist"] }),
+        queryClient.refetchQueries({ queryKey: ["runtime-info"] }),
+      ]);
+      setActionStatus(`${result.id ?? "extension"}: ${result.status}`);
+    },
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Action failed"),
   });
   const testLlm = useMutation({
@@ -126,9 +154,14 @@ function SettingsPage() {
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Setup failed"),
   });
   const saveLlm = useMutation({
-    mutationFn: () => api.saveLlmSettings(llmDraft!),
+    mutationFn: () =>
+      api.saveLlmSettings({
+        ...llmDraft!,
+        apiKey: llmApiKey.trim() ? llmApiKey : undefined,
+      }),
     onSuccess: (settings) => {
       setLlmDraft(settings);
+      setLlmApiKey("");
       setActionStatus("LLM settings saved");
     },
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Save failed"),
@@ -239,7 +272,9 @@ function SettingsPage() {
                   endpoint: provider.endpoint,
                   secretRef: provider.secretName ? `secret://${provider.secretName}` : null,
                   mode: provider.mode,
+                  hasApiKey: provider.hasApiKey,
                 });
+                setLlmApiKey("");
               }}
             >
               <SelectTrigger className="mt-1.5">
@@ -264,9 +299,26 @@ function SettingsPage() {
             <Input className="mt-1.5" readOnly value={llmDraft?.model ?? ""} />
           </div>
         </div>
-        {selectedProvider?.secretName && (
-          <div className="mt-3 text-xs text-muted-foreground">
-            API key is read from {selectedProvider.secretName}.
+        {selectedProvider?.requiresApiKey && (
+          <div className="mt-4">
+            <Label>{selectedProvider.name} API key</Label>
+            <Input
+              className="mt-1.5"
+              type="password"
+              value={llmApiKey}
+              placeholder={
+                selectedProvider.hasApiKey || llmDraft?.hasApiKey
+                  ? "Saved in greentic-secrets; enter a new key to replace it"
+                  : `Enter ${selectedProvider.secretName ?? "provider API key"}`
+              }
+              onChange={(event) => setLlmApiKey(event.target.value)}
+            />
+            <div className="mt-1.5 text-xs text-muted-foreground">
+              Stored as {selectedProvider.secretName} in the current Greentic secrets store.
+              {selectedProvider.hasApiKey || llmDraft?.hasApiKey
+                ? " A key is already saved."
+                : " No key is saved yet."}
+            </div>
           </div>
         )}
         <div className="mt-4 flex gap-2">

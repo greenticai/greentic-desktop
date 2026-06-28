@@ -8,6 +8,8 @@ Greentic Desktop supports three ways to create a runner:
 
 The GUI path is usually easiest: open **Create**, choose recording, mark inputs and outputs during review, normalise the recording, test it, and finalise the runner. See [Automate Hub GUI](gui.md).
 
+For target-specific recording ownership, permissions, blocked states, and local test commands, see [Recording Runbooks](recording-runbooks.md).
+
 ## Recording
 
 A recording captures events such as clicks, fills, target metadata, values, timestamps, adapter names, and optional screenshot references.
@@ -18,10 +20,10 @@ Start a recording session with a name, profile, adapter, and output folder:
 
 ```bash
 greentic-desktop record start \
-  --name crm.create_customer \
-  --profile local-crm \
+  --name generic.resource_append \
+  --profile local-web \
   --adapter greentic.desktop.playwright \
-  --out ./recordings/crm.create_customer \
+  --out ./recordings/generic.resource_append \
   --redact text,password,email,token \
   --secret-fields password,api_key
 ```
@@ -40,11 +42,12 @@ greentic-desktop record list
 During a recording, you can add extra intent so the generated runner is easier to review:
 
 ```bash
-greentic-desktop record mark-input company_name --session rec_123
+greentic-desktop record mark-input resource_name --session rec_123
+greentic-desktop record mark-input name --session rec_123
 greentic-desktop record mark-secret password --session rec_123
-greentic-desktop record mark-output customer_id --session rec_123
-greentic-desktop record add-assertion "Customer created" --session rec_123
-greentic-desktop record note "This dialog appears only for new customers" --session rec_123
+greentic-desktop record mark-output saved_status --session rec_123
+greentic-desktop record add-assertion "Saved row" --session rec_123
+greentic-desktop record note "This dialog appears only when the resource does not exist yet" --session rec_123
 ```
 
 ## Normalization
@@ -55,16 +58,16 @@ Convert raw events into a draft runner:
 
 ```bash
 greentic-desktop record normalise \
-  --recording ./recordings/crm.create_customer/raw \
-  --out ./runners/crm.create_customer.draft.yaml
+  --recording ./recordings/generic.resource_append/raw \
+  --out ./runners/generic.resource_append.draft.yaml
 ```
 
 Finalise the recording by copying the reviewed draft runner back into the recording folder:
 
 ```bash
 greentic-desktop record finalise \
-  --recording ./recordings/crm.create_customer \
-  --runner ./runners/crm.create_customer.draft.yaml
+  --recording ./recordings/generic.resource_append \
+  --runner ./runners/generic.resource_append.draft.yaml
 ```
 
 ## Prompt And Recording Together
@@ -75,9 +78,9 @@ Create a draft runner from a prompt:
 
 ```bash
 greentic-desktop runner plan \
-  --prompt "Create CRM customer with company name and email and return customer id" \
-  --profile local-crm \
-  --out ./runners/crm.create_customer.draft.yaml
+  --prompt "Open a resource table, ask for resource_name, name, and email, append a row, save, and return saved_status" \
+  --profile local-web \
+  --out ./runners/generic.resource_append.draft.yaml
 ```
 
 Use `--dry-run` to inspect the generated draft without writing a file:
@@ -90,6 +93,12 @@ greentic-desktop runner plan \
 ```
 
 The planner builds a structured LLM request, validates the returned draft against the runner schema, checks required capabilities against installed adapters, applies planner policy, and only then writes the draft runner.
+
+## Visible, Controlled, And Blocked Runs
+
+Native desktop, Java, remote desktop, and visual fallback runs operate against the visible session or viewport the adapter can access. Web and terminal runs may use controlled contexts owned by Greentic Desktop, so they might not affect an unrelated browser tab or shell you already had open. Either way, a successful run must return declared outputs and an evidence reference.
+
+If required permissions or event sources are missing, recording and replay should block with a concrete error such as `runner.capability_missing`, `runner.input_missing`, `runner.secret_missing`, or `runner.output_extraction_failed`. Do not treat a blocked or observe-only session as a successful recording.
 
 ## Refinement
 

@@ -1069,6 +1069,37 @@ mod tests {
     }
 
     #[test]
+    fn calculator_llm_response_missing_step_id_returns_schema_diagnostic() {
+        let err = plan_prompt_with_llm(
+            "open the local calculator app, ask the user for two numbers and an operation, introduce the first number in the calculator, press the operation, introduce the next, get the result and return it",
+            &context(),
+            &PlannerOptions::default(),
+            &StaticLlmClient::ok(
+                r#"{
+                    "runner_id": "calculator.local",
+                    "version": "0.1.0-draft",
+                    "summary": "Use local calculator",
+                    "risk_level": "low",
+                    "required_capabilities": ["macos.activate_app", "macos.type_text", "macos.read_text"],
+                    "inputs": {"number_1": {"type": "number"}, "number_2": {"type": "number"}, "operation": {"type": "string"}},
+                    "outputs": {"result": {"type": "string"}},
+                    "steps": [{"action": "activate_app", "required_capability": "macos.activate_app", "value": "Calculator"}],
+                    "assertions": ["result is visible"],
+                    "open_questions": []
+                }"#,
+            ),
+        )
+        .expect_err("missing step id should fail schema validation");
+
+        assert_eq!(err.code, "planner.schema_mismatch");
+        assert!(
+            err.message.contains("missing field `id`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
     fn unsupported_capability_response_fails_before_save() {
         let err = plan_prompt_with_llm(
             "Create CRM customer",
