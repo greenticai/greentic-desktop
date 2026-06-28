@@ -5442,6 +5442,53 @@ mod tests {
     }
 
     #[test]
+    fn planner_draft_api_routes_generic_app_to_native_not_java() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-planner-native-app-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let state = GuiApiState {
+            runtime_home: root.clone(),
+            evidence_store: root.join("evidence"),
+            ..GuiApiState::default()
+        };
+        let native_adapter = replay_adapter_registry(&state)
+            .capabilities()
+            .into_iter()
+            .find(|adapter| {
+                adapter.supports("macos.activate_app")
+                    || adapter.supports("windows.open_app")
+                    || adapter.supports("linux.find_window")
+            })
+            .expect("platform native adapter should be registered")
+            .adapter_id;
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: state,
+        })
+        .expect("GUI host should start");
+
+        let response = post(
+            handle.addr(),
+            "/api/v1/planner/drafts",
+            r#"{"prompt":"Open the office application, use the provided path, name, and text inputs, then save the result."}"#,
+        );
+        let response = String::from_utf8_lossy(&response);
+
+        assert!(response.contains(&native_adapter), "{response}");
+        assert!(
+            !response.contains("greentic.desktop.java-accessibility"),
+            "{response}"
+        );
+        assert!(
+            !response.contains("planner.unsupported_capability"),
+            "{response}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn planner_context_uses_replay_registry_not_static_platform_claims() {
         let context = planner_context(&GuiApiState {
             platform: "windows".to_owned(),

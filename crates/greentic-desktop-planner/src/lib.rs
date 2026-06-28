@@ -110,7 +110,8 @@ pub fn plan_prompt_with_llm(
     let response = client
         .complete(&request)
         .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
-    let document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
+    let mut document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
+    normalise_adapter_ids_in_required_capabilities(prompt, context, &mut document);
     validate_capabilities(context, &document.required_capabilities)?;
     validate_planned_runner(&document, &options.policy)
         .map_err(|err| diagnostic(&err.code, &err.message))?;
@@ -261,6 +262,7 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
             &["web.goto", "web.fill", "web.click", "web.extract_text"],
             score_signals(&lower, context, &["http", "url", "browser", "dom", "web"]),
             "greentic.desktop.playwright",
+            false,
         ),
         route_candidate(
             PlannedTechnology::Java,
@@ -277,6 +279,7 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
                 &["java", "access bridge", "swing", "awt", "jar"],
             ),
             "greentic.desktop.java-accessibility",
+            true,
         ),
         route_candidate(
             PlannedTechnology::Native,
@@ -288,6 +291,12 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
                 "windows.find_element",
                 "macos.find_element",
                 "linux.find_element",
+                "windows.type_text",
+                "macos.type_text",
+                "linux.type_text",
+                "windows.read_text",
+                "macos.read_text",
+                "linux.read_text",
             ],
             score_signals(
                 &lower,
@@ -299,9 +308,12 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
                     "windows",
                     "macos",
                     "linux",
+                    "app",
+                    "application",
                 ],
             ),
             "greentic.desktop.native",
+            false,
         ),
         route_candidate(
             PlannedTechnology::Terminal,
@@ -318,6 +330,7 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
                 &["terminal", "screen", "host", "tn3270", "ssh", "mainframe"],
             ),
             "greentic.desktop.terminal-tn3270",
+            false,
         ),
         route_candidate(
             PlannedTechnology::Vision,
@@ -329,6 +342,7 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
             ],
             score_signals(&lower, context, &["screenshot", "image", "ocr", "visual"]),
             "greentic.desktop.vision",
+            false,
         ),
     ];
 
@@ -375,12 +389,17 @@ fn route_candidate(
     desired_capabilities: &[&str],
     signal_score: u8,
     fallback_adapter: &str,
+    require_signal: bool,
 ) -> CapabilityRoute {
-    let matching = context.available_adapters.iter().find(|adapter| {
-        desired_capabilities
-            .iter()
-            .any(|capability| adapter.supports(capability))
-    });
+    let matching = if require_signal && signal_score == 0 {
+        None
+    } else {
+        context.available_adapters.iter().find(|adapter| {
+            desired_capabilities
+                .iter()
+                .any(|capability| adapter.supports(capability))
+        })
+    };
     let capabilities = matching
         .map(|adapter| {
             desired_capabilities
@@ -396,13 +415,18 @@ fn route_candidate(
                 .collect()
         });
     let installed_bonus = if matching.is_some() { 40 } else { 0 };
+    let confidence = if require_signal && signal_score == 0 {
+        0
+    } else {
+        installed_bonus + signal_score
+    };
 
     CapabilityRoute {
         technology,
         adapter_id: matching
             .map(|adapter| adapter.adapter_id.clone())
             .unwrap_or_else(|| fallback_adapter.to_owned()),
-        confidence: installed_bonus + signal_score,
+        confidence,
         required_capabilities: capabilities,
         open_questions: Vec::new(),
     }
@@ -477,6 +501,93 @@ fn validate_capabilities(
         }
     }
     Ok(())
+}
+
+fn normalise_adapter_ids_in_required_capabilities(
+    prompt: &str,
+    context: &PlanningContext,
+    document: &mut greentic_desktop_runner_schema::RunnerDraftDocument,
+) {
+    let adapter_ids = context
+        .available_adapters
+        .iter()
+        .map(|adapter| adapter.adapter_id.as_str())
+        .collect::<Vec<_>>();
+    let has_adapter_id = document
+        .required_capabilities
+        .iter()
+        .chain(document.steps.iter().map(|step| &step.required_capability))
+        .any(|capability| {
+            adapter_ids
+                .iter()
+                .any(|adapter_id| adapter_id == capability)
+        });
+    if !has_adapter_id {
+        return;
+    }
+
+    let route = route_capabilities(prompt, context);
+    let routed_capabilities = route.required_capabilities;
+    if routed_capabilities.is_empty() {
+        return;
+    }
+
+    let mut required_capabilities = Vec::new();
+    for capability in &document.required_capabilities {
+        if adapter_ids
+            .iter()
+            .any(|adapter_id| adapter_id == &capability.as_str())
+        {
+            for routed in &routed_capabilities {
+                push_unique(&mut required_capabilities, routed.clone());
+            }
+        } else {
+            push_unique(&mut required_capabilities, capability.clone());
+        }
+    }
+    document.required_capabilities = required_capabilities;
+
+    for step in &mut document.steps {
+        if adapter_ids
+            .iter()
+            .any(|adapter_id| adapter_id == &step.required_capability.as_str())
+        {
+            step.required_capability =
+                capability_for_step_action(&step.action, &routed_capabilities)
+                    .unwrap_or_else(|| routed_capabilities[0].clone());
+        }
+    }
+}
+
+fn capability_for_step_action(action: &str, capabilities: &[String]) -> Option<String> {
+    let action = action.to_ascii_lowercase();
+    let preferred_suffixes: &[&str] = if action.contains("open") || action.contains("activate") {
+        &["open_app", "activate_app", "find_window", "goto"]
+    } else if action.contains("type") || action.contains("fill") || action.contains("write") {
+        &["type_text", "fill", "send_text"]
+    } else if action.contains("read") || action.contains("extract") || action.contains("return") {
+        &["read_text", "extract_text", "extract_field"]
+    } else if action.contains("click") || action.contains("press") || action.contains("select") {
+        &["click_element", "click", "select"]
+    } else {
+        &[]
+    };
+
+    for suffix in preferred_suffixes {
+        if let Some(capability) = capabilities
+            .iter()
+            .find(|capability| capability.ends_with(suffix))
+        {
+            return Some(capability.clone());
+        }
+    }
+    None
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
 }
 
 fn adapters_for_capabilities(
@@ -909,6 +1020,52 @@ mod tests {
     }
 
     #[test]
+    fn generic_app_prompt_prefers_native_over_installed_java_adapter() {
+        let context = context_with(
+            vec![
+                AdapterCapabilities::new(
+                    "greentic.desktop.java-accessibility",
+                    "1.0.0",
+                    [
+                        "java.find_window",
+                        "java.find_component",
+                        "java.type_text",
+                        "java.read_text",
+                    ],
+                ),
+                AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    [
+                        "macos.activate_app",
+                        "macos.find_element",
+                        "macos.type_text",
+                        "macos.read_text",
+                    ],
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let draft = plan_prompt(
+            "Open the office application, use the provided path, name, and text inputs, then save the result.",
+            &context,
+        );
+
+        assert_eq!(draft.required_adapters, vec!["greentic.desktop.macos.ax"]);
+        assert!(draft
+            .package
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "macos.activate_app"));
+        assert!(!draft
+            .package
+            .steps
+            .iter()
+            .any(|step| step.required_capability.starts_with("java.")));
+    }
+
+    #[test]
     fn router_selects_native_desktop_from_window_observation() {
         let context = context_with(
             vec![AdapterCapabilities::new(
@@ -1097,6 +1254,84 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn llm_adapter_id_capability_is_repaired_through_generic_router() {
+        let context = context_with(
+            vec![
+                AdapterCapabilities::new(
+                    "greentic.desktop.java-accessibility",
+                    "1.0.0",
+                    [
+                        "java.find_window",
+                        "java.find_component",
+                        "java.type_text",
+                        "java.read_text",
+                    ],
+                ),
+                AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    [
+                        "macos.activate_app",
+                        "macos.find_element",
+                        "macos.type_text",
+                        "macos.read_text",
+                    ],
+                ),
+            ],
+            Vec::new(),
+        );
+        let llm = StaticLlmClient::ok(
+            r#"{
+                "runner_id": "office.native_app",
+                "version": "0.1.0-draft",
+                "summary": "Edit content in a native application",
+                "risk_level": "medium",
+                "required_capabilities": ["greentic.desktop.java-accessibility"],
+                "inputs": {"path": {"type": "string"}, "name": {"type": "string"}, "text": {"type": "string"}},
+                "outputs": {"saved_path": {"type": "string"}},
+                "steps": [
+                    {"id": "open-app", "action": "open_app", "required_capability": "greentic.desktop.java-accessibility"},
+                    {"id": "type-text", "action": "type_text", "required_capability": "greentic.desktop.java-accessibility", "value": "{{inputs.text}}"},
+                    {"id": "read-result", "action": "read_text", "required_capability": "greentic.desktop.java-accessibility"}
+                ],
+                "assertions": ["result is saved"],
+                "open_questions": []
+            }"#,
+        );
+
+        let result = plan_prompt_with_llm(
+            "Open the office application, use the provided path, name, and text inputs, then save the result.",
+            &context,
+            &PlannerOptions::default(),
+            &llm,
+        )
+        .expect("adapter ids should be repaired into capabilities");
+
+        assert_eq!(
+            result.draft.required_adapters,
+            vec!["greentic.desktop.macos.ax"]
+        );
+        assert_eq!(
+            result.draft.package.steps[0].required_capability,
+            "macos.activate_app"
+        );
+        assert_eq!(
+            result.draft.package.steps[1].required_capability,
+            "macos.type_text"
+        );
+        assert_eq!(
+            result.draft.package.steps[2].required_capability,
+            "macos.read_text"
+        );
+        assert!(result
+            .draft
+            .package
+            .steps
+            .iter()
+            .all(|step| !step.required_capability.starts_with("java.")));
     }
 
     #[test]
