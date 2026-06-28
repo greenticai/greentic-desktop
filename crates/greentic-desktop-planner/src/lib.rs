@@ -111,13 +111,16 @@ pub fn plan_prompt_with_llm(
         .complete(&request)
         .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
     let document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
-    validate_capabilities(context, &document.required_capabilities)?;
     validate_planned_runner(&document, &options.policy)
         .map_err(|err| diagnostic(&err.code, &err.message))?;
 
     let required_adapters = adapters_for_capabilities(context, &document.required_capabilities);
     let risk = document.risk_level;
-    let open_questions = document.open_questions.clone();
+    let mut open_questions = document.open_questions.clone();
+    open_questions.extend(missing_capability_questions(
+        context,
+        &document.required_capabilities,
+    ));
     let package = document.into_package();
     let session_profile = session_profile_for(
         options.profile.as_deref(),
@@ -460,25 +463,6 @@ fn llm_context(context: &PlanningContext) -> LlmPlanningContext {
     }
 }
 
-fn validate_capabilities(
-    context: &PlanningContext,
-    required_capabilities: &[String],
-) -> Result<(), PlannerDiagnostic> {
-    for capability in required_capabilities {
-        if !context
-            .available_adapters
-            .iter()
-            .any(|adapter| adapter.supports(capability))
-        {
-            return Err(diagnostic(
-                "planner.unsupported_capability",
-                &format!("no installed adapter supports {capability}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn adapters_for_capabilities(
     context: &PlanningContext,
     required_capabilities: &[String],
@@ -486,12 +470,39 @@ fn adapters_for_capabilities(
     let mut adapters = Vec::new();
     for capability in required_capabilities {
         for adapter in &context.available_adapters {
-            if adapter.supports(capability) && !adapters.contains(&adapter.adapter_id) {
+            if adapter_matches_requirement(adapter, capability)
+                && !adapters.contains(&adapter.adapter_id)
+            {
                 adapters.push(adapter.adapter_id.clone());
             }
         }
     }
     adapters
+}
+
+fn missing_capability_questions(
+    context: &PlanningContext,
+    required_capabilities: &[String],
+) -> Vec<String> {
+    let mut questions = Vec::new();
+    for capability in required_capabilities {
+        if !context
+            .available_adapters
+            .iter()
+            .any(|adapter| adapter_matches_requirement(adapter, capability))
+        {
+            questions.push(format!(
+                "Install an adapter that supports {capability} before testing or running this draft."
+            ));
+        }
+    }
+    questions.sort();
+    questions.dedup();
+    questions
+}
+
+fn adapter_matches_requirement(adapter: &AdapterCapabilities, requirement: &str) -> bool {
+    adapter.adapter_id == requirement || adapter.supports(requirement)
 }
 
 fn session_profile_for(profile: Option<&str>, adapter_id: Option<&str>) -> SessionProfile {
@@ -1100,8 +1111,8 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_capability_response_fails_before_save() {
-        let err = plan_prompt_with_llm(
+    fn unsupported_capability_response_creates_draft_with_open_question() {
+        let result = plan_prompt_with_llm(
             "Create CRM customer",
             &context(),
             &PlannerOptions::default(),
@@ -1120,9 +1131,50 @@ mod tests {
                 }"#,
             ),
         )
-        .expect_err("unsupported");
+        .expect("unsupported runtime capability should not block drafting");
 
-        assert_eq!(err.code, "planner.unsupported_capability");
+        assert!(result.draft.required_adapters.is_empty());
+        assert!(result.draft.open_questions.contains(
+            &"Install an adapter that supports sap.click before testing or running this draft."
+                .to_owned()
+        ));
+    }
+
+    #[test]
+    fn llm_adapter_id_requirement_uses_installed_adapter() {
+        let result = plan_prompt_with_llm(
+            "Observe the desktop visually",
+            &context_with(
+                vec![AdapterCapabilities::new(
+                    "greentic.desktop.vision",
+                    "1.0.0",
+                    ["vision.screenshot", "vision.extract_text"],
+                )],
+                Vec::new(),
+            ),
+            &PlannerOptions::default(),
+            &StaticLlmClient::ok(
+                r#"{
+                    "runner_id": "desktop.observe",
+                    "version": "0.1.0-draft",
+                    "summary": "Observe desktop",
+                    "risk_level": "low",
+                    "required_capabilities": ["greentic.desktop.vision"],
+                    "inputs": {},
+                    "outputs": {"visible_text": {"type": "string"}},
+                    "steps": [{"id": "observe", "action": "observe", "required_capability": "greentic.desktop.vision"}],
+                    "assertions": [],
+                    "open_questions": []
+                }"#,
+            ),
+        )
+        .expect("adapter id requirement should be accepted for draft creation");
+
+        assert_eq!(
+            result.draft.required_adapters,
+            vec!["greentic.desktop.vision"]
+        );
+        assert!(result.draft.open_questions.is_empty());
     }
 
     #[test]
