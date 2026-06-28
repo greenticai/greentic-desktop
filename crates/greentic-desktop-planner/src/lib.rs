@@ -110,7 +110,8 @@ pub fn plan_prompt_with_llm(
     let response = client
         .complete(&request)
         .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
-    let document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
+    let mut document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
+    resolve_adapter_id_steps(context, &mut document.steps);
     validate_planned_runner(&document, &options.policy)
         .map_err(|err| diagnostic(&err.code, &err.message))?;
 
@@ -503,6 +504,81 @@ fn missing_capability_questions(
 
 fn adapter_matches_requirement(adapter: &AdapterCapabilities, requirement: &str) -> bool {
     adapter.adapter_id == requirement || adapter.supports(requirement)
+}
+
+fn resolve_adapter_id_steps(context: &PlanningContext, steps: &mut [RunnerStep]) {
+    for step in steps {
+        let Some(adapter) = context
+            .available_adapters
+            .iter()
+            .find(|adapter| adapter.adapter_id == step.required_capability)
+        else {
+            continue;
+        };
+        if let Some(capability) = capability_for_action(adapter, &step.action) {
+            step.required_capability = capability;
+        }
+    }
+}
+
+fn capability_for_action(adapter: &AdapterCapabilities, action: &str) -> Option<String> {
+    let normalized_action = normalize_capability_token(action);
+    let suffix_matches = |capability: &&String| {
+        capability
+            .rsplit('.')
+            .next()
+            .map(normalize_capability_token)
+            .is_some_and(|suffix| suffix == normalized_action)
+    };
+    let contains_action = |capability: &&String| {
+        normalize_capability_token(capability)
+            .split('_')
+            .any(|part| part == normalized_action)
+    };
+
+    adapter
+        .capabilities
+        .iter()
+        .find(suffix_matches)
+        .or_else(|| adapter.capabilities.iter().find(contains_action))
+        .or_else(|| semantic_capability_for_action(adapter, &normalized_action))
+        .or_else(|| adapter.capabilities.first())
+        .cloned()
+}
+
+fn semantic_capability_for_action<'a>(
+    adapter: &'a AdapterCapabilities,
+    normalized_action: &str,
+) -> Option<&'a String> {
+    let preferred_terms: &[&str] = match normalized_action {
+        "open" | "launch" | "activate" | "start" => &["open", "activate", "goto", "find"],
+        "enter" | "input" | "type" | "write" | "fill" => &["type", "fill", "send"],
+        "press" | "click" | "select" => &["click", "press", "select"],
+        "read" | "observe" | "extract" | "return" | "get" => {
+            &["read", "extract", "screenshot", "observe"]
+        }
+        "save" => &["save", "click", "press"],
+        _ => &[],
+    };
+    adapter.capabilities.iter().find(|capability| {
+        let normalized = normalize_capability_token(capability);
+        preferred_terms
+            .iter()
+            .any(|term| normalized.split('_').any(|part| part == *term))
+    })
+}
+
+fn normalize_capability_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
 }
 
 fn session_profile_for(profile: Option<&str>, adapter_id: Option<&str>) -> SessionProfile {
@@ -1175,6 +1251,83 @@ mod tests {
             vec!["greentic.desktop.vision"]
         );
         assert!(result.draft.open_questions.is_empty());
+    }
+
+    #[test]
+    fn llm_adapter_id_steps_are_normalized_to_executable_capabilities() {
+        let result = plan_prompt_with_llm(
+            "Create a desktop document",
+            &context_with(
+                vec![
+                    AdapterCapabilities::new(
+                        "greentic.desktop.java-accessibility",
+                        "1.0.0",
+                        ["java.find_window", "java.type_text"],
+                    ),
+                    AdapterCapabilities::new(
+                        "greentic.desktop.macos.ax",
+                        "1.0.0",
+                        ["macos.activate_app", "macos.type_text", "macos.read_text"],
+                    ),
+                    AdapterCapabilities::new(
+                        "greentic.desktop.playwright",
+                        "1.0.0",
+                        ["web.goto", "web.fill", "web.extract_text"],
+                    ),
+                    AdapterCapabilities::new(
+                        "greentic.desktop.vision",
+                        "1.0.0",
+                        ["vision.screenshot", "vision.extract_text"],
+                    ),
+                ],
+                Vec::new(),
+            ),
+            &PlannerOptions::default(),
+            &StaticLlmClient::ok(
+                r#"{
+                    "runner_id": "document.create",
+                    "version": "0.1.0-draft",
+                    "summary": "Create document",
+                    "risk_level": "medium",
+                    "required_capabilities": ["greentic.desktop.java-accessibility", "greentic.desktop.macos.ax", "greentic.desktop.playwright", "greentic.desktop.vision"],
+                    "inputs": {"document_path": {"type": "string"}, "text_content": {"type": "string"}},
+                    "outputs": {"saved_status": {"type": "string"}},
+                    "steps": [
+                        {"id": "open-word", "action": "activate_app", "required_capability": "greentic.desktop.macos.ax", "value": "Word"},
+                        {"id": "type-text", "action": "type_text", "required_capability": "greentic.desktop.java-accessibility", "value": "{{inputs.text_content}}"},
+                        {"id": "read-state", "action": "extract_text", "required_capability": "greentic.desktop.vision"}
+                    ],
+                    "assertions": [],
+                    "open_questions": []
+                }"#,
+            ),
+        )
+        .expect("adapter id steps should be normalized");
+
+        assert_eq!(
+            result.draft.required_adapters,
+            vec![
+                "greentic.desktop.java-accessibility",
+                "greentic.desktop.macos.ax",
+                "greentic.desktop.playwright",
+                "greentic.desktop.vision"
+            ]
+        );
+        let step_capabilities = result
+            .draft
+            .package
+            .steps
+            .iter()
+            .map(|step| step.required_capability.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            step_capabilities,
+            vec![
+                "macos.activate_app",
+                "java.type_text",
+                "vision.extract_text"
+            ]
+        );
     }
 
     #[test]
