@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -36,7 +36,13 @@ export const Route = createFileRoute("/create")({
 type Mode = null | "prompt" | "record";
 
 function CreatePage() {
-  const [mode, setMode] = useState<Mode>(null);
+  const [mode, setMode] = useState<Mode>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const requested = new URLSearchParams(window.location.search).get("mode");
+    return requested === "prompt" || requested === "record" ? requested : null;
+  });
   return (
     <div className="p-8 md:p-12 max-w-5xl mx-auto">
       {mode === null && <ChooseMode onPick={setMode} />}
@@ -143,6 +149,7 @@ function WizardShell({
 }
 
 function PromptWizard({ onBack }: { onBack: () => void }) {
+  const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [prompt, setPrompt] = useState("");
   const [draft, setDraft] = useState<PlannerDraftDto | null>(null);
@@ -168,7 +175,10 @@ function PromptWizard({ onBack }: { onBack: () => void }) {
   });
   const saveDraft = useMutation({
     mutationFn: () => api.savePlannerDraft(draft!.draftId),
-    onSuccess: (result) => setMessage(`Saved ${result.runnerId}`),
+    onSuccess: () => {
+      setMessage(null);
+      void navigate({ to: "/runners" });
+    },
     onError: (error) => setMessage(error instanceof Error ? error.message : "Save failed"),
   });
   const next = () => {
@@ -209,20 +219,11 @@ function PromptWizard({ onBack }: { onBack: () => void }) {
             </Button>
           ) : (
             <Button
-              asChild={saveDraft.isSuccess}
               className="gap-2"
               disabled={!draft || saveDraft.isPending}
-              onClick={() => !saveDraft.isSuccess && saveDraft.mutate()}
+              onClick={() => saveDraft.mutate()}
             >
-              {saveDraft.isSuccess ? (
-                <Link to="/runners">
-                  <Save className="h-4 w-4" /> View Runner
-                </Link>
-              ) : (
-                <>
-                  <Save className="h-4 w-4" /> Save Runner
-                </>
-              )}
+              <Save className="h-4 w-4" /> {saveDraft.isPending ? "Saving..." : "Save Runner"}
             </Button>
           )}
         </>
@@ -230,7 +231,7 @@ function PromptWizard({ onBack }: { onBack: () => void }) {
     >
       {message && <div className="mb-4 text-sm text-destructive">{message}</div>}
       {step === 0 && <PromptStep prompt={prompt} onPromptChange={setPrompt} />}
-      {step === 1 && <IOStep draft={draft} />}
+      {step === 1 && <IOStep draft={draft} onDraftChange={setDraft} />}
       {step === 2 && <StepsStep draft={draft} />}
       {step === 3 && (
         <TestStep
@@ -258,7 +259,7 @@ function PromptStep({
         rows={6}
         value={prompt}
         onChange={(event) => onPromptChange(event.target.value)}
-        placeholder="Open the CRM, create a new customer using company name and email, save it, and return the customer ID."
+        placeholder="Open a resource table, ask for resource_name, name, and email, append a row, save it, and return saved_status."
         className="text-base"
       />
       <div>
@@ -267,10 +268,10 @@ function PromptStep({
         </div>
         <div className="flex flex-wrap gap-2">
           {[
-            "Download today's invoices from the supplier portal.",
-            "Create a customer in the CRM.",
-            "Look up a customer in the mainframe.",
-            "Update a spreadsheet from a desktop report.",
+            "Open a resource table, append a row, save, and return saved_status.",
+            "Download today's invoices from a supplier portal.",
+            "Look up a resource status in the mainframe.",
+            "Open a desktop form, fill provided fields, save, and return confirmation text.",
           ].map((e) => (
             <button
               key={e}
@@ -287,17 +288,43 @@ function PromptStep({
   );
 }
 
-function FieldList({ title, items }: { title: string; items: string[] }) {
+function FieldList({
+  title,
+  items,
+  onItemsChange,
+}: {
+  title: string;
+  items: string[];
+  onItemsChange: (items: string[]) => void;
+}) {
   const [list, setList] = useState(items);
+  const itemsKey = items.join("\n");
+  useEffect(() => {
+    setList(items);
+  }, [itemsKey, items]);
+
+  const updateList = (next: string[]) => {
+    setList(next);
+    onItemsChange(next.map((item) => item.trim()).filter(Boolean));
+  };
+
   return (
     <div className="rounded-xl border p-4">
       <div className="font-medium text-sm mb-3">{title}</div>
       <ul className="space-y-2">
         {list.map((f, i) => (
           <li key={i} className="flex items-center gap-2">
-            <Input defaultValue={f} className="h-9" />
+            <Input
+              value={f}
+              className="h-9"
+              onChange={(event) => {
+                const next = [...list];
+                next[i] = event.target.value;
+                updateList(next);
+              }}
+            />
             <button
-              onClick={() => setList(list.filter((_, j) => j !== i))}
+              onClick={() => updateList(list.filter((_, j) => j !== i))}
               className="h-9 w-9 rounded-md hover:bg-muted flex items-center justify-center text-muted-foreground"
             >
               <X className="h-4 w-4" />
@@ -309,7 +336,7 @@ function FieldList({ title, items }: { title: string; items: string[] }) {
         variant="outline"
         size="sm"
         className="mt-3 gap-1.5"
-        onClick={() => setList([...list, ""])}
+        onClick={() => updateList([...list, ""])}
       >
         <Plus className="h-3.5 w-3.5" /> Add field
       </Button>
@@ -317,14 +344,28 @@ function FieldList({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function IOStep({ draft }: { draft: PlannerDraftDto | null }) {
+function IOStep({
+  draft,
+  onDraftChange,
+}: {
+  draft: PlannerDraftDto | null;
+  onDraftChange: (draft: PlannerDraftDto) => void;
+}) {
   if (!draft) {
     return <div className="text-sm text-muted-foreground">Generate a draft first.</div>;
   }
   return (
     <div className="grid md:grid-cols-2 gap-4">
-      <FieldList title="Inputs" items={draft.inputs} />
-      <FieldList title="Outputs" items={draft.outputs} />
+      <FieldList
+        title="Inputs"
+        items={draft.inputs}
+        onItemsChange={(inputs) => onDraftChange({ ...draft, inputs })}
+      />
+      <FieldList
+        title="Outputs"
+        items={draft.outputs}
+        onItemsChange={(outputs) => onDraftChange({ ...draft, outputs })}
+      />
     </div>
   );
 }
@@ -507,15 +548,17 @@ function SaveStep({ draft }: { draft: PlannerDraftDto | null }) {
 
 function RecordWizard({ onBack }: { onBack: () => void }) {
   const [step, setStep] = useState(0);
-  const [name, setName] = useState("Create customer in CRM");
+  const [name, setName] = useState("Append row to resource table");
   const [target, setTarget] = useState("browser");
+  const [initialUrl, setInitialUrl] = useState("about:blank");
   const [session, setSession] = useState<RecordingSummaryDto | null>(null);
   const [normalised, setNormalised] = useState<RecordingNormaliseResultDto | null>(null);
   const [recordingTest, setRecordingTest] = useState<RecordingTestResultDto | null>(null);
   const [finalised, setFinalised] = useState<RecordingFinaliseResultDto | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const start = useMutation({
-    mutationFn: () => api.startRecording(name, target),
+    mutationFn: () =>
+      api.startRecording(name, target, target === "browser" ? initialUrl : undefined),
     onSuccess: (result) => {
       setSession(result);
       setStep(2);
@@ -538,7 +581,8 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
     onError: (error) => setMessage(error instanceof Error ? error.message : "Normalise failed"),
   });
   const test = useMutation({
-    mutationFn: () => api.testRecording(session!.sessionId),
+    mutationFn: (sampleInputs: Record<string, string>) =>
+      api.testRecording(session!.sessionId, sampleInputs),
     onSuccess: setRecordingTest,
     onError: (error) => setMessage(error instanceof Error ? error.message : "Test failed"),
   });
@@ -558,12 +602,40 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
     }
     setStep((s) => Math.min(s + 1, 4));
   };
+  const recordingSessionId = session?.sessionId;
+  useEffect(() => {
+    if (step !== 2 || !recordingSessionId || session?.captureState === "blocked") {
+      return;
+    }
+    let cancelled = false;
+    const refresh = () => {
+      api
+        .recording(recordingSessionId)
+        .then((result) => {
+          if (!cancelled) {
+            setSession(result);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setMessage(error instanceof Error ? error.message : "Refresh failed");
+          }
+        });
+    };
+    const interval = window.setInterval(refresh, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [step, recordingSessionId, session?.captureState]);
   const prev = () => (step === 0 ? onBack() : setStep((s) => s - 1));
+  const canReviewRecording =
+    Boolean(session) && session?.captureState !== "blocked" && (session?.rawEvents ?? 0) > 1;
 
   const titles = [
     { t: "Name your runner", s: "Give it something memorable." },
     { t: "Choose what to record", s: "Where will the task happen?" },
-    { t: "Recording", s: "Perform the task once. Greentic captures every step." },
+    { t: "Recording", s: "Greentic records only the controlled session for this target." },
     { t: "Review recorded steps", s: "Here's what Greentic saw." },
     { t: "Test and save", s: "Run with sample values, then save." },
   ];
@@ -584,9 +656,11 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
             <Button
               onClick={next}
               className="gap-2"
-              disabled={start.isPending || normalise.isPending}
+              disabled={
+                start.isPending || normalise.isPending || (step === 2 && !canReviewRecording)
+              }
             >
-              {step === 2 ? "Stop Recording" : "Continue"} <ArrowRight className="h-4 w-4" />
+              {step === 2 ? "Review Capture" : "Continue"} <ArrowRight className="h-4 w-4" />
             </Button>
           ) : (
             <Button
@@ -621,23 +695,32 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
         </div>
       )}
       {step === 1 && (
-        <div className="grid sm:grid-cols-2 gap-3">
-          {[
-            ["browser", "Browser task"],
-            ["desktop", "Desktop app task"],
-            ["remote", "Remote desktop task"],
-            ["terminal", "Terminal/mainframe task"],
-          ].map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => setTarget(id)}
-              className={`rounded-xl border p-4 text-left hover:border-primary/40 hover:bg-accent/40 ${
-                target === id ? "border-primary bg-accent/50" : ""
-              }`}
-            >
-              <div className="font-medium text-sm">{label}</div>
-            </button>
-          ))}
+        <div className="space-y-4">
+          <div className="grid sm:grid-cols-2 gap-3">
+            {recordingTargets.map(({ id, label, detail }) => (
+              <button
+                key={id}
+                onClick={() => setTarget(id)}
+                className={`rounded-xl border p-4 text-left hover:border-primary/40 hover:bg-accent/40 ${
+                  target === id ? "border-primary bg-accent/50" : ""
+                }`}
+              >
+                <div className="font-medium text-sm">{label}</div>
+                <div className="text-xs text-muted-foreground mt-2">{detail}</div>
+              </button>
+            ))}
+          </div>
+          {target === "browser" && (
+            <div>
+              <Label>Start URL</Label>
+              <Input
+                value={initialUrl}
+                onChange={(event) => setInitialUrl(event.target.value)}
+                placeholder="https://example.com"
+                className="mt-1.5"
+              />
+            </div>
+          )}
         </div>
       )}
       {step === 2 && (
@@ -649,15 +732,45 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
       {step === 3 && <RecordingReview normalised={normalised} />}
       {step === 4 && (
         <RecordingSave
+          normalised={normalised}
           testResult={recordingTest}
           finalised={finalised}
-          onTest={() => test.mutate()}
+          onTest={(sampleInputs) => test.mutate(sampleInputs)}
           testing={test.isPending}
         />
       )}
     </WizardShell>
   );
 }
+
+const recordingTargets = [
+  {
+    id: "browser",
+    label: "Browser task",
+    detail: "Greentic opens a controlled browser window. Existing browser tabs are not recorded.",
+  },
+  {
+    id: "desktop",
+    label: "Desktop app task",
+    detail: "Uses native accessibility APIs and OS permissions for the current desktop session.",
+  },
+  {
+    id: "java",
+    label: "Java app task",
+    detail: "Uses Java Access Bridge for Swing/AWT component events and trees.",
+  },
+  {
+    id: "remote",
+    label: "Remote desktop task",
+    detail:
+      "Requires a Greentic-owned remote viewport, screen capture, input control, and calibration.",
+  },
+  {
+    id: "terminal",
+    label: "Terminal/mainframe task",
+    detail: "Greentic opens or connects a controlled PTY, SSH, or TN3270 session.",
+  },
+];
 
 function RecordingScreen({
   session,
@@ -666,28 +779,71 @@ function RecordingScreen({
   session: RecordingSummaryDto | null;
   onAction: (action: string, value?: string) => void;
 }) {
+  const captureState = session?.captureState ?? "starting";
+  const isBlocked = captureState === "blocked" || session?.state === "blocked";
+  const isActive = captureState === "recording";
+  const heartbeatSeconds = Number(session?.captureHeartbeatAt ?? 0);
+  const heartbeatFresh =
+    Number.isFinite(heartbeatSeconds) && Date.now() / 1000 - heartbeatSeconds < 60;
+  const panelClass = isBlocked
+    ? "rounded-2xl border-2 border-amber-300 bg-amber-50 p-8 text-center"
+    : isActive
+      ? "rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-8 text-center"
+      : "rounded-2xl border-2 border-destructive/30 bg-destructive/5 p-8 text-center";
+  const statusClass = isBlocked
+    ? "inline-flex items-center gap-2 text-amber-700 font-medium"
+    : isActive
+      ? "inline-flex items-center gap-2 text-emerald-700 font-medium"
+      : "inline-flex items-center gap-2 text-destructive font-medium";
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border-2 border-destructive/30 bg-destructive/5 p-8 text-center">
-        <div className="inline-flex items-center gap-2 text-destructive font-medium">
+      <div className={panelClass}>
+        <div className={statusClass}>
           <span className="relative flex h-3 w-3">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-destructive/40 animate-ping" />
-            <span className="relative inline-flex h-3 w-3 rounded-full bg-destructive" />
+            {isActive && (
+              <span className="absolute inline-flex h-full w-full rounded-full bg-destructive/40 animate-ping" />
+            )}
+            <span
+              className={`relative inline-flex h-3 w-3 rounded-full ${
+                isBlocked ? "bg-amber-500" : isActive ? "bg-emerald-500" : "bg-destructive"
+              }`}
+            />
           </span>
-          Recording
+          {isBlocked
+            ? "Capture blocked"
+            : isActive && heartbeatFresh
+              ? "Capture backend active"
+              : isActive
+                ? "Waiting for backend heartbeat"
+                : "Starting capture"}
         </div>
-        <div className="text-4xl font-semibold tabular-nums mt-4">00:42</div>
+        <div className="text-4xl font-semibold tabular-nums mt-4">{session?.rawEvents ?? 0}</div>
         <div className="text-sm text-muted-foreground mt-2">
-          {session?.sessionId ?? "Starting"} - {session?.state ?? "starting"}
+          events captured · {session?.screenshots ?? 0} screenshots · {captureState}
         </div>
+        <div className="text-xs text-muted-foreground mt-2">
+          Backend: {session?.captureBackend ?? "not attached"} · Last event:{" "}
+          {session?.lastEventSummary ?? "none"}
+        </div>
+        {isBlocked && (
+          <div className="mt-4 rounded-lg border border-amber-300 bg-background p-3 text-left text-sm text-amber-800">
+            {(session?.captureBlockedReasons.length
+              ? session.captureBlockedReasons
+              : ["No capture backend is active for this target."]
+            ).map((reason) => (
+              <div key={reason}>{reason}</div>
+            ))}
+          </div>
+        )}
         <div className="mt-6 flex justify-center gap-2">
           <Button
             variant="outline"
+            disabled={isBlocked}
             onClick={() => onAction(session?.state === "paused" ? "resume" : "pause")}
           >
             {session?.state === "paused" ? "Resume" : "Pause"}
           </Button>
-          <Button variant="destructive" onClick={() => onAction("stop")}>
+          <Button variant="destructive" disabled={isBlocked} onClick={() => onAction("stop")}>
             Stop Recording
           </Button>
           <Button variant="ghost" onClick={() => onAction("cancel")}>
@@ -700,6 +856,7 @@ function RecordingScreen({
           variant="outline"
           size="sm"
           className="gap-1.5"
+          disabled={isBlocked}
           onClick={() => onAction("mark-input", "input")}
         >
           <Circle className="h-3 w-3" /> Mark as input
@@ -708,6 +865,7 @@ function RecordingScreen({
           variant="outline"
           size="sm"
           className="gap-1.5"
+          disabled={isBlocked}
           onClick={() => onAction("mark-output", "output")}
         >
           <Circle className="h-3 w-3" /> Mark as output
@@ -716,6 +874,7 @@ function RecordingScreen({
           variant="outline"
           size="sm"
           className="gap-1.5"
+          disabled={isBlocked}
           onClick={() => onAction("mark-secret", "secret")}
         >
           <Circle className="h-3 w-3" /> Hide sensitive value
@@ -744,24 +903,79 @@ function RecordingReview({ normalised }: { normalised: RecordingNormaliseResultD
 }
 
 function RecordingSave({
+  normalised,
   testResult,
   finalised,
   onTest,
   testing,
 }: {
+  normalised: RecordingNormaliseResultDto | null;
   testResult: RecordingTestResultDto | null;
   finalised: RecordingFinaliseResultDto | null;
-  onTest: () => void;
+  onTest: (sampleInputs: Record<string, string>) => void;
   testing: boolean;
 }) {
+  const inputNames = useMemo(() => normalised?.inputs ?? [], [normalised?.inputs]);
+  const [sampleInputs, setSampleInputs] = useState<Record<string, string>>({});
+  const inputKey = inputNames.join("\n");
+
+  useEffect(() => {
+    setSampleInputs((current) => {
+      const next: Record<string, string> = {};
+      for (const input of inputNames) {
+        next[input] = current[input] ?? sampleValueForInput(input);
+      }
+      return next;
+    });
+  }, [inputKey, inputNames]);
+
   return (
-    <div className="space-y-4">
-      <Button onClick={onTest} disabled={testing} className="gap-2">
-        <Play className="h-4 w-4" /> Run Test
+    <div className="space-y-5">
+      <div>
+        <div className="text-sm font-medium">Test inputs</div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Enter sample values for this recorded runner before running the test.
+        </p>
+      </div>
+      {inputNames.length > 0 ? (
+        <div className="grid gap-3 md:grid-cols-2">
+          {inputNames.map((input) => (
+            <div key={input}>
+              <Label>{fieldLabel(input)}</Label>
+              <Input
+                className="mt-1.5"
+                value={sampleInputs[input] ?? ""}
+                onChange={(event) =>
+                  setSampleInputs((current) => ({ ...current, [input]: event.target.value }))
+                }
+              />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
+          This recorded runner does not declare any inputs.
+        </div>
+      )}
+      <Button onClick={() => onTest(sampleInputs)} disabled={testing} className="gap-2">
+        <Play className="h-4 w-4" /> {testing ? "Running..." : "Run Test"}
       </Button>
       {testResult && (
         <div className="rounded-xl border border-success/30 bg-success/10 p-4 text-sm">
-          Test {testResult.status}. Evidence: {testResult.evidenceRef}
+          <div className="font-medium">Test {testResult.status}</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Evidence: {testResult.evidenceRef}
+          </div>
+          {Object.keys(testResult.outputs).length > 0 && (
+            <div className="mt-3 grid gap-2">
+              {Object.entries(testResult.outputs).map(([key, value]) => (
+                <div key={key} className="rounded-lg border bg-background px-3 py-2">
+                  <span className="text-muted-foreground">{fieldLabel(key)}:</span>{" "}
+                  <span className="font-medium text-foreground">{value}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
       {finalised && (

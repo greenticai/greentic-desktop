@@ -9,7 +9,7 @@ use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
     load_recording_session, normalise_recording, pause_recording_session, resume_recording_session,
     start_recording_session, stop_recording_session, RecordingLifecycleError,
-    RecordingStartRequest,
+    RecordingStartRequest, RecordingTargetKind,
 };
 use greentic_desktop_runtime::{discover_extensions, discover_runners, DesktopRuntime};
 use std::fmt;
@@ -422,6 +422,7 @@ fn handle_record(
             let manifest = start_recording_session(RecordingStartRequest {
                 name,
                 profile,
+                target_kind: recording_target_kind_for_adapter(&adapter),
                 adapter,
                 out: PathBuf::from(out),
                 runtime_home: config.runner.home.clone(),
@@ -525,6 +526,18 @@ fn handle_record(
         other => return Err(CliError::Usage(format!("unknown record command: {other}"))),
     }
     Ok(())
+}
+
+fn recording_target_kind_for_adapter(adapter: &str) -> RecordingTargetKind {
+    if adapter.contains("terminal") || adapter.contains("tn3270") {
+        RecordingTargetKind::Terminal
+    } else if adapter.contains("java") {
+        RecordingTargetKind::Java
+    } else if adapter.contains("vision") {
+        RecordingTargetKind::Desktop
+    } else {
+        RecordingTargetKind::Web
+    }
 }
 
 fn handle_runner_plan(
@@ -1101,7 +1114,7 @@ mod tests {
             fs::create_dir_all(&raw).expect("raw dir");
             fs::write(
                 raw.join("events.jsonl"),
-                "{\"type\":\"type_text\",\"value\":\"token=abc\"}\n",
+                "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"type_text\",\"target\":{\"label\":\"api token\"},\"value\":\"token=abc\",\"redaction\":\"secret\"},\"evidence\":{}}\n",
             )
             .expect("raw event");
             let out = home.join("runner.yaml");
@@ -1119,9 +1132,10 @@ mod tests {
                 &mut output,
             )
             .expect("normalise");
-            assert!(fs::read_to_string(&out)
-                .expect("runner")
-                .contains("{{secret}}"));
+            let runner_yaml = fs::read_to_string(&out).expect("runner");
+            assert!(runner_yaml.contains("{{secret}}"));
+            assert!(runner_yaml.contains("secrets.recorded_secret"));
+            assert!(!runner_yaml.contains("token=abc"));
 
             output.clear();
             run_with_writer(

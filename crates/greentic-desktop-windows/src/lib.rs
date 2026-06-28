@@ -3,6 +3,10 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_recorder::{
+    RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
+    RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
@@ -12,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 pub const WINDOWS_ADAPTER_ID: &str = "greentic.desktop.windows-ui";
+pub const WINDOWS_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.windows.uia";
 
 pub fn windows_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -65,6 +70,72 @@ pub fn stable_windows_target(metadata: &WindowsElementMetadata) -> LocatorTarget
             nearby_text: metadata.nearby_text.clone(),
         }),
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WindowsUiRecordingBackend {
+    elevated_target: bool,
+    greentic_elevated: bool,
+}
+
+impl WindowsUiRecordingBackend {
+    pub fn new(elevated_target: bool, greentic_elevated: bool) -> Self {
+        Self {
+            elevated_target,
+            greentic_elevated,
+        }
+    }
+}
+
+impl RecordingBackend for WindowsUiRecordingBackend {
+    fn id(&self) -> &'static str {
+        WINDOWS_RECORDER_BACKEND_ID
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        RecordingTargetKind::Desktop
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        if !windows_uia_event_source_configured() {
+            RecordingPreflight::blocked(
+                "Install or start the Windows UI Automation event source before desktop recording.",
+            )
+        } else if self.elevated_target && !self.greentic_elevated {
+            RecordingPreflight::blocked(
+                "Windows UI Automation cannot record an elevated app unless Greentic Desktop is also running elevated.",
+            )
+        } else {
+            RecordingPreflight::ready()
+        }
+    }
+
+    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        let mut event = RecordingEventEnvelope::new(
+            sink.session_id(),
+            WINDOWS_RECORDER_BACKEND_ID,
+            RecordingTargetKind::Desktop,
+            1,
+            "activate_window",
+        );
+        event.target_json =
+            r#"{"platform":"windows","api":"UI Automation","window":"focused"}"#.to_owned();
+        event.value = Some("focused Windows application".to_owned());
+        event.ui_tree_ref = Some("evidence://ui-tree/windows/focused.json".to_owned());
+        let _ = sink.append_event(event);
+        let _ = sink.update_heartbeat();
+
+        RecordingHandle {
+            backend_id: WINDOWS_RECORDER_BACKEND_ID.to_owned(),
+            capture_state: RecordingCaptureState::Recording,
+        }
+    }
+}
+
+fn windows_uia_event_source_configured() -> bool {
+    std::env::var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -569,5 +640,25 @@ mod tests {
             .expect("validation should run");
 
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn recording_backend_blocks_elevated_target_when_greentic_is_not_elevated() {
+        std::env::set_var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE", "1");
+        let backend = WindowsUiRecordingBackend::new(true, false);
+        let preflight = backend.preflight(&RecordingStartRequest {
+            name: "windows.record".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: WINDOWS_ADAPTER_ID.to_owned(),
+            target_kind: RecordingTargetKind::Desktop,
+            out: std::env::temp_dir().join("windows-record"),
+            runtime_home: std::env::temp_dir().join("windows-record-home"),
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        });
+
+        assert!(!preflight.available);
+        assert!(preflight.blocked_reasons[0].contains("elevated app"));
+        std::env::remove_var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE");
     }
 }

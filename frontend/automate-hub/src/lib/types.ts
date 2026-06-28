@@ -95,12 +95,111 @@ export interface RunnerSummaryDto {
   adapters?: string[];
   inputs?: string[];
   outputs?: string[];
+  secrets?: string[];
+  inputFields?: RunnerFieldDto[];
+  secretFields?: RunnerFieldDto[];
+  outputFields?: RunnerOutputFieldDto[];
   published?: boolean;
   evidenceRefs?: string[];
 }
 
 export interface RunnersDto {
   runners: RunnerSummaryDto[];
+}
+
+export interface RunnerDetailDto {
+  runner: RunnerSummaryDto | null;
+  yamlPreview: string;
+}
+
+export interface RunnerEditModelDto {
+  runnerId: string;
+  name: string;
+  description: string;
+  risk: string;
+  requiredAdapters: string[];
+  inputs: string[];
+  outputs: string[];
+  secrets: string[];
+  inputFields?: RunnerFieldDto[];
+  secretFields?: RunnerFieldDto[];
+  outputFields?: RunnerOutputFieldDto[];
+  steps: Array<{ id: string; summary: string; editable?: boolean }>;
+  assertions: string[];
+  yamlPreview: string;
+}
+
+export interface RunnerFieldDto {
+  name: string;
+  valueType?: string | { Enum?: string[] };
+  required?: boolean;
+  defaultValue?: string | null;
+  enumValues?: string[];
+  validation?: string | null;
+  secret?: boolean;
+  hasValue?: boolean | null;
+}
+
+export interface RunnerOutputFieldDto extends RunnerFieldDto {
+  extractor?: unknown;
+  failureBehavior?: unknown;
+  proof?: string;
+}
+
+export interface RunnerEditDraftDto {
+  draftId: string;
+  sourceRunnerId: string;
+  sourceChecksum: string;
+  instruction: string;
+  mode: string;
+  status: string;
+  sourceRunner: RunnerEditModelDto;
+  proposedRunner: RunnerEditModelDto;
+  patch?: RunnerPatchPlanDto;
+  openQuestions: string[];
+  warnings: string[];
+  changeSummary: string[];
+  yamlPreview: string;
+}
+
+export interface RunnerPatchPlanDto {
+  intentSummary: string;
+  preserveBehavior: boolean;
+  operations: RunnerPatchOperationDto[];
+  requiredAdapters: string[];
+  inputChanges: string[];
+  outputChanges: string[];
+  secretChanges: string[];
+  stepChanges: string[];
+  assertionChanges: string[];
+  extractorChanges: string[];
+  policyImpact: string;
+  openQuestions: string[];
+  warnings: string[];
+  changeSummary: string[];
+}
+
+export interface RunnerPatchOperationDto {
+  operation: string;
+  target: string;
+  after?: string;
+  rationale: string;
+  safety: string;
+  requiresTest: boolean;
+}
+
+export interface RunnerEditApplyResultDto {
+  runnerId: string;
+  status: string;
+  previousVersion: string;
+  currentVersion: string;
+  mcpTool: string;
+  evidenceRef: string;
+}
+
+export interface RunnerVersionsDto {
+  runnerId: string;
+  versions: string[];
 }
 
 export interface RunnerActionResultDto {
@@ -174,7 +273,14 @@ export interface RecordingSummaryDto {
   profile: string;
   adapter: string;
   activeApp: string | null;
+  captureState: string;
+  captureBackend: string | null;
+  captureHeartbeatAt: string | null;
+  captureBlockedReasons: string[];
   rawEvents: number;
+  observations: number;
+  screenshots: number;
+  lastEventSummary: string | null;
   markers: number;
   draftRunnerPath: string;
   normalizedStepSummaries: string[];
@@ -284,6 +390,8 @@ export interface LlmSettingsDto {
   endpoint: string | null;
   secretRef: string | null;
   mode: "heuristic" | "remote" | string;
+  hasApiKey?: boolean;
+  apiKey?: string;
   providers: LlmProviderDto[];
 }
 

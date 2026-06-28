@@ -9,7 +9,6 @@ documentation.workspace = true
 description = "Rust-side Playwright web adapter model for the Greentic desktop runner."
 keywords.workspace = true
 categories.workspace = true
-publish = false
 include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 
 [lib]
@@ -18,3 +17,4 @@ path = "src/lib.rs"
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
+greentic-desktop-recorder.workspace = true

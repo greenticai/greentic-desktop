@@ -12,6 +12,14 @@ PUBLISH_CRATE_ORDER=(
   greentic-desktop-extension
   greentic-distributor-client
   greentic-desktop-recorder
+  greentic-desktop-platform
+  greentic-desktop-web
+  greentic-desktop-windows
+  greentic-desktop-java
+  greentic-desktop-terminal
+  greentic-desktop-vision
+  greentic-desktop-macos
+  greentic-desktop-linux
   greentic-desktop-evidence
   greentic-desktop-registry
   greentic-desktop-runner-schema

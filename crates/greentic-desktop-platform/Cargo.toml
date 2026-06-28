@@ -6,9 +6,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+description = "Shared desktop platform detection and permission helpers for Greentic Desktop."
 keywords.workspace = true
 categories.workspace = true
-publish = false
+include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 
 [dependencies]
 greentic-desktop-adapter.workspace = true

@@ -1,8 +1,14 @@
 use greentic_desktop_adapter::{LocatorTarget, RecordedEvent, RunnerStep};
+use greentic_desktop_workflow::{
+    compile_workflow, DesktopWorkflow, NativePlatform, WorkflowAction, WorkflowActionKind,
+    WorkflowAssertion, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
+    WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +23,7 @@ pub enum RecordingSessionState {
     Starting,
     Recording,
     Paused,
+    Blocked,
     Stopping,
     Normalising,
     Completed,
@@ -30,6 +37,7 @@ impl RecordingSessionState {
             Self::Starting => "starting",
             Self::Recording => "recording",
             Self::Paused => "paused",
+            Self::Blocked => "blocked",
             Self::Stopping => "stopping",
             Self::Normalising => "normalising",
             Self::Completed => "completed",
@@ -43,6 +51,7 @@ impl RecordingSessionState {
             "starting" => Some(Self::Starting),
             "recording" => Some(Self::Recording),
             "paused" => Some(Self::Paused),
+            "blocked" => Some(Self::Blocked),
             "stopping" => Some(Self::Stopping),
             "normalising" => Some(Self::Normalising),
             "completed" => Some(Self::Completed),
@@ -50,6 +59,309 @@ impl RecordingSessionState {
             "failed" => Some(Self::Failed),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingTargetKind {
+    Web,
+    Desktop,
+    Java,
+    Terminal,
+    Remote,
+}
+
+impl RecordingTargetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Desktop => "desktop",
+            Self::Java => "java",
+            Self::Terminal => "terminal",
+            Self::Remote => "remote",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "desktop" => Self::Desktop,
+            "java" => Self::Java,
+            "terminal" => Self::Terminal,
+            "remote" => Self::Remote,
+            _ => Self::Web,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingCaptureState {
+    Starting,
+    Recording,
+    Paused,
+    Blocked,
+    Stopped,
+    Failed,
+}
+
+impl RecordingCaptureState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Recording => "recording",
+            Self::Paused => "paused",
+            Self::Blocked => "blocked",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "starting" => Some(Self::Starting),
+            "recording" => Some(Self::Recording),
+            "paused" => Some(Self::Paused),
+            "blocked" => Some(Self::Blocked),
+            "stopped" => Some(Self::Stopped),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingPreflight {
+    pub available: bool,
+    pub blocked_reasons: Vec<String>,
+}
+
+impl RecordingPreflight {
+    pub fn ready() -> Self {
+        Self {
+            available: true,
+            blocked_reasons: Vec::new(),
+        }
+    }
+
+    pub fn blocked(reason: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            blocked_reasons: vec![reason.into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingEventEnvelope {
+    pub session_id: String,
+    pub backend: String,
+    pub target_kind: RecordingTargetKind,
+    pub timestamp: String,
+    pub sequence: u64,
+    pub event_kind: String,
+    pub target_json: String,
+    pub value: Option<String>,
+    pub redaction: String,
+    pub screenshot_ref: Option<String>,
+    pub dom_snapshot_ref: Option<String>,
+    pub ui_tree_ref: Option<String>,
+    pub terminal_buffer_ref: Option<String>,
+}
+
+impl RecordingEventEnvelope {
+    pub fn new(
+        session_id: impl Into<String>,
+        backend: impl Into<String>,
+        target_kind: RecordingTargetKind,
+        sequence: u64,
+        event_kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            backend: backend.into(),
+            target_kind,
+            timestamp: unix_timestamp().to_string(),
+            sequence,
+            event_kind: event_kind.into(),
+            target_json: "{}".to_owned(),
+            value: None,
+            redaction: "none".to_owned(),
+            screenshot_ref: None,
+            dom_snapshot_ref: None,
+            ui_tree_ref: None,
+            terminal_buffer_ref: None,
+        }
+    }
+
+    pub fn render_json(&self) -> String {
+        format!(
+            r#"{{"schema_version":"recording.event.v1","session_id":"{}","backend":"{}","target_kind":"{}","timestamp":"{}","sequence":{},"event":{{"kind":"{}","target":{},"value":{},"redaction":"{}"}},"evidence":{{"screenshot_ref":{},"dom_snapshot_ref":{},"ui_tree_ref":{},"terminal_buffer_ref":{}}}}}"#,
+            json_escape(&self.session_id),
+            json_escape(&self.backend),
+            self.target_kind.as_str(),
+            json_escape(&self.timestamp),
+            self.sequence,
+            json_escape(&self.event_kind),
+            if self.target_json.trim().is_empty() {
+                "{}"
+            } else {
+                self.target_json.as_str()
+            },
+            json_option(&self.value),
+            json_escape(&self.redaction),
+            json_option(&self.screenshot_ref),
+            json_option(&self.dom_snapshot_ref),
+            json_option(&self.ui_tree_ref),
+            json_option(&self.terminal_buffer_ref),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordingEventSink {
+    manifest: RecordingSessionManifest,
+}
+
+impl RecordingEventSink {
+    pub fn new(manifest: RecordingSessionManifest) -> Self {
+        Self { manifest }
+    }
+
+    pub fn append_event(
+        &self,
+        event: RecordingEventEnvelope,
+    ) -> Result<(), RecordingLifecycleError> {
+        append_raw_event(&self.manifest, &event.render_json())
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.manifest.session_id
+    }
+
+    pub fn append_backend_warning(&self, warning: &str) -> Result<(), RecordingLifecycleError> {
+        append_raw_event(
+            &self.manifest,
+            &format!(
+                r#"{{"schema_version":"recording.event.v1","session_id":"{}","backend":"{}","target_kind":"{}","timestamp":"{}","sequence":0,"event":{{"kind":"backend_warning","target":{{}},"value":"{}","redaction":"none"}},"evidence":{{"screenshot_ref":null,"dom_snapshot_ref":null,"ui_tree_ref":null,"terminal_buffer_ref":null}}}}"#,
+                json_escape(&self.manifest.session_id),
+                json_escape(
+                    self.manifest
+                        .capture_backend
+                        .as_deref()
+                        .unwrap_or("unknown")
+                ),
+                self.manifest.target_kind.as_str(),
+                unix_timestamp(),
+                json_escape(warning)
+            ),
+        )
+    }
+
+    pub fn update_heartbeat(&self) -> Result<(), RecordingLifecycleError> {
+        let mut manifest = self.manifest.clone();
+        manifest.capture_heartbeat_at = Some(unix_timestamp().to_string());
+        manifest.write()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingHandle {
+    pub backend_id: String,
+    pub capture_state: RecordingCaptureState,
+}
+
+pub trait RecordingBackend: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn target_kind(&self) -> RecordingTargetKind;
+    fn preflight(&self, request: &RecordingStartRequest) -> RecordingPreflight;
+    fn start(&self, request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle;
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeRecordingBackend {
+    id: &'static str,
+    target_kind: RecordingTargetKind,
+    blocked_reason: Option<String>,
+}
+
+impl FakeRecordingBackend {
+    pub fn ready(id: &'static str, target_kind: RecordingTargetKind) -> Self {
+        Self {
+            id,
+            target_kind,
+            blocked_reason: None,
+        }
+    }
+
+    pub fn blocked(
+        id: &'static str,
+        target_kind: RecordingTargetKind,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            target_kind,
+            blocked_reason: Some(reason.into()),
+        }
+    }
+}
+
+impl RecordingBackend for FakeRecordingBackend {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        self.target_kind
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        self.blocked_reason
+            .as_ref()
+            .map(|reason| RecordingPreflight::blocked(reason.clone()))
+            .unwrap_or_else(RecordingPreflight::ready)
+    }
+
+    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        let mut event =
+            RecordingEventEnvelope::new(sink.session_id(), self.id, self.target_kind, 1, "observe");
+        event.value = Some("fake backend heartbeat".to_owned());
+        let _ = sink.append_event(event);
+        let _ = sink.update_heartbeat();
+        RecordingHandle {
+            backend_id: self.id.to_owned(),
+            capture_state: RecordingCaptureState::Recording,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RecordingBackendRegistry {
+    backends: Vec<Arc<dyn RecordingBackend>>,
+}
+
+impl RecordingBackendRegistry {
+    pub fn new() -> Self {
+        Self {
+            backends: Vec::new(),
+        }
+    }
+
+    pub fn register<B>(&mut self, backend: B)
+    where
+        B: RecordingBackend + 'static,
+    {
+        self.backends.push(Arc::new(backend));
+    }
+
+    pub fn backend_for(&self, kind: RecordingTargetKind) -> Option<Arc<dyn RecordingBackend>> {
+        self.backends
+            .iter()
+            .find(|backend| backend.target_kind() == kind)
+            .cloned()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
     }
 }
 
@@ -69,6 +381,14 @@ pub struct RecordingSessionManifest {
     pub draft_runner: PathBuf,
     pub redact: Vec<String>,
     pub secret_fields: Vec<String>,
+    pub target_kind: RecordingTargetKind,
+    pub capture_state: RecordingCaptureState,
+    pub capture_backend: Option<String>,
+    pub capture_heartbeat_at: Option<String>,
+    pub capture_blocked_reasons: Vec<String>,
+    pub observations: usize,
+    pub screenshot_count: usize,
+    pub last_event_summary: Option<String>,
 }
 
 #[derive(Debug)]
@@ -111,6 +431,7 @@ pub struct RecordingStartRequest {
     pub name: String,
     pub profile: String,
     pub adapter: String,
+    pub target_kind: RecordingTargetKind,
     pub out: PathBuf,
     pub runtime_home: PathBuf,
     pub redact: Vec<String>,
@@ -489,7 +810,7 @@ impl RecordingSessionManifest {
             .map(|adapter| format!("  - {adapter}\n"))
             .collect::<String>();
         format!(
-            "session_id: {}\nname: {}\nprofile: {}\nstate: {}\nstarted_at: \"{}\"\nadapters:\n{}platform:\n  os: {}\npaths:\n  raw_events: {}\n  screenshots: {}\n  normalised_steps: {}\n  draft_runner: {}\nredact: [{}]\nsecret_fields: [{}]\n",
+            "session_id: {}\nname: {}\nprofile: {}\nstate: {}\nstarted_at: \"{}\"\nadapters:\n{}platform:\n  os: {}\npaths:\n  raw_events: {}\n  screenshots: {}\n  normalised_steps: {}\n  draft_runner: {}\nredact: [{}]\nsecret_fields: [{}]\ncapture:\n  target_kind: {}\n  state: {}\n  backend: {}\n  heartbeat_at: {}\n  blocked_reasons:\n{}  observations: {}\n  screenshots: {}\n  last_event_summary: {}\n",
             self.session_id,
             self.name,
             self.profile,
@@ -502,7 +823,18 @@ impl RecordingSessionManifest {
             self.normalised_steps.display(),
             self.draft_runner.display(),
             self.redact.join(","),
-            self.secret_fields.join(",")
+            self.secret_fields.join(","),
+            self.target_kind.as_str(),
+            self.capture_state.as_str(),
+            self.capture_backend.as_deref().unwrap_or(""),
+            self.capture_heartbeat_at.as_deref().unwrap_or(""),
+            self.capture_blocked_reasons
+                .iter()
+                .map(|reason| format!("    - {}\n", reason))
+                .collect::<String>(),
+            self.observations,
+            self.screenshot_count,
+            self.last_event_summary.as_deref().unwrap_or("")
         )
     }
 
@@ -516,6 +848,13 @@ impl RecordingSessionManifest {
 pub fn start_recording_session(
     request: RecordingStartRequest,
 ) -> Result<RecordingSessionManifest, RecordingLifecycleError> {
+    start_recording_session_with_registry(request, &RecordingBackendRegistry::new())
+}
+
+pub fn start_recording_session_with_registry(
+    request: RecordingStartRequest,
+    registry: &RecordingBackendRegistry,
+) -> Result<RecordingSessionManifest, RecordingLifecycleError> {
     if request.name.trim().is_empty() {
         return Err(RecordingLifecycleError::InvalidSession(
             "recording name must not be empty".to_owned(),
@@ -527,11 +866,11 @@ pub fn start_recording_session(
         ));
     }
     let session_id = format!("rec_{}", unix_timestamp());
-    let manifest = RecordingSessionManifest {
+    let mut manifest = RecordingSessionManifest {
         session_id: session_id.clone(),
-        name: request.name,
-        profile: request.profile,
-        state: RecordingSessionState::Recording,
+        name: request.name.clone(),
+        profile: request.profile.clone(),
+        state: RecordingSessionState::Starting,
         started_at: unix_timestamp().to_string(),
         adapters: vec![request.adapter.clone()],
         platform_os: std::env::consts::OS.to_owned(),
@@ -539,28 +878,99 @@ pub fn start_recording_session(
         screenshots: request.out.join("evidence").join("screenshots"),
         normalised_steps: request.out.join("normalised").join("steps.yaml"),
         draft_runner: request.out.join("runner.draft.yaml"),
-        root: request.out,
-        redact: request.redact,
-        secret_fields: request.secret_fields,
+        root: request.out.clone(),
+        redact: request.redact.clone(),
+        secret_fields: request.secret_fields.clone(),
+        target_kind: request.target_kind,
+        capture_state: RecordingCaptureState::Starting,
+        capture_backend: None,
+        capture_heartbeat_at: None,
+        capture_blocked_reasons: Vec::new(),
+        observations: 0,
+        screenshot_count: 0,
+        last_event_summary: None,
     };
     fs::create_dir_all(manifest.raw_events.parent().ok_or_else(|| {
         RecordingLifecycleError::InvalidSession("raw event path has no parent".to_owned())
     })?)?;
+    clear_generated_recording_files(&manifest)?;
     fs::create_dir_all(&manifest.screenshots)?;
     fs::create_dir_all(manifest.normalised_steps.parent().ok_or_else(|| {
         RecordingLifecycleError::InvalidSession("normalised path has no parent".to_owned())
     })?)?;
-    manifest.write()?;
+    if let Some(backend) = registry.backend_for(request.target_kind) {
+        let preflight = backend.preflight(&request);
+        if preflight.available {
+            manifest.state = RecordingSessionState::Recording;
+            manifest.capture_state = RecordingCaptureState::Recording;
+            manifest.capture_backend = Some(backend.id().to_owned());
+            manifest.capture_heartbeat_at = Some(unix_timestamp().to_string());
+            manifest.last_event_summary = Some("capture backend started".to_owned());
+            manifest.write()?;
+            let sink = RecordingEventSink::new(manifest.clone());
+            let handle = backend.start(request.clone(), sink.clone());
+            manifest.capture_state = handle.capture_state;
+            manifest.capture_backend = Some(handle.backend_id);
+            manifest.capture_heartbeat_at = Some(unix_timestamp().to_string());
+            manifest.write()?;
+            sink.update_heartbeat()?;
+        } else {
+            manifest.state = RecordingSessionState::Blocked;
+            manifest.capture_state = RecordingCaptureState::Blocked;
+            manifest.capture_backend = Some(backend.id().to_owned());
+            manifest.capture_blocked_reasons = preflight.blocked_reasons;
+            manifest.last_event_summary = Some("capture blocked".to_owned());
+            manifest.write()?;
+        }
+    } else {
+        manifest.state = RecordingSessionState::Blocked;
+        manifest.capture_state = RecordingCaptureState::Blocked;
+        manifest.capture_blocked_reasons = vec![format!(
+            "No recording backend is registered for {} targets.",
+            request.target_kind.as_str()
+        )];
+        manifest.last_event_summary = Some("capture blocked".to_owned());
+        manifest.write()?;
+    }
     append_raw_event(
         &manifest,
         &format!(
-            "{{\"type\":\"session_started\",\"timestamp\":\"{}\",\"adapter\":\"{}\"}}",
+            r#"{{"type":"session_started","timestamp":"{}","adapter":"{}","capture_state":"{}"}}"#,
             unix_timestamp(),
-            json_escape(&request.adapter)
+            json_escape(&request.adapter),
+            manifest.capture_state.as_str()
         ),
     )?;
     write_session_index(&request.runtime_home, &session_id, &manifest.root)?;
     Ok(manifest)
+}
+
+fn clear_generated_recording_files(
+    manifest: &RecordingSessionManifest,
+) -> Result<(), RecordingLifecycleError> {
+    for file in [
+        manifest.raw_events.clone(),
+        manifest.root.join("markers.jsonl"),
+        manifest.draft_runner.clone(),
+        manifest.normalised_steps.clone(),
+    ] {
+        match fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    for dir in [
+        manifest.root.join("evidence").join("dom"),
+        manifest.screenshots.clone(),
+    ] {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn pause_recording_session(
@@ -661,29 +1071,14 @@ pub fn normalise_recording(
         .and_then(|value| value.to_str())
         .unwrap_or("recorded.runner")
         .to_owned();
-    let mut steps = Vec::new();
-    for (index, line) in contents.lines().enumerate() {
-        if line.contains("session_") || line.trim().is_empty() {
-            continue;
-        }
-        let action = json_string_value(line, "type").unwrap_or_else(|| "recorded".to_owned());
-        let value = json_string_value(line, "value").map(|value| redact_sensitive_value(&value));
-        steps.push(RunnerStep {
-            id: format!("recorded_{}", index + 1),
-            action: action.clone(),
-            target: LocatorTarget::default(),
-            value,
-            required_capability: format!("recording.{action}"),
-        });
-    }
+    let workflow = normalise_recording_workflow(&runner_id, &contents)?;
+    let compiled = compile_workflow(&workflow)
+        .map_err(|err| RecordingLifecycleError::InvalidSession(err.to_string()))?;
+    let steps = compiled.steps;
     if steps.is_empty() {
-        steps.push(RunnerStep {
-            id: "recorded_1".to_owned(),
-            action: "observe".to_owned(),
-            target: LocatorTarget::default(),
-            value: None,
-            required_capability: "vision.screenshot".to_owned(),
-        });
+        return Err(RecordingLifecycleError::InvalidSession(
+            "recording has no captured events to normalise".to_owned(),
+        ));
     }
     let package = RunnerPackage {
         id: runner_id,
@@ -693,11 +1088,12 @@ pub fn normalise_recording(
         secrets: derive_raw_event_secrets(&steps),
         steps,
         assertions: vec!["recording completed".to_owned()],
-        outputs: derive_raw_event_outputs(&contents),
-        open_questions: vec![
-            "Mark the reusable inputs, secrets, and outputs before publishing this recording."
-                .to_owned(),
-        ],
+        outputs: workflow
+            .outputs
+            .iter()
+            .map(|output| format!("outputs.{}", output.name))
+            .collect(),
+        open_questions: derive_open_questions(&contents),
     };
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
@@ -751,6 +1147,19 @@ fn transition(
         )));
     }
     manifest.state = state;
+    manifest.capture_state = match state {
+        RecordingSessionState::Recording => RecordingCaptureState::Recording,
+        RecordingSessionState::Paused => RecordingCaptureState::Paused,
+        RecordingSessionState::Blocked => RecordingCaptureState::Blocked,
+        RecordingSessionState::Completed
+        | RecordingSessionState::Cancelled
+        | RecordingSessionState::Stopping
+        | RecordingSessionState::Normalising => RecordingCaptureState::Stopped,
+        RecordingSessionState::Failed => RecordingCaptureState::Failed,
+        RecordingSessionState::Starting => RecordingCaptureState::Starting,
+    };
+    manifest.capture_heartbeat_at = Some(unix_timestamp().to_string());
+    manifest.last_event_summary = Some(event.to_owned());
     manifest.write()?;
     append_raw_event(
         &manifest,
@@ -995,21 +1404,303 @@ fn derive_raw_event_secrets(steps: &[RunnerStep]) -> Vec<String> {
     secrets
 }
 
-fn derive_raw_event_outputs(contents: &str) -> Vec<String> {
-    let mut outputs = Vec::new();
-    for line in contents.lines() {
-        let action = json_string_value(line, "type").unwrap_or_default();
-        if matches!(action.as_str(), "copy" | "read_text" | "observe") {
-            if let Some(value) = json_string_value(line, "value") {
-                if !value.trim().is_empty() && !looks_secretish(&value) {
-                    outputs.push("outputs.recorded_output".to_owned());
-                }
-            }
+pub fn normalise_recording_workflow(
+    runner_id: &str,
+    contents: &str,
+) -> Result<DesktopWorkflow, RecordingLifecycleError> {
+    let target_kind = contents
+        .lines()
+        .find_map(|line| json_string_value(line, "target_kind"))
+        .unwrap_or_else(|| "vision".to_owned());
+    let target = workflow_target_for(&target_kind, contents);
+    let mut workflow = DesktopWorkflow {
+        id: runner_id.to_owned(),
+        summary: "Recorded desktop automation".to_owned(),
+        target,
+        inputs: Vec::new(),
+        actions: Vec::new(),
+        outputs: Vec::new(),
+        assertions: Vec::new(),
+        evidence_policy: WorkflowEvidencePolicy {
+            capture_steps: true,
+            capture_screenshots: contents.contains("screenshot_ref")
+                || contents.contains("terminal_buffer_ref")
+                || contents.contains("ui_tree_ref"),
+        },
+    };
+
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty()
+            || line.contains(r#""type":"session_started""#)
+            || line.contains(r#""type":"session_stopped""#)
+        {
+            continue;
+        }
+        let action = raw_event_action(line);
+        let value = json_string_value(line, "value").map(|value| redact_sensitive_value(&value));
+        if value.as_deref() == Some("{{secret}}") {
+            workflow.inputs.push(WorkflowInput {
+                name: format!("secret_{}", index + 1),
+                value_type: WorkflowValueType::String,
+                required: true,
+                secret: true,
+                target: LocatorTarget::default(),
+                value_template: "{{secret}}".to_owned(),
+            });
+        }
+
+        if let Some(input_name) = input_name_from_value(value.as_deref()) {
+            workflow.inputs.push(WorkflowInput {
+                name: input_name,
+                value_type: WorkflowValueType::String,
+                required: true,
+                secret: false,
+                target: LocatorTarget::default(),
+                value_template: value.clone().unwrap_or_default(),
+            });
+        }
+
+        match workflow_action_for(&target_kind, &action, value.clone()) {
+            Some(workflow_action) => workflow.actions.push(workflow_action),
+            None if is_output_event(&action) => workflow.outputs.push(WorkflowOutput {
+                name: output_name_for(line, workflow.outputs.len()),
+                value_type: WorkflowValueType::String,
+                extractor: output_extractor_for(&target_kind, value.clone()),
+                required: true,
+                expected: value.clone(),
+            }),
+            None => {}
+        }
+
+        if action == "assert_text" {
+            workflow.assertions.push(WorkflowAssertion {
+                name: format!("assertion_{}", index + 1),
+                target: LocatorTarget::default(),
+                expected: value.unwrap_or_default(),
+                capability_hint: Some(raw_event_capability(line, &action)),
+            });
         }
     }
-    outputs.sort();
-    outputs.dedup();
-    outputs
+
+    dedupe_workflow_inputs(&mut workflow.inputs);
+    if workflow.actions.is_empty() && workflow.inputs.is_empty() && workflow.outputs.is_empty() {
+        return Err(RecordingLifecycleError::InvalidSession(
+            "recording has no semantic events to normalise".to_owned(),
+        ));
+    }
+    Ok(workflow)
+}
+
+fn workflow_target_for(target_kind: &str, contents: &str) -> WorkflowTarget {
+    match target_kind {
+        "web" => WorkflowTarget::web(
+            contents
+                .lines()
+                .find(|line| json_string_value(line, "kind").as_deref() == Some("navigate"))
+                .and_then(|line| json_string_value(line, "value"))
+                .unwrap_or_else(|| "about:blank".to_owned()),
+        ),
+        "desktop" => WorkflowTarget::native_app(
+            NativePlatform::MacOs,
+            Some("Recorded app".to_owned()),
+            "Recorded window".to_owned(),
+        ),
+        "java" => WorkflowTarget::java_app("Recorded Java window"),
+        "terminal" => WorkflowTarget::terminal("recorded-terminal"),
+        "remote" => WorkflowTarget::vision(),
+        _ => WorkflowTarget::vision(),
+    }
+}
+
+fn workflow_action_for(
+    target_kind: &str,
+    action: &str,
+    value: Option<String>,
+) -> Option<WorkflowAction> {
+    let kind = match action {
+        "click" | "click_region" if target_kind == "remote" => {
+            WorkflowActionKind::AdapterCapability("remote.click_region".to_owned())
+        }
+        "key" | "press_key" if target_kind == "remote" => {
+            WorkflowActionKind::AdapterCapability("remote.press_key".to_owned())
+        }
+        "click" | "click_region" => WorkflowActionKind::Click,
+        "key" | "press_key" | "press_shortcut" | "send_keys" => WorkflowActionKind::Key,
+        "observe" | "wait_for" | "wait_for_screen" | "wait_for_text" => WorkflowActionKind::Wait,
+        "screenshot" => WorkflowActionKind::Screenshot,
+        "fill" | "type_text" | "send_text" if target_kind == "terminal" => {
+            WorkflowActionKind::Input
+        }
+        "fill" | "type_text" | "send_text" => return None,
+        "goto" | "find_window" | "activate_window" | "focus_session" | "connect" => return None,
+        "read" | "read_text" | "extract_field" | "extract_text_region" => return None,
+        "backend_warning" | "recorder_start" => return None,
+        other => WorkflowActionKind::AdapterCapability(format!(
+            "{}.{}",
+            target_kind_adapter_prefix(target_kind),
+            other
+        )),
+    };
+    Some(WorkflowAction {
+        name: action.to_owned(),
+        kind,
+        target: LocatorTarget::default(),
+        value_template: value,
+        risk: WorkflowRisk::Low,
+    })
+}
+
+fn target_kind_adapter_prefix(target_kind: &str) -> &str {
+    match target_kind {
+        "desktop" => "desktop",
+        "java" => "java",
+        "terminal" => "terminal",
+        "remote" => "remote",
+        "web" => "web",
+        _ => "vision",
+    }
+}
+
+fn input_name_from_value(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    value
+        .trim_matches('{')
+        .trim_matches('}')
+        .strip_prefix("inputs.")
+        .map(str::to_owned)
+}
+
+fn is_output_event(action: &str) -> bool {
+    matches!(
+        action,
+        "read" | "read_text" | "extract_field" | "extract_text_region" | "observe"
+    )
+}
+
+fn output_name_for(line: &str, index: usize) -> String {
+    json_string_value(line, "label")
+        .or_else(|| json_string_value(line, "name"))
+        .map(normalize_field_name)
+        .filter(|name| name != "value")
+        .unwrap_or_else(|| format!("recorded_output_{}", index + 1))
+}
+
+fn output_extractor_for(target_kind: &str, value: Option<String>) -> WorkflowOutputExtractor {
+    if target_kind == "terminal" {
+        WorkflowOutputExtractor::VisibleText(value.unwrap_or_default())
+    } else {
+        WorkflowOutputExtractor::TargetText(Box::default())
+    }
+}
+
+fn dedupe_workflow_inputs(inputs: &mut Vec<WorkflowInput>) {
+    let mut seen = Vec::new();
+    inputs.retain(|input| {
+        if seen.contains(&input.name) {
+            false
+        } else {
+            seen.push(input.name.clone());
+            true
+        }
+    });
+}
+
+fn derive_open_questions(contents: &str) -> Vec<String> {
+    let mut questions = Vec::new();
+    if !contents.contains("\"role\"")
+        && !contents.contains("\"label\"")
+        && !contents.contains("\"accessible_name\"")
+        && !contents.contains("\"test_id\"")
+    {
+        questions.push(
+            "Some recorded targets have weak locators. Confirm the intended UI elements before publishing."
+                .to_owned(),
+        );
+    }
+    if !contents.contains("extract") && !contents.contains("read") && !contents.contains("result") {
+        questions.push("Which visible value should this runner return as output?".to_owned());
+    }
+    questions
+}
+
+fn raw_event_action(line: &str) -> String {
+    json_string_value(line, "type")
+        .or_else(|| json_string_value(line, "kind"))
+        .map(|kind| match kind.as_str() {
+            "navigate" => "goto".to_owned(),
+            "input" | "change" | "type" => "fill".to_owned(),
+            "type_text" => "type_text".to_owned(),
+            "submit" => "click".to_owned(),
+            other => other.to_owned(),
+        })
+        .unwrap_or_else(|| "recorded".to_owned())
+}
+
+fn raw_event_capability(line: &str, action: &str) -> String {
+    if json_string_value(line, "target_kind").as_deref() == Some("web") {
+        return match action {
+            "goto" => "web.goto".to_owned(),
+            "fill" => "web.fill".to_owned(),
+            "click" => "web.click".to_owned(),
+            "select" => "web.select".to_owned(),
+            "key" | "press" => "web.press".to_owned(),
+            "observe" | "wait_for" => "web.wait_for".to_owned(),
+            "read" | "extract_text" => "web.extract_text".to_owned(),
+            other => format!("web.{other}"),
+        };
+    }
+    if json_string_value(line, "target_kind").as_deref() == Some("desktop") {
+        return match action {
+            "activate_window" => "desktop.activate_window".to_owned(),
+            "click" => "desktop.click".to_owned(),
+            "fill" | "type_text" => "desktop.type_text".to_owned(),
+            "select_menu" => "desktop.select_menu".to_owned(),
+            "key" | "press_shortcut" => "desktop.press_shortcut".to_owned(),
+            "read" | "read_text" => "desktop.read_text".to_owned(),
+            "extract_field" => "desktop.extract_field".to_owned(),
+            "assert_text" => "desktop.assert_text".to_owned(),
+            other => format!("desktop.{other}"),
+        };
+    }
+    if json_string_value(line, "target_kind").as_deref() == Some("java") {
+        return match action {
+            "find_window" => "java.find_window".to_owned(),
+            "find_component" => "java.find_component".to_owned(),
+            "click" => "java.click".to_owned(),
+            "fill" | "type_text" => "java.type_text".to_owned(),
+            "select" => "java.select".to_owned(),
+            "read" | "read_text" => "java.read_text".to_owned(),
+            "assert_text" => "java.assert_text".to_owned(),
+            other => format!("java.{other}"),
+        };
+    }
+    if json_string_value(line, "target_kind").as_deref() == Some("terminal") {
+        return match action {
+            "connect" => "terminal.connect".to_owned(),
+            "type" | "fill" | "send_text" => "terminal.send_text".to_owned(),
+            "key" | "send_keys" => "terminal.send_keys".to_owned(),
+            "observe" | "terminal_screen" | "wait_for_screen" => {
+                "terminal.wait_for_screen".to_owned()
+            }
+            "extract_field" => "terminal.extract_field".to_owned(),
+            "assert_text" => "terminal.assert_text".to_owned(),
+            "disconnect" => "terminal.disconnect".to_owned(),
+            other => format!("terminal.{other}"),
+        };
+    }
+    if json_string_value(line, "target_kind").as_deref() == Some("remote") {
+        return match action {
+            "focus_session" => "remote.focus_session".to_owned(),
+            "click" | "click_region" => "remote.click_region".to_owned(),
+            "fill" | "type_text" => "remote.type_text".to_owned(),
+            "key" | "press_key" => "remote.press_key".to_owned(),
+            "observe" | "wait_for_text" => "remote.wait_for_text".to_owned(),
+            "read" | "extract_text_region" => "remote.extract_text_region".to_owned(),
+            "assert_text" => "remote.assert_text".to_owned(),
+            other => format!("remote.{other}"),
+        };
+    }
+    format!("recording.{action}")
 }
 
 fn render_string_list(output: &mut String, name: &str, values: &[String]) {
@@ -1174,6 +1865,33 @@ fn parse_manifest(
             .unwrap_or_else(|| "runner.draft.yaml".to_owned()),
     );
     let adapters = yaml_list_after(&contents, "adapters");
+    let target_kind = yaml_nested_value(&contents, "target_kind")
+        .map(|value| RecordingTargetKind::parse(&value))
+        .unwrap_or_else(|| RecordingTargetKind::parse(&profile));
+    let capture_state = yaml_nested_value(&contents, "state")
+        .and_then(|value| RecordingCaptureState::parse(&value))
+        .unwrap_or(match state {
+            RecordingSessionState::Recording => RecordingCaptureState::Recording,
+            RecordingSessionState::Paused => RecordingCaptureState::Paused,
+            RecordingSessionState::Blocked => RecordingCaptureState::Blocked,
+            RecordingSessionState::Completed | RecordingSessionState::Cancelled => {
+                RecordingCaptureState::Stopped
+            }
+            RecordingSessionState::Failed => RecordingCaptureState::Failed,
+            _ => RecordingCaptureState::Starting,
+        });
+    let capture_backend = yaml_nested_value(&contents, "backend").filter(|value| !value.is_empty());
+    let capture_heartbeat_at =
+        yaml_nested_value(&contents, "heartbeat_at").filter(|value| !value.is_empty());
+    let capture_blocked_reasons = yaml_list_after(&contents, "blocked_reasons");
+    let observations = yaml_nested_value(&contents, "observations")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
+    let screenshot_count = yaml_nested_value(&contents, "screenshots")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
+    let last_event_summary =
+        yaml_nested_value(&contents, "last_event_summary").filter(|value| !value.is_empty());
     Ok(RecordingSessionManifest {
         session_id,
         name,
@@ -1189,6 +1907,14 @@ fn parse_manifest(
         draft_runner,
         redact: csv_yaml_value(&contents, "redact"),
         secret_fields: csv_yaml_value(&contents, "secret_fields"),
+        target_kind,
+        capture_state,
+        capture_backend,
+        capture_heartbeat_at,
+        capture_blocked_reasons,
+        observations,
+        screenshot_count,
+        last_event_summary,
     })
 }
 
@@ -1248,6 +1974,13 @@ fn json_string_value(line: &str, key: &str) -> Option<String> {
 
 fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn json_option(value: &Option<String>) -> String {
+    value
+        .as_ref()
+        .map(|value| format!(r#""{}""#, json_escape(value)))
+        .unwrap_or_else(|| "null".to_owned())
 }
 
 fn unix_timestamp() -> u64 {
@@ -1518,12 +2251,17 @@ mod tests {
         );
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
+    fn temp_dir(name: impl AsRef<str>) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!("{name}-{}-{}", std::process::id(), nanos));
+        let root = std::env::temp_dir().join(format!(
+            "{}-{}-{}",
+            name.as_ref(),
+            std::process::id(),
+            nanos
+        ));
         if root.exists() {
             fs::remove_dir_all(&root).expect("old temp dir should remove");
         }
@@ -1538,6 +2276,7 @@ mod tests {
             name: "crm.create_customer".to_owned(),
             profile: "local-crm".to_owned(),
             adapter: "greentic.desktop.playwright".to_owned(),
+            target_kind: RecordingTargetKind::Web,
             out: out.clone(),
             runtime_home: runtime_home.clone(),
             redact: vec!["password".to_owned()],
@@ -1545,19 +2284,58 @@ mod tests {
         })
         .expect("recording starts");
 
-        assert_eq!(started.state, RecordingSessionState::Recording);
+        assert_eq!(started.state, RecordingSessionState::Blocked);
+        assert_eq!(started.capture_state, RecordingCaptureState::Blocked);
         assert!(out.join("manifest.yaml").exists());
         assert!(out.join("raw/events.jsonl").exists());
+        assert!(started.capture_blocked_reasons[0].contains("No recording backend"));
+    }
+
+    #[test]
+    fn fake_backend_writes_event_and_lifecycle_transitions() {
+        let runtime_home = temp_dir("greentic-record-home-active");
+        let out = temp_dir("greentic-recording-active");
+        let mut registry = RecordingBackendRegistry::new();
+        registry.register(FakeRecordingBackend::ready(
+            "greentic.recording.fake",
+            RecordingTargetKind::Web,
+        ));
+        let started = start_recording_session_with_registry(
+            RecordingStartRequest {
+                name: "crm.create_customer".to_owned(),
+                profile: "local-crm".to_owned(),
+                adapter: "greentic.desktop.playwright".to_owned(),
+                target_kind: RecordingTargetKind::Web,
+                out: out.clone(),
+                runtime_home: runtime_home.clone(),
+                redact: vec!["password".to_owned()],
+                secret_fields: vec!["password".to_owned()],
+            },
+            &registry,
+        )
+        .expect("recording starts");
+
+        assert_eq!(started.state, RecordingSessionState::Recording);
+        assert_eq!(started.capture_state, RecordingCaptureState::Recording);
+        assert_eq!(
+            started.capture_backend.as_deref(),
+            Some("greentic.recording.fake")
+        );
+        let raw = fs::read_to_string(out.join("raw/events.jsonl")).expect("raw events");
+        assert!(raw.contains("\"schema_version\":\"recording.event.v1\""));
 
         let paused =
             pause_recording_session(&runtime_home, &started.session_id).expect("recording pauses");
         assert_eq!(paused.state, RecordingSessionState::Paused);
+        assert_eq!(paused.capture_state, RecordingCaptureState::Paused);
         let resumed = resume_recording_session(&runtime_home, &started.session_id)
             .expect("recording resumes");
         assert_eq!(resumed.state, RecordingSessionState::Recording);
+        assert_eq!(resumed.capture_state, RecordingCaptureState::Recording);
         let stopped =
             stop_recording_session(&runtime_home, &started.session_id).expect("recording stops");
         assert_eq!(stopped.state, RecordingSessionState::Completed);
+        assert_eq!(stopped.capture_state, RecordingCaptureState::Stopped);
     }
 
     #[test]
@@ -1568,6 +2346,7 @@ mod tests {
             name: "crm.cancel".to_owned(),
             profile: "local".to_owned(),
             adapter: "greentic.desktop.vision".to_owned(),
+            target_kind: RecordingTargetKind::Desktop,
             out,
             runtime_home: runtime_home.clone(),
             redact: Vec::new(),
@@ -1605,6 +2384,71 @@ mod tests {
         assert!(package.inputs.is_empty());
         assert!(!yaml.contains("customer_id"));
         assert!(!yaml.contains("secrets.password"));
+    }
+
+    #[test]
+    fn normalise_web_v1_events_into_web_runner_steps() {
+        let root = temp_dir("greentic-normalise-web");
+        let raw = root.join("raw");
+        fs::create_dir_all(&raw).expect("raw dir");
+        fs::write(
+            raw.join("events.jsonl"),
+            "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"navigate\",\"target\":{},\"value\":\"https://example.test\",\"redaction\":\"none\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"input\",\"target\":{},\"value\":\"{{inputs.number_1}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"web\",\"event\":{\"kind\":\"click\",\"target\":{},\"value\":null,\"redaction\":\"none\"},\"evidence\":{}}\n",
+        )
+        .expect("events should write");
+
+        let package = normalise_recording(&raw, &root.join("runner.yaml")).expect("normalise");
+
+        assert_eq!(package.steps[0].action, "goto");
+        assert_eq!(package.steps[0].required_capability, "web.goto");
+        assert_eq!(package.steps[1].action, "fill");
+        assert_eq!(package.steps[1].required_capability, "web.fill");
+        assert_eq!(package.steps[2].required_capability, "web.click");
+        assert_eq!(package.inputs, vec!["inputs.number_1"]);
+    }
+
+    #[test]
+    fn normalise_all_recording_targets_into_semantic_capabilities() {
+        let cases = [
+            (
+                "desktop",
+                "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"desktop\",\"event\":{\"kind\":\"type_text\",\"target\":{},\"value\":\"{{inputs.amount}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n",
+                "macos.type_text",
+            ),
+            (
+                "java",
+                "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"java\",\"event\":{\"kind\":\"type_text\",\"target\":{},\"value\":\"{{inputs.number_1}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n",
+                "java.type_text",
+            ),
+            (
+                "terminal",
+                "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"terminal\",\"event\":{\"kind\":\"send_text\",\"target\":{},\"value\":\"{{inputs.command}}\",\"redaction\":\"input_candidate\"},\"evidence\":{}}\n",
+                "terminal.type_text",
+            ),
+            (
+                "remote",
+                "{\"schema_version\":\"recording.event.v1\",\"target_kind\":\"remote\",\"event\":{\"kind\":\"click_region\",\"target\":{},\"value\":null,\"redaction\":\"none\"},\"evidence\":{\"screenshot_ref\":\"evidence://remote/1.png\"}}\n",
+                "remote.click_region",
+            ),
+        ];
+
+        for (name, jsonl, expected_capability) in cases {
+            let root = temp_dir(format!("greentic-normalise-{name}"));
+            let raw = root.join("raw");
+            fs::create_dir_all(&raw).expect("raw dir");
+            fs::write(raw.join("events.jsonl"), jsonl).expect("events");
+
+            let package = normalise_recording(&raw, &root.join("runner.yaml")).expect(name);
+
+            assert!(
+                package
+                    .steps
+                    .iter()
+                    .any(|step| step.required_capability == expected_capability),
+                "{name} should include {expected_capability}: {:?}",
+                package.steps
+            );
+        }
     }
 
     #[test]

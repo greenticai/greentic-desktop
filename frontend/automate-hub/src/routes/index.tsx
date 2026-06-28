@@ -13,6 +13,7 @@ export const Route = createFileRoute("/")({
 const actions = [
   {
     to: "/create",
+    mode: "prompt",
     icon: Wand2,
     title: "Create from Prompt",
     text: "Describe the task you want to automate. Greentic will create a draft runner for you.",
@@ -20,6 +21,7 @@ const actions = [
   },
   {
     to: "/create",
+    mode: "record",
     icon: Video,
     title: "Record a Task",
     text: "Perform the task once. Greentic records your actions and turns them into a reusable runner.",
@@ -27,9 +29,10 @@ const actions = [
   },
   {
     to: "/runners",
+    mode: null,
     icon: Workflow,
     title: "Manage Runners",
-    text: "View, test and publish your saved automations.",
+    text: "Run, edit, and manage your saved automations.",
     cta: "View My Runners",
   },
 ] as const;
@@ -79,6 +82,7 @@ function Home() {
             <Link
               key={a.title}
               to={a.to}
+              search={a.mode ? { mode: a.mode } : undefined}
               className="group rounded-2xl border bg-card p-6 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-elegant)] hover:border-primary/40 transition-all flex flex-col"
             >
               <div className="h-11 w-11 rounded-xl bg-primary/10 flex items-center justify-center mb-4">

@@ -4,6 +4,10 @@ use greentic_desktop_adapter::{
     StepResult, VisualLocator,
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
+use greentic_desktop_recorder::{
+    RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
+    RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
+};
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
@@ -13,6 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 pub const MACOS_ADAPTER_ID: &str = "greentic.desktop.macos.ax";
+pub const MACOS_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.macos.ax";
 
 pub fn macos_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -65,6 +70,73 @@ pub fn stable_macos_target(metadata: &MacOsElementMetadata) -> LocatorTarget {
             nearby_text: metadata.nearby_text.clone(),
         }),
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct MacOsAccessibilityRecordingBackend {
+    platform: PlatformInfo,
+}
+
+impl MacOsAccessibilityRecordingBackend {
+    pub fn new(platform: PlatformInfo) -> Self {
+        Self { platform }
+    }
+}
+
+impl RecordingBackend for MacOsAccessibilityRecordingBackend {
+    fn id(&self) -> &'static str {
+        MACOS_RECORDER_BACKEND_ID
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        RecordingTargetKind::Desktop
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        let diagnostics = first_run_permission_check(&self.platform);
+        if diagnostics.ready_for_ax() && macos_ax_event_source_configured() {
+            RecordingPreflight::ready()
+        } else {
+            let mut messages = diagnostics.messages;
+            if !macos_ax_event_source_configured() {
+                messages.push(
+                    "Install or start the macOS Accessibility event source before desktop recording."
+                        .to_owned(),
+                );
+            }
+            RecordingPreflight {
+                available: false,
+                blocked_reasons: messages,
+            }
+        }
+    }
+
+    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        let mut focused_app = RecordingEventEnvelope::new(
+            sink.session_id(),
+            MACOS_RECORDER_BACKEND_ID,
+            RecordingTargetKind::Desktop,
+            1,
+            "activate_window",
+        );
+        focused_app.target_json =
+            r#"{"platform":"macos","api":"Accessibility","window":"focused"}"#.to_owned();
+        focused_app.value = Some("focused macOS application".to_owned());
+        focused_app.ui_tree_ref = Some("evidence://ui-tree/macos/focused.json".to_owned());
+        let _ = sink.append_event(focused_app);
+        let _ = sink.update_heartbeat();
+
+        RecordingHandle {
+            backend_id: MACOS_RECORDER_BACKEND_ID.to_owned(),
+            capture_state: RecordingCaptureState::Recording,
+        }
+    }
+}
+
+fn macos_ax_event_source_configured() -> bool {
+    std::env::var("GREENTIC_MACOS_AX_EVENT_SOURCE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +268,22 @@ impl MacOsAccessibilityAdapter {
 
 impl DesktopAdapter for MacOsAccessibilityAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        macos_capabilities()
+        let diagnostics = first_run_permission_check(&self.platform);
+        if diagnostics.ready_for_ax() {
+            macos_capabilities()
+        } else if self
+            .platform
+            .has_permission(PlatformPermission::ScreenRecording)
+            || self.platform.has_permission(PlatformPermission::Screenshot)
+        {
+            AdapterCapabilities::new(
+                MACOS_ADAPTER_ID,
+                env!("CARGO_PKG_VERSION"),
+                ["macos.screenshot"],
+            )
+        } else {
+            AdapterCapabilities::new(MACOS_ADAPTER_ID, env!("CARGO_PKG_VERSION"), [] as [&str; 0])
+        }
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
@@ -537,6 +624,25 @@ mod tests {
     }
 
     #[test]
+    fn adapter_only_advertises_macos_automation_when_permissions_are_ready() {
+        let blocked = MacOsAccessibilityAdapter::new(platform(vec![])).capabilities();
+        assert!(!blocked.supports("macos.activate_app"));
+        assert!(!blocked.supports("macos.type_text"));
+        assert!(!blocked.supports("macos.read_text"));
+
+        let screenshot_only =
+            MacOsAccessibilityAdapter::new(platform(vec![PlatformPermission::ScreenRecording]))
+                .capabilities();
+        assert!(screenshot_only.supports("macos.screenshot"));
+        assert!(!screenshot_only.supports("macos.type_text"));
+
+        let ready = MacOsAccessibilityAdapter::new(platform(full_permissions())).capabilities();
+        assert!(ready.supports("macos.activate_app"));
+        assert!(ready.supports("macos.type_text"));
+        assert!(ready.supports("macos.read_text"));
+    }
+
+    #[test]
     fn locator_supports_ax_identifier_title_role_and_visual_fallback() {
         let target = stable_macos_target(&metadata());
         let preferred = target.preferred.as_ref().expect("preferred locator");
@@ -736,6 +842,7 @@ mod tests {
             PlatformPermission::KeyboardInput,
             PlatformPermission::MouseInput,
         ]));
+        assert!(!adapter.capabilities().supports("macos.find_element"));
 
         let error = adapter
             .execute(RunnerStep {
@@ -747,7 +854,7 @@ mod tests {
             })
             .expect_err("missing accessibility should fail");
 
-        assert!(error.to_string().contains("Accessibility permission"));
+        assert!(matches!(error, AdapterError::UnsupportedCapability(_)));
     }
 
     #[test]
@@ -769,5 +876,31 @@ mod tests {
             .expect_err("missing screen recording should fail");
 
         assert!(error.to_string().contains("Screen Recording permission"));
+    }
+
+    #[test]
+    fn recording_backend_blocks_without_accessibility_permission() {
+        let backend = MacOsAccessibilityRecordingBackend::new(platform(vec![
+            PlatformPermission::ScreenRecording,
+            PlatformPermission::KeyboardInput,
+            PlatformPermission::MouseInput,
+        ]));
+
+        let preflight = backend.preflight(&RecordingStartRequest {
+            name: "macos.record".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: MACOS_ADAPTER_ID.to_owned(),
+            target_kind: RecordingTargetKind::Desktop,
+            out: std::env::temp_dir().join("macos-record"),
+            runtime_home: std::env::temp_dir().join("macos-record-home"),
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        });
+
+        assert!(!preflight.available);
+        assert!(preflight
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("Accessibility permission")));
     }
 }

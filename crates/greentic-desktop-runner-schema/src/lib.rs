@@ -558,7 +558,8 @@ pub struct SchemaDiagnostic {
 }
 
 pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaDiagnostic> {
-    let parsed: JsonRunnerDraftDocument = serde_json::from_str(raw.trim()).map_err(|err| {
+    let cleaned = clean_llm_json(raw);
+    let parsed: JsonRunnerDraftDocument = serde_json::from_str(&cleaned).map_err(|err| {
         if err.is_data() {
             diagnostic(
                 "planner.schema_mismatch",
@@ -607,6 +608,71 @@ pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaD
     };
     validate_runner_draft(&document)?;
     Ok(document)
+}
+
+fn clean_llm_json(raw: &str) -> String {
+    let json = extract_json_object(raw.trim());
+    escape_control_characters_in_json_strings(json)
+}
+
+fn extract_json_object(raw: &str) -> &str {
+    let unfenced = raw
+        .strip_prefix("```json")
+        .or_else(|| raw.strip_prefix("```"))
+        .and_then(|value| value.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(raw);
+    let Some(start) = unfenced.find('{') else {
+        return unfenced;
+    };
+    let Some(end) = unfenced.rfind('}') else {
+        return unfenced;
+    };
+    if start <= end {
+        &unfenced[start..=end]
+    } else {
+        unfenced
+    }
+}
+
+fn escape_control_characters_in_json_strings(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if in_string {
+            if escaped {
+                out.push(ch);
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    out.push(ch);
+                    escaped = true;
+                }
+                '"' => {
+                    out.push(ch);
+                    in_string = false;
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                ch if ch.is_control() => {
+                    out.push_str(&format!("\\u{:04x}", ch as u32));
+                }
+                _ => out.push(ch),
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+        }
+    }
+
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -775,6 +841,51 @@ mod tests {
     fn rejects_schema_invalid_response() {
         let err = parse_runner_draft_json(r#"{"runner_id":""}"#).expect_err("invalid");
         assert_eq!(err.code, "planner.schema_mismatch");
+    }
+
+    #[test]
+    fn rejects_step_without_required_id() {
+        let err = parse_runner_draft_json(
+            r#"{
+                "runner_id": "calculator.local",
+                "version": "0.1.0-draft",
+                "summary": "Use calculator",
+                "risk_level": "low",
+                "required_capabilities": ["macos.activate_app"],
+                "inputs": {"number_1": {"type": "number"}, "number_2": {"type": "number"}, "operation": {"type": "string"}},
+                "outputs": {"result": {"type": "string"}},
+                "steps": [{"action": "activate_app", "required_capability": "macos.activate_app"}],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        )
+        .expect_err("step id is required");
+
+        assert_eq!(err.code, "planner.schema_mismatch");
+        assert!(
+            err.message.contains("missing field `id`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn repairs_llm_json_with_raw_control_characters_in_strings() {
+        let draft = parse_runner_draft_json(
+            "{\n  \"runner_id\": \"web.search\",\n  \"version\": \"0.1.0-draft\",\n  \"summary\": \"Search\nthen read\u{0008} result\",\n  \"risk_level\": \"low\",\n  \"required_capabilities\": [\"web.goto\"],\n  \"inputs\": {},\n  \"outputs\": {\"result\": {\"type\": \"string\"}},\n  \"steps\": [{\"id\": \"open\", \"action\": \"goto\", \"required_capability\": \"web.goto\", \"value\": \"line one\nline two\"}],\n  \"assertions\": [],\n  \"open_questions\": []\n}",
+        )
+        .expect("repairable LLM JSON should parse");
+
+        assert_eq!(draft.runner_id, "web.search");
+        assert_eq!(draft.steps[0].value.as_deref(), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn extracts_runner_json_from_markdown_fence() {
+        let draft = parse_runner_draft_json(&format!("```json\n{}\n```", valid_json()))
+            .expect("fenced LLM JSON should parse");
+
+        assert_eq!(draft.runner_id, "crm.create_customer");
     }
 
     #[test]
