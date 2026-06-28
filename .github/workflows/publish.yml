@@ -239,6 +239,42 @@ jobs:
           fail_on_unmatched_files: true
           overwrite_files: true
           make_latest: true
+      - name: Upload release archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-${{ matrix.target }}
+          path: dist/greentic-desktop-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_fmt }}
+          if-no-files-found: error
+
+  release-checksums:
+    needs: [verify, release-binaries]
+    if: needs.verify.outputs.should_publish == 'true' && needs.release-binaries.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-archive-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum greentic-desktop-v* > checksums.txt
+          cat checksums.txt
+      - name: Upload checksums release asset
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.verify.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/checksums.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true
 
   publish-extension-artifacts:
     needs: verify
@@ -305,8 +341,8 @@ jobs:
             dist/extensions/store-index-${{ matrix.image }}.json
 
   publish-crates:
-    needs: [verify, release-binaries, publish-extension-artifacts]
-    if: always() && needs.verify.outputs.should_publish == 'true' && needs.verify.result == 'success' && needs.release-binaries.result == 'success' && needs.publish-extension-artifacts.result == 'success'
+    needs: [verify, release-binaries, release-checksums, publish-extension-artifacts]
+    if: always() && needs.verify.outputs.should_publish == 'true' && needs.verify.result == 'success' && needs.release-binaries.result == 'success' && needs.release-checksums.result == 'success' && needs.publish-extension-artifacts.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
