@@ -10,6 +10,7 @@ use greentic_desktop_evidence::{
 use greentic_desktop_recorder::RunnerPackage;
 use greentic_desktop_session::{plan_bootstrap, BootstrapPlan, SessionProfile};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +316,27 @@ pub fn replay_with_context(
     }
 
     let outputs = extract_outputs(&request.package, &observations, &step_results);
+    if let Some(reason) = validate_output_evidence(&outputs) {
+        let evidence = evidence_bundle(
+            &format!("run_{}", request.package.id),
+            &request.package,
+            EvidenceStatus::Failed,
+            &request.inputs,
+            &request.secrets,
+            outputs,
+            tool_trace,
+        );
+        let evidence_ref = evidence.reference();
+        return ReplayOutcome {
+            passed: false,
+            bootstrap,
+            traces,
+            outputs: BTreeMap::new(),
+            evidence,
+            evidence_ref,
+            failure_reason: Some(reason),
+        };
+    }
 
     let evidence = evidence_bundle(
         &format!("run_{}", request.package.id),
@@ -529,6 +551,44 @@ fn extract_outputs(
                 .map(|value| (output.clone(), value))
         })
         .collect()
+}
+
+fn validate_output_evidence(outputs: &BTreeMap<String, String>) -> Option<String> {
+    for (name, value) in outputs {
+        let Some(path) = local_filesystem_path(value) else {
+            continue;
+        };
+        if !path.exists() {
+            return Some(format!(
+                "output evidence missing: {name} points to {} but that path does not exist",
+                path.display()
+            ));
+        }
+    }
+    None
+}
+
+fn local_filesystem_path(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("evidence://")
+    {
+        return None;
+    }
+    if let Some(path) = trimmed.strip_prefix("file://") {
+        return Some(PathBuf::from(path));
+    }
+    if windows_absolute_path(trimmed) || Path::new(trimmed).is_absolute() {
+        return Some(PathBuf::from(trimmed));
+    }
+    None
+}
+
+fn windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() > 2 && bytes[1] == b':' && bytes[2] == b'\\' && bytes[0].is_ascii_alphabetic()
 }
 
 fn extract_output_value(
@@ -878,5 +938,65 @@ mod tests {
         assert!(outcome.passed, "{:?}", outcome.failure_reason);
         assert!(outcome.evidence.to_json().contains("macos.assert_visible"));
         assert!(!outcome.evidence.to_json().contains("java.assert_text"));
+    }
+
+    #[test]
+    fn replay_fails_when_output_path_evidence_is_missing() {
+        let missing =
+            std::env::temp_dir().join(format!("greentic-missing-output-{}", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let adapter = Arc::new(TestAdapter::new(
+            &["web.fill", "web.assert_visible"],
+            vec![&format!("saved status: {}", missing.display())],
+            true,
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(adapter);
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+        };
+        let mut request = request();
+        request.package.outputs = vec!["outputs.saved_status".to_owned()];
+        request.adapters = Vec::new();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(!outcome.passed);
+        assert!(outcome
+            .failure_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("output evidence missing"));
+    }
+
+    #[test]
+    fn replay_passes_when_output_path_evidence_exists() {
+        let existing =
+            std::env::temp_dir().join(format!("greentic-existing-output-{}", std::process::id()));
+        std::fs::write(&existing, "saved").expect("output evidence should write");
+        let adapter = Arc::new(TestAdapter::new(
+            &["web.fill", "web.assert_visible"],
+            vec![&format!("saved status: {}", existing.display())],
+            true,
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(adapter);
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+        };
+        let mut request = request();
+        request.package.outputs = vec!["outputs.saved_status".to_owned()];
+        request.adapters = Vec::new();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(outcome.passed, "{:?}", outcome.failure_reason);
+        assert_eq!(
+            outcome.outputs.get("outputs.saved_status"),
+            Some(&existing.display().to_string())
+        );
+        let _ = std::fs::remove_file(existing);
     }
 }
