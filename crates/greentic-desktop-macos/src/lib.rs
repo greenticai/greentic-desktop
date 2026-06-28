@@ -14,7 +14,11 @@ use greentic_desktop_workflow::{
     WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 pub const MACOS_ADAPTER_ID: &str = "greentic.desktop.macos.ax";
 pub const MACOS_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.macos.ax";
@@ -30,6 +34,8 @@ pub fn macos_capabilities() -> AdapterCapabilities {
             "macos.find_element",
             "macos.click_element",
             "macos.type_text",
+            "macos.keyboard_shortcut",
+            "macos.save_document",
             "macos.read_text",
             "macos.assert_visible",
             "macos.screenshot",
@@ -136,7 +142,7 @@ impl RecordingBackend for MacOsAccessibilityRecordingBackend {
 fn macos_ax_event_source_configured() -> bool {
     std::env::var("GREENTIC_MACOS_AX_EVENT_SOURCE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(cfg!(test))
+        .unwrap_or_else(|_| cfg!(test) || command_exists("osascript"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +204,7 @@ pub fn first_run_permission_check(info: &PlatformInfo) -> MacOsPermissionDiagnos
 pub struct MacOsAccessibilityAdapter {
     platform: PlatformInfo,
     state: Arc<Mutex<MacOsState>>,
+    model_mode: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -207,6 +214,8 @@ struct MacOsState {
     elements: BTreeMap<String, String>,
     screenshots: Vec<String>,
     recorded: Vec<RecordedEvent>,
+    save_dialog_open: bool,
+    last_saved_path: Option<String>,
 }
 
 impl MacOsAccessibilityAdapter {
@@ -214,6 +223,15 @@ impl MacOsAccessibilityAdapter {
         Self {
             platform,
             state: Arc::new(Mutex::new(MacOsState::default())),
+            model_mode: false,
+        }
+    }
+
+    pub fn new_model(platform: PlatformInfo) -> Self {
+        Self {
+            platform,
+            state: Arc::new(Mutex::new(MacOsState::default())),
+            model_mode: true,
         }
     }
 
@@ -269,7 +287,7 @@ impl MacOsAccessibilityAdapter {
 impl DesktopAdapter for MacOsAccessibilityAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         let diagnostics = first_run_permission_check(&self.platform);
-        if diagnostics.ready_for_ax() && macos_ax_event_source_configured() {
+        if self.model_mode || (diagnostics.ready_for_ax() && macos_ax_event_source_configured()) {
             macos_capabilities()
         } else if self
             .platform
@@ -315,53 +333,11 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
             self.require_ax()?;
         }
 
-        let mut state = self.state.lock().expect("macos adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "macos.find_app" | "macos.activate_app" => {
-                state.active_app = step.value.clone();
-            }
-            "macos.find_window" => {
-                if let Some(app) = state.active_app.clone() {
-                    state
-                        .windows
-                        .entry(app)
-                        .or_default()
-                        .push(step.value.clone().unwrap_or_else(|| "Window".to_owned()));
-                }
-            }
-            "macos.read_window_tree" | "macos.find_element" | "macos.assert_visible" => {
-                state.elements.entry(target_key(&step.target)).or_default();
-            }
-            "macos.type_text" => {
-                state.elements.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
-            }
-            "macos.click_element" => {}
-            "macos.read_text" => {}
-            "macos.screenshot" => {
-                state
-                    .screenshots
-                    .push("evidence://macos/screenshot.png".to_owned());
-            }
-            "macos.close_app" => {
-                state.active_app = None;
-            }
-            _ => {}
+        if !cfg!(test) && !self.model_mode {
+            return self.execute_real(step);
         }
 
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
-
-        Ok(StepResult {
-            step_id: step.id,
-            success: true,
-            message: "macOS AX step accepted".to_owned(),
-        })
+        self.execute_model(step)
     }
 
     fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult> {
@@ -410,6 +386,451 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
             .last()
             .cloned())
     }
+}
+
+impl MacOsAccessibilityAdapter {
+    fn execute_model(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+        let mut state = self.state.lock().expect("macos adapter mutex poisoned");
+        match step.required_capability.as_str() {
+            "macos.find_app" | "macos.activate_app" => {
+                state.active_app = step.value.clone();
+            }
+            "macos.find_window" => {
+                if let Some(app) = state.active_app.clone() {
+                    state
+                        .windows
+                        .entry(app)
+                        .or_default()
+                        .push(step.value.clone().unwrap_or_else(|| "Window".to_owned()));
+                }
+            }
+            "macos.read_window_tree" | "macos.find_element" | "macos.assert_visible" => {
+                state.elements.entry(target_key(&step.target)).or_default();
+            }
+            "macos.type_text" => {
+                state.elements.insert(
+                    target_key(&step.target),
+                    step.value.clone().unwrap_or_default(),
+                );
+            }
+            "macos.click_element" => {}
+            "macos.keyboard_shortcut" if shortcut_is_save(step.value.as_deref()) => {
+                state.save_dialog_open = true;
+            }
+            "macos.keyboard_shortcut" => {}
+            "macos.save_document" => {
+                if let Some(path) = step.value.clone() {
+                    state.last_saved_path = Some(path.clone());
+                    state.elements.insert("saved_status".to_owned(), path);
+                }
+                state.save_dialog_open = false;
+            }
+            "macos.read_text" => {
+                if let Some(path) = state.last_saved_path.clone() {
+                    state.elements.insert(target_key(&step.target), path);
+                }
+            }
+            "macos.screenshot" => {
+                state
+                    .screenshots
+                    .push("evidence://macos/screenshot.png".to_owned());
+            }
+            "macos.close_app" => {
+                state.active_app = None;
+            }
+            _ => {}
+        }
+
+        state.recorded.push(RecordedEvent {
+            action: step.action.clone(),
+            target: step.target,
+            value: step.value,
+        });
+
+        Ok(StepResult {
+            step_id: step.id,
+            success: true,
+            message: "macOS AX step accepted".to_owned(),
+        })
+    }
+
+    fn execute_real(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+        let mut message = "macOS automation step executed".to_owned();
+        if is_new_document_step(&step) {
+            send_keyboard_shortcut("cmd+n")?;
+            message = "created new document".to_owned();
+            return self.finish_real_step(step, message);
+        }
+        if is_confirm_step(&step) {
+            apple_script(r#"tell application "System Events" to key code 36"#)?;
+            message = "confirmed dialog".to_owned();
+            return self.finish_real_step(step, message);
+        }
+        if is_keyboard_shortcut_step(&step) {
+            let shortcut = step.value.as_deref().unwrap_or_default();
+            send_keyboard_shortcut(shortcut)?;
+            if shortcut_is_save(Some(shortcut)) {
+                self.state
+                    .lock()
+                    .expect("macos adapter mutex poisoned")
+                    .save_dialog_open = true;
+            }
+            return self.finish_real_step(step, message);
+        }
+
+        match step.required_capability.as_str() {
+            "macos.find_app" | "macos.activate_app" => {
+                let app = step
+                    .value
+                    .clone()
+                    .or_else(|| target_hint(&step.target))
+                    .or_else(|| app_name_from_step_id(&step.id));
+                let app = app.ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macOS open app step needs an app name, target, or open-* step id"
+                            .to_owned(),
+                    )
+                })?;
+                open_macos_app(&app)?;
+                self.state
+                    .lock()
+                    .expect("macos adapter mutex poisoned")
+                    .active_app = Some(app.clone());
+                message = format!("activated {app}");
+            }
+            "macos.find_window" | "macos.find_element" | "macos.read_window_tree" => {
+                thread::sleep(Duration::from_millis(250));
+            }
+            "macos.type_text" => {
+                let value = step.value.clone().unwrap_or_default();
+                let should_save_path = looks_like_path(&value)
+                    && (step.id.contains("path")
+                        || step.id.contains("file")
+                        || step.action.contains("save"));
+                if should_save_path {
+                    save_current_document_as(&value)?;
+                    let mut state = self.state.lock().expect("macos adapter mutex poisoned");
+                    state.last_saved_path = Some(value.clone());
+                    state
+                        .elements
+                        .insert("saved_status".to_owned(), value.clone());
+                    state.save_dialog_open = false;
+                    message = value;
+                } else {
+                    paste_text_with_system_events(&value)?;
+                    self.state
+                        .lock()
+                        .expect("macos adapter mutex poisoned")
+                        .elements
+                        .insert(target_key(&step.target), value);
+                }
+            }
+            "macos.keyboard_shortcut" => {
+                send_keyboard_shortcut(step.value.as_deref().unwrap_or_default())?;
+                if shortcut_is_save(step.value.as_deref()) {
+                    self.state
+                        .lock()
+                        .expect("macos adapter mutex poisoned")
+                        .save_dialog_open = true;
+                }
+            }
+            "macos.save_document" => {
+                let path = step.value.clone().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macOS save document step needs a filesystem path value".to_owned(),
+                    )
+                })?;
+                save_current_document_as(&path)?;
+                let mut state = self.state.lock().expect("macos adapter mutex poisoned");
+                state.last_saved_path = Some(path.clone());
+                state
+                    .elements
+                    .insert("saved_status".to_owned(), path.clone());
+                message = path;
+            }
+            "macos.click_element" => {
+                if step.id.contains("new") || step.action.contains("new") {
+                    send_keyboard_shortcut("cmd+n")?;
+                } else {
+                    apple_script(r#"tell application "System Events" to key code 36"#)?;
+                }
+            }
+            "macos.read_text" => {
+                let mut state = self.state.lock().expect("macos adapter mutex poisoned");
+                if let Some(path) = state.last_saved_path.clone() {
+                    state
+                        .elements
+                        .insert(target_key(&step.target), path.clone());
+                    message = path;
+                }
+            }
+            "macos.screenshot" => {
+                self.state
+                    .lock()
+                    .expect("macos adapter mutex poisoned")
+                    .screenshots
+                    .push("evidence://macos/screenshot.png".to_owned());
+            }
+            "macos.close_app" => {
+                send_keyboard_shortcut("cmd+q")?;
+                self.state
+                    .lock()
+                    .expect("macos adapter mutex poisoned")
+                    .active_app = None;
+            }
+            _ => {}
+        }
+
+        self.finish_real_step(step, message)
+    }
+
+    fn finish_real_step(&self, step: RunnerStep, message: String) -> AdapterResult<StepResult> {
+        self.state
+            .lock()
+            .expect("macos adapter mutex poisoned")
+            .recorded
+            .push(RecordedEvent {
+                action: step.action.clone(),
+                target: step.target,
+                value: step.value,
+            });
+
+        Ok(StepResult {
+            step_id: step.id,
+            success: true,
+            message,
+        })
+    }
+}
+
+fn command_exists(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .map(|_| true)
+        .unwrap_or_else(|_| {
+            Command::new("which")
+                .arg(program)
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        })
+}
+
+fn apple_script(script: &str) -> AdapterResult<()> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run osascript: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "macOS automation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn open_macos_app(app: &str) -> AdapterResult<()> {
+    if run_open_app(app).is_ok() {
+        thread::sleep(Duration::from_millis(700));
+        return Ok(());
+    }
+    if let Some(path) = find_macos_application(app) {
+        let output = Command::new("open")
+            .arg(path)
+            .output()
+            .map_err(|err| AdapterError::ExecutionFailed(format!("failed to open app: {err}")))?;
+        if output.status.success() {
+            thread::sleep(Duration::from_millis(700));
+            return Ok(());
+        }
+    }
+    Err(AdapterError::ExecutionFailed(format!(
+        "could not open macOS app '{app}'; provide the exact application name or install it"
+    )))
+}
+
+fn run_open_app(app: &str) -> AdapterResult<()> {
+    let output = Command::new("open")
+        .arg("-a")
+        .arg(app)
+        .output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run open: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
+    }
+}
+
+fn find_macos_application(app: &str) -> Option<PathBuf> {
+    let safe = app.replace('\'', "\\'");
+    let query = format!(
+        "kMDItemContentType == 'com.apple.application-bundle' && kMDItemFSName == '*{safe}*.app'"
+    );
+    Command::new("mdfind")
+        .arg(query)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+fn paste_text_with_system_events(value: &str) -> AdapterResult<()> {
+    let escaped = applescript_string(value);
+    apple_script(&format!(
+        r#"set the clipboard to {escaped}
+tell application "System Events"
+    keystroke "v" using {{command down}}
+end tell"#
+    ))
+}
+
+fn send_keyboard_shortcut(shortcut: &str) -> AdapterResult<()> {
+    let normalized = shortcut.to_ascii_lowercase().replace(' ', "");
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    let key = normalized
+        .rsplit(['+', '-'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&normalized);
+    let mut modifiers = Vec::new();
+    if normalized.contains("cmd") || normalized.contains("command") || normalized.contains("ctrl") {
+        modifiers.push("command down");
+    }
+    if normalized.contains("shift") {
+        modifiers.push("shift down");
+    }
+    if normalized.contains("alt") || normalized.contains("option") {
+        modifiers.push("option down");
+    }
+    let using = if modifiers.is_empty() {
+        String::new()
+    } else {
+        format!(" using {{{}}}", modifiers.join(", "))
+    };
+    apple_script(&format!(
+        r#"tell application "System Events" to keystroke "{}"{}"#,
+        key, using
+    ))
+}
+
+fn save_current_document_as(path: &str) -> AdapterResult<()> {
+    let path = Path::new(path);
+    let parent = path.parent().ok_or_else(|| {
+        AdapterError::ExecutionFailed("save path must include a parent directory".to_owned())
+    })?;
+    std::fs::create_dir_all(parent).map_err(|err| {
+        AdapterError::ExecutionFailed(format!("could not create save directory: {err}"))
+    })?;
+    send_keyboard_shortcut("cmd+s")?;
+    thread::sleep(Duration::from_millis(700));
+    let parent = applescript_string(&parent.display().to_string());
+    let file_name = applescript_string(
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                AdapterError::ExecutionFailed("save path has no file name".to_owned())
+            })?,
+    );
+    apple_script(&format!(
+        r#"tell application "System Events"
+    keystroke "g" using {{command down, shift down}}
+    delay 0.2
+    keystroke {parent}
+    key code 36
+    delay 0.4
+    keystroke {file_name}
+    key code 36
+    delay 0.8
+    key code 36
+end tell"#
+    ))?;
+    for _ in 0..20 {
+        if path.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(AdapterError::ExecutionFailed(format!(
+        "save command completed but {} was not created",
+        path.display()
+    )))
+}
+
+fn applescript_string(value: &str) -> String {
+    format!("{value:?}")
+}
+
+fn looks_like_path(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("~/") || value.starts_with("file://")
+}
+
+fn shortcut_is_save(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.contains("+s") || lower == "save"
+        })
+        .unwrap_or(false)
+}
+
+fn is_new_document_step(step: &RunnerStep) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("new") || action == "new" || action.contains("new_document")
+}
+
+fn is_confirm_step(step: &RunnerStep) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("confirm") || action.contains("confirm") || action == "submit"
+}
+
+fn is_keyboard_shortcut_step(step: &RunnerStep) -> bool {
+    step.required_capability == "macos.keyboard_shortcut"
+        || step.action.eq_ignore_ascii_case("keyboard_shortcut")
+        || step
+            .value
+            .as_deref()
+            .is_some_and(|value| shortcut_is_save(Some(value)))
+}
+
+fn target_hint(target: &LocatorTarget) -> Option<String> {
+    target.preferred.as_ref().and_then(|strategy| {
+        strategy
+            .name
+            .clone()
+            .or_else(|| strategy.text.clone())
+            .or_else(|| strategy.label.clone())
+    })
+}
+
+fn app_name_from_step_id(id: &str) -> Option<String> {
+    let trimmed = id
+        .trim_start_matches("open-")
+        .trim_start_matches("activate-")
+        .trim_end_matches("-app")
+        .replace(['-', '_'], " ");
+    (!trimmed.trim().is_empty()).then(|| {
+        let mut chars = trimmed.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_else(|| trimmed.clone())
+    })
 }
 
 fn target_key(target: &LocatorTarget) -> String {

@@ -13,7 +13,11 @@ use greentic_desktop_workflow::{
     WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 pub const WINDOWS_ADAPTER_ID: &str = "greentic.desktop.windows-ui";
 pub const WINDOWS_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.windows.uia";
@@ -28,6 +32,8 @@ pub fn windows_capabilities() -> AdapterCapabilities {
             "windows.find_element",
             "windows.click_element",
             "windows.type_text",
+            "windows.keyboard_shortcut",
+            "windows.save_document",
             "windows.read_text",
             "windows.read_window_tree",
             "windows.assert_visible",
@@ -135,12 +141,13 @@ impl RecordingBackend for WindowsUiRecordingBackend {
 fn windows_uia_event_source_configured() -> bool {
     std::env::var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(cfg!(test))
+        .unwrap_or_else(|_| cfg!(test) || powershell_command().is_some())
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct WindowsUiAdapter {
     state: Arc<Mutex<WindowsState>>,
+    model_mode: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -150,11 +157,19 @@ struct WindowsState {
     controls: BTreeMap<String, String>,
     error_dialogs: Vec<String>,
     recorded: Vec<RecordedEvent>,
+    last_saved_path: Option<String>,
 }
 
 impl WindowsUiAdapter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_model() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(WindowsState::default())),
+            model_mode: true,
+        }
     }
 
     pub fn seed_control(&self, target: LocatorTarget, value: impl Into<String>) {
@@ -203,7 +218,7 @@ impl WindowsUiAdapter {
 
 impl DesktopAdapter for WindowsUiAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        if windows_uia_event_source_configured() {
+        if self.model_mode || windows_uia_event_source_configured() {
             windows_capabilities()
         } else {
             AdapterCapabilities::new(
@@ -234,42 +249,11 @@ impl DesktopAdapter for WindowsUiAdapter {
             ));
         }
 
-        let mut state = self.state.lock().expect("windows adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "windows.open_app" => {
-                state.app = step.value.clone();
-                state.window_title = step.value.clone();
-            }
-            "windows.find_window" | "windows.find_element" | "windows.assert_visible" => {
-                let key = target_key(&step.target);
-                state.controls.entry(key).or_default();
-            }
-            "windows.type_text" => {
-                state.controls.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
-            }
-            "windows.click_element" => {}
-            "windows.read_text" | "windows.read_window_tree" | "windows.screenshot" => {}
-            "windows.close_app" => {
-                state.app = None;
-                state.window_title = None;
-            }
-            _ => {}
+        if !cfg!(test) && !self.model_mode {
+            return self.execute_real(step);
         }
 
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
-
-        Ok(StepResult {
-            step_id: step.id,
-            success: true,
-            message: "windows step accepted".to_owned(),
-        })
+        self.execute_model(step)
     }
 
     fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult> {
@@ -316,6 +300,318 @@ impl DesktopAdapter for WindowsUiAdapter {
             .last()
             .cloned())
     }
+}
+
+impl WindowsUiAdapter {
+    fn execute_model(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+        let mut state = self.state.lock().expect("windows adapter mutex poisoned");
+        match step.required_capability.as_str() {
+            "windows.open_app" => {
+                state.app = step.value.clone();
+                state.window_title = step.value.clone();
+            }
+            "windows.find_window" | "windows.find_element" | "windows.assert_visible" => {
+                let key = target_key(&step.target);
+                state.controls.entry(key).or_default();
+            }
+            "windows.type_text" => {
+                state.controls.insert(
+                    target_key(&step.target),
+                    step.value.clone().unwrap_or_default(),
+                );
+            }
+            "windows.click_element" => {}
+            "windows.keyboard_shortcut" => {}
+            "windows.save_document" => {
+                if let Some(path) = step.value.clone() {
+                    state.last_saved_path = Some(path.clone());
+                    state.controls.insert("saved_status".to_owned(), path);
+                }
+            }
+            "windows.read_text" | "windows.read_window_tree" | "windows.screenshot" => {}
+            "windows.close_app" => {
+                state.app = None;
+                state.window_title = None;
+            }
+            _ => {}
+        }
+
+        state.recorded.push(RecordedEvent {
+            action: step.action.clone(),
+            target: step.target,
+            value: step.value,
+        });
+
+        Ok(StepResult {
+            step_id: step.id,
+            success: true,
+            message: "windows step accepted".to_owned(),
+        })
+    }
+
+    fn execute_real(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+        let mut message = "windows automation step executed".to_owned();
+        if is_new_document_step(&step) {
+            send_windows_shortcut("ctrl+n")?;
+            return self.finish_real_step(step, "created new document".to_owned());
+        }
+        if is_confirm_step(&step) {
+            send_windows_key("{ENTER}")?;
+            return self.finish_real_step(step, "confirmed dialog".to_owned());
+        }
+        if is_keyboard_shortcut_step(&step) {
+            send_windows_shortcut(step.value.as_deref().unwrap_or_default())?;
+            return self.finish_real_step(step, message);
+        }
+
+        match step.required_capability.as_str() {
+            "windows.open_app" => {
+                let app = step
+                    .value
+                    .clone()
+                    .or_else(|| target_hint(&step.target))
+                    .or_else(|| app_name_from_step_id(&step.id))
+                    .ok_or_else(|| {
+                        AdapterError::ExecutionFailed(
+                            "Windows open app step needs an app name, target, or open-* step id"
+                                .to_owned(),
+                        )
+                    })?;
+                open_windows_app(&app)?;
+                let mut state = self.state.lock().expect("windows adapter mutex poisoned");
+                state.app = Some(app.clone());
+                state.window_title = Some(app.clone());
+                message = format!("opened {app}");
+            }
+            "windows.find_window" | "windows.find_element" | "windows.read_window_tree" => {
+                thread::sleep(Duration::from_millis(250));
+            }
+            "windows.type_text" => {
+                let value = step.value.clone().unwrap_or_default();
+                let should_save_path = looks_like_windows_path(&value)
+                    && (step.id.contains("path")
+                        || step.id.contains("file")
+                        || step.action.contains("save"));
+                if should_save_path {
+                    save_windows_document_as(&value)?;
+                    let mut state = self.state.lock().expect("windows adapter mutex poisoned");
+                    state.last_saved_path = Some(value.clone());
+                    state
+                        .controls
+                        .insert("saved_status".to_owned(), value.clone());
+                    message = value;
+                } else {
+                    paste_windows_text(&value)?;
+                    self.state
+                        .lock()
+                        .expect("windows adapter mutex poisoned")
+                        .controls
+                        .insert(target_key(&step.target), value);
+                }
+            }
+            "windows.click_element" => {
+                send_windows_key("{ENTER}")?;
+            }
+            "windows.save_document" => {
+                let path = step.value.clone().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "Windows save document step needs a filesystem path value".to_owned(),
+                    )
+                })?;
+                save_windows_document_as(&path)?;
+                let mut state = self.state.lock().expect("windows adapter mutex poisoned");
+                state.last_saved_path = Some(path.clone());
+                state
+                    .controls
+                    .insert("saved_status".to_owned(), path.clone());
+                message = path;
+            }
+            "windows.read_text" => {
+                let mut state = self.state.lock().expect("windows adapter mutex poisoned");
+                if let Some(path) = state.last_saved_path.clone() {
+                    state
+                        .controls
+                        .insert(target_key(&step.target), path.clone());
+                    message = path;
+                }
+            }
+            "windows.screenshot" => {}
+            "windows.close_app" => {
+                send_windows_shortcut("alt+f4")?;
+                let mut state = self.state.lock().expect("windows adapter mutex poisoned");
+                state.app = None;
+                state.window_title = None;
+            }
+            _ => {}
+        }
+
+        self.finish_real_step(step, message)
+    }
+
+    fn finish_real_step(&self, step: RunnerStep, message: String) -> AdapterResult<StepResult> {
+        self.state
+            .lock()
+            .expect("windows adapter mutex poisoned")
+            .recorded
+            .push(RecordedEvent {
+                action: step.action.clone(),
+                target: step.target,
+                value: step.value,
+            });
+
+        Ok(StepResult {
+            step_id: step.id,
+            success: true,
+            message,
+        })
+    }
+}
+
+fn powershell_command() -> Option<&'static str> {
+    ["pwsh", "powershell", "powershell.exe"]
+        .into_iter()
+        .find(|candidate| Command::new(candidate).arg("-NoProfile").output().is_ok())
+}
+
+fn powershell(script: &str) -> AdapterResult<()> {
+    let command = powershell_command().ok_or_else(|| {
+        AdapterError::ExecutionFailed(
+            "PowerShell is required for generic Windows desktop automation".to_owned(),
+        )
+    })?;
+    let output = Command::new(command)
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run PowerShell: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "Windows automation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn open_windows_app(app: &str) -> AdapterResult<()> {
+    powershell(&format!(
+        "Start-Process -FilePath {}",
+        powershell_string(app)
+    ))?;
+    thread::sleep(Duration::from_millis(700));
+    Ok(())
+}
+
+fn paste_windows_text(value: &str) -> AdapterResult<()> {
+    powershell(&format!(
+        "Set-Clipboard -Value {}; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^v')",
+        powershell_string(value)
+    ))
+}
+
+fn send_windows_key(key: &str) -> AdapterResult<()> {
+    powershell(&format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait({})",
+        powershell_string(key)
+    ))
+}
+
+fn send_windows_shortcut(shortcut: &str) -> AdapterResult<()> {
+    let normalized = shortcut.to_ascii_lowercase().replace(' ', "");
+    let key = if normalized.contains("ctrl+s") || normalized == "save" {
+        "^s"
+    } else if normalized.contains("ctrl+n") {
+        "^n"
+    } else if normalized.contains("alt+f4") {
+        "%{F4}"
+    } else if normalized.contains("enter") || normalized.contains("return") {
+        "{ENTER}"
+    } else {
+        normalized.as_str()
+    };
+    send_windows_key(key)
+}
+
+fn save_windows_document_as(path: &str) -> AdapterResult<()> {
+    let path_ref = Path::new(path);
+    if let Some(parent) = path_ref.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AdapterError::ExecutionFailed(format!("could not create save directory: {err}"))
+        })?;
+    }
+    send_windows_shortcut("ctrl+s")?;
+    thread::sleep(Duration::from_millis(700));
+    paste_windows_text(path)?;
+    send_windows_key("{ENTER}")?;
+    for _ in 0..20 {
+        if path_ref.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(AdapterError::ExecutionFailed(format!(
+        "save command completed but {path} was not created"
+    )))
+}
+
+fn powershell_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn looks_like_windows_path(value: &str) -> bool {
+    value.contains(":\\") || value.starts_with("\\\\") || value.starts_with('/')
+}
+
+fn is_new_document_step(step: &RunnerStep) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("new") || action == "new" || action.contains("new_document")
+}
+
+fn is_confirm_step(step: &RunnerStep) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("confirm") || action.contains("confirm") || action == "submit"
+}
+
+fn is_keyboard_shortcut_step(step: &RunnerStep) -> bool {
+    step.required_capability == "windows.keyboard_shortcut"
+        || step.action.eq_ignore_ascii_case("keyboard_shortcut")
+        || step
+            .value
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("save") || value.contains('+'))
+}
+
+fn target_hint(target: &LocatorTarget) -> Option<String> {
+    target.preferred.as_ref().and_then(|strategy| {
+        strategy
+            .name
+            .clone()
+            .or_else(|| strategy.text.clone())
+            .or_else(|| strategy.label.clone())
+    })
+}
+
+fn app_name_from_step_id(id: &str) -> Option<String> {
+    let trimmed = id
+        .trim_start_matches("open-")
+        .trim_start_matches("activate-")
+        .trim_end_matches("-app")
+        .replace(['-', '_'], " ");
+    (!trimmed.trim().is_empty()).then(|| {
+        let mut chars = trimmed.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_else(|| trimmed.clone())
+    })
 }
 
 fn target_key(target: &LocatorTarget) -> String {

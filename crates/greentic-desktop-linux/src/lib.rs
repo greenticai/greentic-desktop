@@ -14,7 +14,11 @@ use greentic_desktop_workflow::{
     WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 pub const LINUX_X11_ADAPTER_ID: &str = "greentic.desktop.linux.x11";
 pub const LINUX_WAYLAND_ADAPTER_ID: &str = "greentic.desktop.linux.wayland";
@@ -26,11 +30,14 @@ pub fn linux_x11_capabilities() -> AdapterCapabilities {
         LINUX_X11_ADAPTER_ID,
         env!("CARGO_PKG_VERSION"),
         [
+            "linux.open_app",
             "linux.find_window",
             "linux.read_window_tree",
             "linux.find_element",
             "linux.click_element",
             "linux.type_text",
+            "linux.keyboard_shortcut",
+            "linux.save_document",
             "linux.read_text",
             "linux.assert_visible",
             "linux.screenshot",
@@ -211,7 +218,14 @@ fn linux_event_source_configured(display: &str) -> bool {
     std::env::var(&specific)
         .or_else(|_| std::env::var("GREENTIC_LINUX_EVENT_SOURCE"))
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(cfg!(test))
+        .unwrap_or_else(|_| {
+            cfg!(test)
+                || match display {
+                    "x11" => command_exists("xdotool"),
+                    "wayland" => command_exists("ydotool"),
+                    _ => false,
+                }
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +328,7 @@ pub fn detect_wayland_support(
 pub struct LinuxX11Adapter {
     platform: PlatformInfo,
     state: Arc<Mutex<LinuxState>>,
+    model_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +352,7 @@ struct LinuxState {
     fallback_used: Vec<String>,
     screenshots: Vec<String>,
     recorded: Vec<RecordedEvent>,
+    last_saved_path: Option<String>,
 }
 
 impl LinuxX11Adapter {
@@ -344,6 +360,15 @@ impl LinuxX11Adapter {
         Self {
             platform,
             state: Arc::new(Mutex::new(LinuxState::default())),
+            model_mode: false,
+        }
+    }
+
+    pub fn new_model(platform: PlatformInfo) -> Self {
+        Self {
+            platform,
+            state: Arc::new(Mutex::new(LinuxState::default())),
+            model_mode: true,
         }
     }
 
@@ -465,7 +490,7 @@ impl LinuxWaylandAdapter {
 
 impl DesktopAdapter for LinuxX11Adapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        if linux_event_source_configured("x11") {
+        if self.model_mode || linux_event_source_configured("x11") {
             linux_x11_capabilities()
         } else {
             AdapterCapabilities::new(
@@ -498,77 +523,11 @@ impl DesktopAdapter for LinuxX11Adapter {
         }
         self.require_x11()?;
 
-        let mut state = self.state.lock().expect("linux adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "linux.find_window" => {
-                let title = step
-                    .value
-                    .clone()
-                    .unwrap_or_else(|| target_key(&step.target));
-                if !state.windows.iter().any(|window| window.title == title) {
-                    let id = format!("0x{:x}", state.windows.len() + 1);
-                    state.windows.push(LinuxWindow {
-                        id,
-                        title,
-                        class_name: "GtkWindow".to_owned(),
-                        active: false,
-                    });
-                }
-            }
-            "linux.activate_window" => {
-                let title = step
-                    .value
-                    .clone()
-                    .unwrap_or_else(|| target_key(&step.target));
-                for window in &mut state.windows {
-                    window.active = window.title == title || window.id == title;
-                }
-            }
-            "linux.read_window_tree" | "linux.find_element" | "linux.assert_visible" => {
-                state.elements.entry(target_key(&step.target)).or_default();
-            }
-            "linux.type_text" => {
-                if target_key(&step.target) == "target" {
-                    state.fallback_used.push("xtest_keyboard".to_owned());
-                }
-                state.elements.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
-            }
-            "linux.click_element" if target_key(&step.target) == "target" => {
-                state.fallback_used.push("xtest_mouse".to_owned());
-            }
-            "linux.click_element" => {}
-            "linux.read_text" => {}
-            "linux.screenshot" => {
-                state
-                    .screenshots
-                    .push("evidence://linux/x11/screenshot.png".to_owned());
-            }
-            "linux.close_window" => {
-                let title = step
-                    .value
-                    .clone()
-                    .unwrap_or_else(|| target_key(&step.target));
-                state
-                    .windows
-                    .retain(|window| window.title != title && window.id != title);
-            }
-            _ => {}
+        if !cfg!(test) && !self.model_mode {
+            return self.execute_real(step);
         }
 
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
-
-        Ok(StepResult {
-            step_id: step.id,
-            success: true,
-            message: "Linux X11 step accepted".to_owned(),
-        })
+        self.execute_model(step)
     }
 
     fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult> {
@@ -615,6 +574,224 @@ impl DesktopAdapter for LinuxX11Adapter {
             .recorded
             .last()
             .cloned())
+    }
+}
+
+impl LinuxX11Adapter {
+    fn execute_model(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+        let mut state = self.state.lock().expect("linux adapter mutex poisoned");
+        match step.required_capability.as_str() {
+            "linux.open_app" => {
+                let title = step
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| target_key(&step.target));
+                let id = format!("0x{:x}", state.windows.len() + 1);
+                state.windows.push(LinuxWindow {
+                    id,
+                    title,
+                    class_name: "GtkWindow".to_owned(),
+                    active: true,
+                });
+            }
+            "linux.find_window" => {
+                let title = step
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| target_key(&step.target));
+                if !state.windows.iter().any(|window| window.title == title) {
+                    let id = format!("0x{:x}", state.windows.len() + 1);
+                    state.windows.push(LinuxWindow {
+                        id,
+                        title,
+                        class_name: "GtkWindow".to_owned(),
+                        active: false,
+                    });
+                }
+            }
+            "linux.activate_window" => {
+                let title = step
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| target_key(&step.target));
+                for window in &mut state.windows {
+                    window.active = window.title == title || window.id == title;
+                }
+            }
+            "linux.read_window_tree" | "linux.find_element" | "linux.assert_visible" => {
+                state.elements.entry(target_key(&step.target)).or_default();
+            }
+            "linux.type_text" => {
+                if target_key(&step.target) == "target" {
+                    state.fallback_used.push("xtest_keyboard".to_owned());
+                }
+                state.elements.insert(
+                    target_key(&step.target),
+                    step.value.clone().unwrap_or_default(),
+                );
+            }
+            "linux.click_element" if target_key(&step.target) == "target" => {
+                state.fallback_used.push("xtest_mouse".to_owned());
+            }
+            "linux.click_element" => {}
+            "linux.keyboard_shortcut" => {}
+            "linux.save_document" => {
+                if let Some(path) = step.value.clone() {
+                    state.last_saved_path = Some(path.clone());
+                    state.elements.insert("saved_status".to_owned(), path);
+                }
+            }
+            "linux.read_text" => {}
+            "linux.screenshot" => {
+                state
+                    .screenshots
+                    .push("evidence://linux/x11/screenshot.png".to_owned());
+            }
+            "linux.close_window" => {
+                let title = step
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| target_key(&step.target));
+                state
+                    .windows
+                    .retain(|window| window.title != title && window.id != title);
+            }
+            _ => {}
+        }
+
+        state.recorded.push(RecordedEvent {
+            action: step.action.clone(),
+            target: step.target,
+            value: step.value,
+        });
+
+        Ok(StepResult {
+            step_id: step.id,
+            success: true,
+            message: "Linux X11 step accepted".to_owned(),
+        })
+    }
+
+    fn execute_real(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+        let mut message = "Linux X11 automation step executed".to_owned();
+        if is_new_document_step(&step) {
+            send_x11_shortcut("ctrl+n")?;
+            return self.finish_real_step(step, "created new document".to_owned());
+        }
+        if is_confirm_step(&step) {
+            run_xdotool(["key", "Return"])?;
+            return self.finish_real_step(step, "confirmed dialog".to_owned());
+        }
+        if is_keyboard_shortcut_step(&step) {
+            send_x11_shortcut(step.value.as_deref().unwrap_or_default())?;
+            return self.finish_real_step(step, message);
+        }
+
+        match step.required_capability.as_str() {
+            "linux.open_app" | "linux.find_window" | "linux.activate_window" => {
+                let app_or_window = step
+                    .value
+                    .clone()
+                    .or_else(|| target_hint(&step.target))
+                    .or_else(|| app_name_from_step_id(&step.id));
+                if step.action == "open_app" || step.required_capability == "linux.open_app" {
+                    let app = app_or_window.ok_or_else(|| {
+                        AdapterError::ExecutionFailed(
+                            "Linux open app step needs an app name, target, or open-* step id"
+                                .to_owned(),
+                        )
+                    })?;
+                    open_linux_app(&app)?;
+                    message = format!("opened {app}");
+                } else if let Some(title) = app_or_window {
+                    activate_x11_window(&title)?;
+                    message = format!("activated {title}");
+                }
+            }
+            "linux.read_window_tree" | "linux.find_element" => {
+                thread::sleep(Duration::from_millis(250));
+            }
+            "linux.type_text" => {
+                let value = step.value.clone().unwrap_or_default();
+                let should_save_path = looks_like_unix_path(&value)
+                    && (step.id.contains("path")
+                        || step.id.contains("file")
+                        || step.action.contains("save"));
+                if should_save_path {
+                    save_linux_document_as(&value)?;
+                    let mut state = self.state.lock().expect("linux adapter mutex poisoned");
+                    state.last_saved_path = Some(value.clone());
+                    state
+                        .elements
+                        .insert("saved_status".to_owned(), value.clone());
+                    message = value;
+                } else {
+                    type_x11_text(&value)?;
+                    self.state
+                        .lock()
+                        .expect("linux adapter mutex poisoned")
+                        .elements
+                        .insert(target_key(&step.target), value);
+                }
+            }
+            "linux.click_element" => {
+                run_xdotool(["key", "Return"])?;
+            }
+            "linux.save_document" => {
+                let path = step.value.clone().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "Linux save document step needs a filesystem path value".to_owned(),
+                    )
+                })?;
+                save_linux_document_as(&path)?;
+                let mut state = self.state.lock().expect("linux adapter mutex poisoned");
+                state.last_saved_path = Some(path.clone());
+                state
+                    .elements
+                    .insert("saved_status".to_owned(), path.clone());
+                message = path;
+            }
+            "linux.read_text" => {
+                let mut state = self.state.lock().expect("linux adapter mutex poisoned");
+                if let Some(path) = state.last_saved_path.clone() {
+                    state
+                        .elements
+                        .insert(target_key(&step.target), path.clone());
+                    message = path;
+                }
+            }
+            "linux.screenshot" => {
+                self.state
+                    .lock()
+                    .expect("linux adapter mutex poisoned")
+                    .screenshots
+                    .push("evidence://linux/x11/screenshot.png".to_owned());
+            }
+            "linux.close_window" => {
+                send_x11_shortcut("alt+f4")?;
+            }
+            _ => {}
+        }
+
+        self.finish_real_step(step, message)
+    }
+
+    fn finish_real_step(&self, step: RunnerStep, message: String) -> AdapterResult<StepResult> {
+        self.state
+            .lock()
+            .expect("linux adapter mutex poisoned")
+            .recorded
+            .push(RecordedEvent {
+                action: step.action.clone(),
+                target: step.target,
+                value: step.value,
+            });
+
+        Ok(StepResult {
+            step_id: step.id,
+            success: true,
+            message,
+        })
     }
 }
 
@@ -729,6 +906,200 @@ impl DesktopAdapter for LinuxWaylandAdapter {
             .last()
             .cloned())
     }
+}
+
+fn command_exists(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .map(|_| true)
+        .unwrap_or(false)
+}
+
+fn run_xdotool<const N: usize>(args: [&str; N]) -> AdapterResult<()> {
+    let output = Command::new("xdotool").args(args).output().map_err(|err| {
+        AdapterError::ExecutionFailed(format!(
+            "xdotool is required for Linux X11 desktop automation: {err}"
+        ))
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "xdotool failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn open_linux_app(app: &str) -> AdapterResult<()> {
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg(format!(
+            "command -v {0} >/dev/null 2>&1 && nohup {0} >/dev/null 2>&1 &",
+            shell_word(app)
+        ))
+        .output()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("failed to launch Linux app: {err}"))
+        })?;
+    if output.status.success() {
+        thread::sleep(Duration::from_millis(700));
+        return Ok(());
+    }
+
+    let output = Command::new("xdg-open")
+        .arg(app)
+        .output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run xdg-open: {err}")))?;
+    if output.status.success() {
+        thread::sleep(Duration::from_millis(700));
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "could not open Linux app or resource '{app}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn activate_x11_window(title: &str) -> AdapterResult<()> {
+    let output = Command::new("xdotool")
+        .args(["search", "--name", title])
+        .output()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xdotool search failed for '{title}': {err}"))
+        })?;
+    let window = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AdapterError::ExecutionFailed(format!("no X11 window matched '{title}'")))?
+        .to_owned();
+    let output = Command::new("xdotool")
+        .args(["windowactivate", "--sync", &window])
+        .output()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xdotool windowactivate failed: {err}"))
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "could not activate X11 window '{title}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn type_x11_text(value: &str) -> AdapterResult<()> {
+    let output = Command::new("xdotool")
+        .args(["type", "--clearmodifiers", "--delay", "0", value])
+        .output()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xdotool type is required on X11: {err}"))
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "xdotool type failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn send_x11_shortcut(shortcut: &str) -> AdapterResult<()> {
+    let normalized = shortcut.to_ascii_lowercase().replace(' ', "");
+    let key = if normalized.contains("ctrl+s") || normalized == "save" {
+        "ctrl+s"
+    } else if normalized.contains("ctrl+n") {
+        "ctrl+n"
+    } else if normalized.contains("alt+f4") {
+        "alt+F4"
+    } else if normalized.contains("enter") || normalized.contains("return") {
+        "Return"
+    } else {
+        normalized.as_str()
+    };
+    run_xdotool(["key", "--clearmodifiers", key])
+}
+
+fn save_linux_document_as(path: &str) -> AdapterResult<()> {
+    let path_ref = Path::new(path);
+    if let Some(parent) = path_ref.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AdapterError::ExecutionFailed(format!("could not create save directory: {err}"))
+        })?;
+    }
+    send_x11_shortcut("ctrl+s")?;
+    thread::sleep(Duration::from_millis(700));
+    type_x11_text(path)?;
+    run_xdotool(["key", "Return"])?;
+    for _ in 0..20 {
+        if path_ref.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(AdapterError::ExecutionFailed(format!(
+        "save command completed but {path} was not created"
+    )))
+}
+
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn looks_like_unix_path(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("~/") || value.starts_with("file://")
+}
+
+fn is_new_document_step(step: &RunnerStep) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("new") || action == "new" || action.contains("new_document")
+}
+
+fn is_confirm_step(step: &RunnerStep) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("confirm") || action.contains("confirm") || action == "submit"
+}
+
+fn is_keyboard_shortcut_step(step: &RunnerStep) -> bool {
+    step.required_capability == "linux.keyboard_shortcut"
+        || step.action.eq_ignore_ascii_case("keyboard_shortcut")
+        || step
+            .value
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("save") || value.contains('+'))
+}
+
+fn target_hint(target: &LocatorTarget) -> Option<String> {
+    target.preferred.as_ref().and_then(|strategy| {
+        strategy
+            .name
+            .clone()
+            .or_else(|| strategy.text.clone())
+            .or_else(|| strategy.label.clone())
+    })
+}
+
+fn app_name_from_step_id(id: &str) -> Option<String> {
+    let trimmed = id
+        .trim_start_matches("open-")
+        .trim_start_matches("activate-")
+        .trim_end_matches("-app")
+        .replace(['-', '_'], " ");
+    (!trimmed.trim().is_empty()).then(|| {
+        let mut chars = trimmed.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_else(|| trimmed.clone())
+    })
 }
 
 fn target_key(target: &LocatorTarget) -> String {

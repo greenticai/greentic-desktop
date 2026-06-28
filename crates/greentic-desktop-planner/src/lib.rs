@@ -799,6 +799,16 @@ fn structured_desktop_steps(
     }
     for input in inputs {
         let name = input.trim_start_matches("inputs.");
+        if prefix != "java" && is_file_path_input(name) {
+            let value = format!("{{{{{input}}}}}");
+            steps.push(step(
+                &format!("save_{name}"),
+                "save_document",
+                &format!("{prefix}.save_document"),
+                Some(&value),
+            ));
+            continue;
+        }
         let find_capability = if prefix == "java" {
             "java.find_component".to_owned()
         } else {
@@ -830,6 +840,15 @@ fn structured_desktop_steps(
         ));
     }
     steps
+}
+
+fn is_file_path_input(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized.contains("path")
+        || normalized.contains("file")
+        || normalized.contains("document_name")
+        || normalized.contains("document")
+        || normalized.contains("spreadsheet")
 }
 
 fn extract_named_fields(prompt: &str, markers: &[&str]) -> Vec<String> {
@@ -1063,6 +1082,28 @@ mod tests {
             .steps
             .iter()
             .any(|step| step.required_capability.starts_with("java.")));
+    }
+
+    #[test]
+    fn native_path_inputs_are_planned_as_save_document_steps() {
+        let steps = structured_desktop_steps(
+            "macos",
+            &[
+                "inputs.document_path".to_owned(),
+                "inputs.text_content".to_owned(),
+            ],
+            &["outputs.saved_status".to_owned()],
+        );
+
+        assert!(steps.iter().any(|step| {
+            step.id == "save_document_path"
+                && step.action == "save_document"
+                && step.required_capability == "macos.save_document"
+                && step.value.as_deref() == Some("{{inputs.document_path}}")
+        }));
+        assert!(steps.iter().any(|step| {
+            step.id == "type_text_content" && step.required_capability == "macos.type_text"
+        }));
     }
 
     #[test]

@@ -5470,7 +5470,7 @@ mod tests {
             "{response}"
         );
         assert!(
-            response.contains("planner.unsupported_capability"),
+            !response.contains("planner.unsupported_capability"),
             "{response}"
         );
         assert!(

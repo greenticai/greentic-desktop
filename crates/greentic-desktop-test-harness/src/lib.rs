@@ -171,7 +171,7 @@ pub fn macos_app_workflow_e2e_result(
         ));
     }
 
-    let adapter = MacOsAccessibilityAdapter::new(PlatformInfo {
+    let adapter = MacOsAccessibilityAdapter::new_model(PlatformInfo {
         os: DesktopPlatform::MacOS,
         version: "github-actions".to_owned(),
         desktop_environment: Some("Aqua".to_owned()),
@@ -213,7 +213,7 @@ pub fn linux_x11_app_workflow_e2e_result(
         ));
     }
 
-    let adapter = LinuxX11Adapter::new(PlatformInfo {
+    let adapter = LinuxX11Adapter::new_model(PlatformInfo {
         os: DesktopPlatform::Linux,
         version: "github-actions".to_owned(),
         desktop_environment: Some("GNOME".to_owned()),
@@ -255,7 +255,7 @@ pub fn windows_app_workflow_e2e_result(
         ));
     }
 
-    let adapter = WindowsUiAdapter::new();
+    let adapter = WindowsUiAdapter::new_model();
     let outcome = run_windows_app_workflow(&adapter, workflow).map_err(|err| err.to_string());
     let _ = std::fs::remove_dir_all(root);
     outcome
