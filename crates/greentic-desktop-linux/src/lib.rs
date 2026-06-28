@@ -683,7 +683,7 @@ impl LinuxX11Adapter {
             return self.finish_real_step(step, "confirmed dialog".to_owned());
         }
         if is_keyboard_shortcut_step(&step) {
-            send_x11_shortcut(step.value.as_deref().unwrap_or_default())?;
+            send_x11_shortcut(inferred_shortcut(&step).unwrap_or_default())?;
             return self.finish_real_step(step, message);
         }
 
@@ -1071,10 +1071,23 @@ fn is_confirm_step(step: &RunnerStep) -> bool {
 fn is_keyboard_shortcut_step(step: &RunnerStep) -> bool {
     step.required_capability == "linux.keyboard_shortcut"
         || step.action.eq_ignore_ascii_case("keyboard_shortcut")
+        || inferred_shortcut(step).is_some()
         || step
             .value
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("save") || value.contains('+'))
+}
+
+fn inferred_shortcut(step: &RunnerStep) -> Option<&str> {
+    step.value.as_deref().or_else(|| {
+        let id = step.id.to_ascii_lowercase();
+        let action = step.action.to_ascii_lowercase();
+        if id.contains("save") || action.contains("save") {
+            Some("ctrl+s")
+        } else {
+            None
+        }
+    })
 }
 
 fn target_hint(target: &LocatorTarget) -> Option<String> {

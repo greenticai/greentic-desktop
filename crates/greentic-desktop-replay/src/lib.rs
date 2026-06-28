@@ -288,7 +288,7 @@ pub fn replay_with_context(
                 outputs: BTreeMap::new(),
                 evidence,
                 evidence_ref,
-                failure_reason: Some("step failed".to_owned()),
+                failure_reason: Some(reason.unwrap_or_else(|| format!("step {} failed", step.id))),
             };
         }
     }
@@ -701,6 +701,7 @@ mod tests {
         visible_text: Vec<String>,
         execute_count: AtomicUsize,
         assertions_pass: bool,
+        execute_failure: Option<String>,
     }
 
     impl TestAdapter {
@@ -728,6 +729,14 @@ mod tests {
                 visible_text: visible_text.into_iter().map(str::to_owned).collect(),
                 execute_count: AtomicUsize::new(0),
                 assertions_pass,
+                execute_failure: None,
+            }
+        }
+
+        fn failing(capabilities: &[&str], message: &str) -> Self {
+            Self {
+                execute_failure: Some(message.to_owned()),
+                ..Self::new(capabilities, Vec::new(), true)
             }
         }
     }
@@ -747,6 +756,13 @@ mod tests {
 
         fn execute(&self, step: RunnerStep) -> AdapterResult<StepResult> {
             self.execute_count.fetch_add(1, Ordering::SeqCst);
+            if let Some(message) = &self.execute_failure {
+                return Ok(StepResult {
+                    step_id: step.id,
+                    success: false,
+                    message: message.clone(),
+                });
+            }
             Ok(StepResult {
                 step_id: step.id,
                 success: true,
@@ -898,6 +914,32 @@ mod tests {
 
         assert!(!outcome.passed);
         assert_eq!(outcome.failure_reason, Some("assertion failed".to_owned()));
+    }
+
+    #[test]
+    fn replay_preserves_adapter_step_failure_reason() {
+        let adapter = Arc::new(TestAdapter::failing(
+            &["web.fill"],
+            "save command completed but /tmp/test.docx was not created",
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(adapter);
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+        };
+        let mut request = request();
+        request.package.assertions.clear();
+        request.package.outputs.clear();
+        request.adapters = Vec::new();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(!outcome.passed);
+        assert_eq!(
+            outcome.failure_reason.as_deref(),
+            Some("save command completed but /tmp/test.docx was not created")
+        );
     }
 
     #[test]

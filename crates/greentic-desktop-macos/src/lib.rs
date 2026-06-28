@@ -467,7 +467,7 @@ impl MacOsAccessibilityAdapter {
             return self.finish_real_step(step, message);
         }
         if is_keyboard_shortcut_step(&step) {
-            let shortcut = step.value.as_deref().unwrap_or_default();
+            let shortcut = inferred_shortcut(&step).unwrap_or_default();
             send_keyboard_shortcut(shortcut)?;
             if shortcut_is_save(Some(shortcut)) {
                 self.state
@@ -787,6 +787,18 @@ fn shortcut_is_save(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn inferred_shortcut(step: &RunnerStep) -> Option<&str> {
+    step.value.as_deref().or_else(|| {
+        let id = step.id.to_ascii_lowercase();
+        let action = step.action.to_ascii_lowercase();
+        if id.contains("save") || action.contains("save") {
+            Some("cmd+s")
+        } else {
+            None
+        }
+    })
+}
+
 fn is_new_document_step(step: &RunnerStep) -> bool {
     let id = step.id.to_ascii_lowercase();
     let action = step.action.to_ascii_lowercase();
@@ -802,6 +814,7 @@ fn is_confirm_step(step: &RunnerStep) -> bool {
 fn is_keyboard_shortcut_step(step: &RunnerStep) -> bool {
     step.required_capability == "macos.keyboard_shortcut"
         || step.action.eq_ignore_ascii_case("keyboard_shortcut")
+        || inferred_shortcut(step).is_some()
         || step
             .value
             .as_deref()
