@@ -431,26 +431,28 @@ fn run_assertions(
     selector: &ReplayAdapterSelector<'_>,
     tool_trace: &mut Vec<ToolTraceEntry>,
 ) -> Option<String> {
+    let step_namespaces = request
+        .package
+        .steps
+        .iter()
+        .filter_map(|step| capability_namespace(&step.required_capability))
+        .collect::<Vec<_>>();
     for (index, assertion) in request.package.assertions.iter().enumerate() {
-        let adapter = selector
-            .registry
-            .adapters
-            .values()
-            .find(|adapter| {
-                adapter
-                    .capabilities()
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability.contains("assert") || capability.contains("wait"))
-            })
-            .cloned()
-            .or_else(|| selector.registry.adapters.values().next().cloned())?;
-        let capability = adapter
-            .capabilities()
-            .capabilities
-            .into_iter()
-            .find(|capability| capability.contains("assert") || capability.contains("wait"))
-            .unwrap_or_else(|| request.package.steps[0].required_capability.clone());
+        let (adapter, capability) =
+            assertion_adapter_for_step_namespaces(selector, &step_namespaces)
+                .or_else(|| fallback_assertion_adapter(selector))
+                .or_else(|| {
+                    selector
+                        .registry
+                        .adapters
+                        .values()
+                        .next()
+                        .cloned()
+                        .map(|adapter| {
+                            let capability = request.package.steps[0].required_capability.clone();
+                            (adapter, capability)
+                        })
+                })?;
         let result = adapter.validate(Assertion {
             id: format!("assertion_{}", index + 1),
             required_capability: capability.clone(),
@@ -477,6 +479,41 @@ fn run_assertions(
         }
     }
     None
+}
+
+fn assertion_adapter_for_step_namespaces(
+    selector: &ReplayAdapterSelector<'_>,
+    step_namespaces: &[&str],
+) -> Option<(Arc<dyn DesktopAdapter>, String)> {
+    selector.registry.adapters.values().find_map(|adapter| {
+        let capabilities = adapter.capabilities().capabilities;
+        let capability = capabilities.iter().find(|capability| {
+            is_assertion_capability(capability)
+                && capability_namespace(capability)
+                    .is_some_and(|namespace| step_namespaces.contains(&namespace))
+        })?;
+        Some((adapter.clone(), capability.clone()))
+    })
+}
+
+fn fallback_assertion_adapter(
+    selector: &ReplayAdapterSelector<'_>,
+) -> Option<(Arc<dyn DesktopAdapter>, String)> {
+    selector.registry.adapters.values().find_map(|adapter| {
+        let capabilities = adapter.capabilities().capabilities;
+        let capability = capabilities
+            .iter()
+            .find(|capability| is_assertion_capability(capability))?;
+        Some((adapter.clone(), capability.clone()))
+    })
+}
+
+fn is_assertion_capability(capability: &str) -> bool {
+    capability.contains("assert") || capability.contains("wait")
+}
+
+fn capability_namespace(capability: &str) -> Option<&str> {
+    capability.split_once('.').map(|(namespace, _)| namespace)
 }
 
 fn extract_outputs(
@@ -608,9 +645,23 @@ mod tests {
 
     impl TestAdapter {
         fn new(capabilities: &[&str], visible_text: Vec<&str>, assertions_pass: bool) -> Self {
+            Self::with_id(
+                "greentic.desktop.test",
+                capabilities,
+                visible_text,
+                assertions_pass,
+            )
+        }
+
+        fn with_id(
+            adapter_id: &str,
+            capabilities: &[&str],
+            visible_text: Vec<&str>,
+            assertions_pass: bool,
+        ) -> Self {
             Self {
                 capabilities: AdapterCapabilities::new(
-                    "greentic.desktop.test",
+                    adapter_id,
                     "1.0.0",
                     capabilities.iter().copied(),
                 ),
@@ -787,5 +838,45 @@ mod tests {
 
         assert!(!outcome.passed);
         assert_eq!(outcome.failure_reason, Some("assertion failed".to_owned()));
+    }
+
+    #[test]
+    fn replay_assertions_use_adapter_matching_step_namespace() {
+        let java_adapter = Arc::new(TestAdapter::with_id(
+            "greentic.desktop.java-accessibility",
+            &["java.find_window", "java.assert_text"],
+            Vec::new(),
+            false,
+        ));
+        let native_adapter = Arc::new(TestAdapter::with_id(
+            "greentic.desktop.macos.ax",
+            &["macos.activate_app", "macos.assert_visible"],
+            vec!["saved"],
+            true,
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(java_adapter);
+        registry.insert(native_adapter);
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+        };
+        let mut request = request();
+        request.package.steps = vec![RunnerStep {
+            id: "open_app".to_owned(),
+            action: "activate_app".to_owned(),
+            target: LocatorTarget::default(),
+            value: None,
+            required_capability: "macos.activate_app".to_owned(),
+        }];
+        request.package.assertions = vec!["saved".to_owned()];
+        request.package.outputs.clear();
+        request.adapters = Vec::new();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(outcome.passed, "{:?}", outcome.failure_reason);
+        assert!(outcome.evidence.to_json().contains("macos.assert_visible"));
+        assert!(!outcome.evidence.to_json().contains("java.assert_text"));
     }
 }
