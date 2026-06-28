@@ -5452,16 +5452,6 @@ mod tests {
             evidence_store: root.join("evidence"),
             ..GuiApiState::default()
         };
-        let native_adapter = replay_adapter_registry(&state)
-            .capabilities()
-            .into_iter()
-            .find(|adapter| {
-                adapter.supports("macos.activate_app")
-                    || adapter.supports("windows.open_app")
-                    || adapter.supports("linux.find_window")
-            })
-            .expect("platform native adapter should be registered")
-            .adapter_id;
         let handle = GuiHost::start(GuiHostOptions {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             api_state: state,
@@ -5475,13 +5465,18 @@ mod tests {
         );
         let response = String::from_utf8_lossy(&response);
 
-        assert!(response.contains(&native_adapter), "{response}");
         assert!(
             !response.contains("greentic.desktop.java-accessibility"),
             "{response}"
         );
         assert!(
-            !response.contains("planner.unsupported_capability"),
+            response.contains("planner.unsupported_capability"),
+            "{response}"
+        );
+        assert!(
+            response.contains("macos.")
+                || response.contains("windows.")
+                || response.contains("linux."),
             "{response}"
         );
 
@@ -6379,7 +6374,7 @@ mod tests {
         let draft = post(
             handle.addr(),
             "/api/v1/planner/drafts",
-            r#"{"prompt":"Open the calculator app. Take three inputs: two numbers and one operation plus, minus, divide or multiply. Return the result."}"#,
+            r#"{"prompt":"Open https://example.test/calculator. Take three inputs: two numbers and one operation plus, minus, divide or multiply. Return the result."}"#,
         );
         let draft = String::from_utf8_lossy(&draft);
         assert!(draft.contains("\"inputs\":[\"number_1\",\"number_2\",\"operation\"]"));

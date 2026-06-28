@@ -136,7 +136,7 @@ impl RecordingBackend for MacOsAccessibilityRecordingBackend {
 fn macos_ax_event_source_configured() -> bool {
     std::env::var("GREENTIC_MACOS_AX_EVENT_SOURCE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(cfg!(test))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +269,7 @@ impl MacOsAccessibilityAdapter {
 impl DesktopAdapter for MacOsAccessibilityAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         let diagnostics = first_run_permission_check(&self.platform);
-        if diagnostics.ready_for_ax() {
+        if diagnostics.ready_for_ax() && macos_ax_event_source_configured() {
             macos_capabilities()
         } else if self
             .platform

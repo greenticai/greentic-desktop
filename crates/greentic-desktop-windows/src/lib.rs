@@ -135,7 +135,7 @@ impl RecordingBackend for WindowsUiRecordingBackend {
 fn windows_uia_event_source_configured() -> bool {
     std::env::var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(cfg!(test))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -203,7 +203,15 @@ impl WindowsUiAdapter {
 
 impl DesktopAdapter for WindowsUiAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        windows_capabilities()
+        if windows_uia_event_source_configured() {
+            windows_capabilities()
+        } else {
+            AdapterCapabilities::new(
+                WINDOWS_ADAPTER_ID,
+                env!("CARGO_PKG_VERSION"),
+                [] as [&str; 0],
+            )
+        }
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {

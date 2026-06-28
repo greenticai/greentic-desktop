@@ -419,6 +419,12 @@ impl GreenticLlmClient for HeuristicLlmClient {
         };
         let capability = if lower.contains("terminal") || lower.contains("mainframe") {
             "terminal.read_screen"
+        } else if lower.contains("http://")
+            || lower.contains("https://")
+            || lower.contains("browser")
+            || lower.contains("web")
+        {
+            "web.goto"
         } else if lower.contains("calculator") || lower.contains("desktop") || lower.contains("app")
         {
             desktop_capability(request)

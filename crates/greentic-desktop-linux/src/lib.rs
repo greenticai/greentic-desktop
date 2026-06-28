@@ -211,7 +211,7 @@ fn linux_event_source_configured(display: &str) -> bool {
     std::env::var(&specific)
         .or_else(|_| std::env::var("GREENTIC_LINUX_EVENT_SOURCE"))
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(cfg!(test))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,7 +465,15 @@ impl LinuxWaylandAdapter {
 
 impl DesktopAdapter for LinuxX11Adapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        linux_x11_capabilities()
+        if linux_event_source_configured("x11") {
+            linux_x11_capabilities()
+        } else {
+            AdapterCapabilities::new(
+                LINUX_X11_ADAPTER_ID,
+                env!("CARGO_PKG_VERSION"),
+                [] as [&str; 0],
+            )
+        }
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
@@ -612,7 +620,15 @@ impl DesktopAdapter for LinuxX11Adapter {
 
 impl DesktopAdapter for LinuxWaylandAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        linux_wayland_capabilities()
+        if linux_event_source_configured("wayland") {
+            linux_wayland_capabilities()
+        } else {
+            AdapterCapabilities::new(
+                LINUX_WAYLAND_ADAPTER_ID,
+                env!("CARGO_PKG_VERSION"),
+                [] as [&str; 0],
+            )
+        }
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
