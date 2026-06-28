@@ -2854,6 +2854,14 @@ fn recording_backend_registry(
     state: &GuiApiState,
 ) -> RecordingBackendRegistry {
     let mut registry = RecordingBackendRegistry::new();
+    #[cfg(test)]
+    if target == "__test_browser" {
+        registry.register(FakeRecordingBackend::ready(
+            "greentic.recording.web.test",
+            RecordingTargetKind::Web,
+        ));
+        return registry;
+    }
     if target == "browser" {
         registry.register(PlaywrightWebRecordingBackend::new(
             PlaywrightRecorderOptions {
@@ -5548,12 +5556,12 @@ mod tests {
         let response = post(
             handle.addr(),
             "/api/v1/recordings",
-            r#"{"name":"Create customer in CRM","target":"browser"}"#,
+            r#"{"name":"Create customer in CRM","target":"__test_browser"}"#,
         );
         let response = String::from_utf8_lossy(&response);
         assert!(response.contains("\"state\":\"recording\""));
         assert!(response.contains("\"captureState\":\"recording\""));
-        assert!(response.contains("greentic.recording.web.playwright"));
+        assert!(response.contains("greentic.recording.web.test"));
         let session_id = json_string_field(&response, "sessionId").expect("session id");
 
         for action in ["pause", "resume", "stop", "mark-input"] {
