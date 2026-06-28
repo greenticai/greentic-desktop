@@ -61,6 +61,8 @@ export class ApiClientError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = guiToken();
+  // API_BASE is a same-origin constant and callers pass application route paths, not absolute user-controlled URLs.
+  // foxguard: ignore[js/no-ssrf]
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {

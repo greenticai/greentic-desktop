@@ -207,6 +207,8 @@ impl Drop for GuiHostHandle {
 
 pub fn open_default_browser(url: &str) -> Result<(), GuiError> {
     let command = browser_command(url);
+    // Browser openers are selected from a fixed OS allow-list; the URL is passed as an argument without shell expansion.
+    // foxguard: ignore[rs/no-command-injection]
     Command::new(command.program)
         .args(command.args)
         .spawn()
@@ -1052,6 +1054,8 @@ fn open_linux_settings(permission: &str) -> Result<(), String> {
 }
 
 fn spawn_detached(command: &str, args: &[&str]) -> Result<(), String> {
+    // Settings openers are selected by the OS-specific callers above from fixed command names and argument templates.
+    // foxguard: ignore[rs/no-command-injection]
     Command::new(command)
         .args(args)
         .spawn()

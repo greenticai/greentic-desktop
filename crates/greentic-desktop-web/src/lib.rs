@@ -250,6 +250,8 @@ fn start_playwright_recorder_process(
         .open(&log)
         .map_err(|err| err.to_string())?;
     let err_file = log_file.try_clone().map_err(|err| err.to_string())?;
+    // GREENTIC_NODE is a local operator override or fixed PATH lookup and is invoked directly without a shell.
+    // foxguard: ignore[rs/no-command-injection]
     let mut command = Command::new(node);
     command
         .arg(&script)
@@ -269,6 +271,8 @@ fn start_playwright_recorder_process(
 fn find_node_command() -> Option<String> {
     std::env::var("GREENTIC_NODE").ok().or_else(|| {
         ["node", "nodejs"].iter().find_map(|candidate| {
+            // Candidate comes from the fixed node/nodejs allow-list and is invoked directly without a shell.
+            // foxguard: ignore[rs/no-command-injection]
             Command::new(candidate)
                 .arg("--version")
                 .stdin(Stdio::null())
