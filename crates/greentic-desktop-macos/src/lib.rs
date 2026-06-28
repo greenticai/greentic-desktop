@@ -408,10 +408,10 @@ impl MacOsAccessibilityAdapter {
                 state.elements.entry(target_key(&step.target)).or_default();
             }
             "macos.type_text" => {
-                state.elements.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
+                let value = step.value.clone().unwrap_or_default();
+                if !is_command_text_step(&step, &value) {
+                    state.elements.insert(target_key(&step.target), value);
+                }
             }
             "macos.click_element" => {}
             "macos.keyboard_shortcut" if shortcut_is_save(step.value.as_deref()) => {
@@ -516,6 +516,9 @@ impl MacOsAccessibilityAdapter {
                         .insert("saved_status".to_owned(), value.clone());
                     state.save_dialog_open = false;
                     message = value;
+                } else if is_command_text_step(&step, &value) {
+                    send_text_command(&value)?;
+                    message = format!("sent command {}", command_name(&value));
                 } else {
                     paste_text_with_system_events(&value)?;
                     self.state
@@ -562,6 +565,18 @@ impl MacOsAccessibilityAdapter {
                         .elements
                         .insert(target_key(&step.target), path.clone());
                     message = path;
+                } else if let Ok(visible_text) = frontmost_visible_text() {
+                    if let Some(value) = visible_text
+                        .iter()
+                        .rev()
+                        .find(|value| !value.trim().is_empty())
+                        .cloned()
+                    {
+                        state
+                            .elements
+                            .insert(target_key(&step.target), value.clone());
+                        message = value;
+                    }
                 }
             }
             "macos.screenshot" => {
@@ -727,6 +742,73 @@ fn send_keyboard_shortcut(shortcut: &str) -> AdapterResult<()> {
     ))
 }
 
+fn send_text_command(value: &str) -> AdapterResult<()> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let key = match normalized.as_str() {
+        "=" | "enter" | "return" => "return".to_owned(),
+        "+" | "plus" | "add" | "sum" => "+".to_owned(),
+        "-" | "minus" | "subtract" => "-".to_owned(),
+        "*" | "x" | "×" | "multiply" | "times" => "*".to_owned(),
+        "/" | "÷" | "divide" => "/".to_owned(),
+        other => other.to_owned(),
+    };
+    if key == "return" {
+        apple_script(r#"tell application "System Events" to key code 36"#)
+    } else {
+        apple_script(&format!(
+            r#"tell application "System Events" to keystroke {}"#,
+            applescript_string(&key)
+        ))
+    }
+}
+
+fn frontmost_visible_text() -> AdapterResult<Vec<String>> {
+    let script = r#"
+on collectText(elementRef)
+    set foundText to {}
+    try
+        set elementName to name of elementRef
+        if elementName is not missing value and elementName is not "" then set end of foundText to elementName as text
+    end try
+    try
+        set elementValue to value of elementRef
+        if elementValue is not missing value and elementValue is not "" then set end of foundText to elementValue as text
+    end try
+    try
+        repeat with childRef in UI elements of elementRef
+            set foundText to foundText & my collectText(childRef)
+        end repeat
+    end try
+    return foundText
+end collectText
+
+tell application "System Events"
+    set frontApp to first application process whose frontmost is true
+    set AppleScript's text item delimiters to linefeed
+    return (collectText(frontApp)) as text
+end tell
+"#;
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("failed to inspect UI text: {err}"))
+        })?;
+    if !output.status.success() {
+        return Err(AdapterError::ExecutionFailed(format!(
+            "frontmost app text inspection failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 fn save_current_document_as(path: &str) -> AdapterResult<()> {
     let path = Path::new(path);
     let parent = path.parent().ok_or_else(|| {
@@ -785,6 +867,45 @@ fn shortcut_is_save(value: Option<&str>) -> bool {
             lower.contains("+s") || lower == "save"
         })
         .unwrap_or(false)
+}
+
+fn is_command_text_step(step: &RunnerStep, value: &str) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("press")
+        || id.contains("command")
+        || id.contains("operation")
+        || action.contains("press")
+        || action.contains("key")
+        || action.contains("command")
+        || is_command_token(value)
+}
+
+fn is_command_token(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "=" | "enter"
+            | "return"
+            | "+"
+            | "plus"
+            | "add"
+            | "sum"
+            | "-"
+            | "minus"
+            | "subtract"
+            | "*"
+            | "x"
+            | "×"
+            | "multiply"
+            | "times"
+            | "/"
+            | "÷"
+            | "divide"
+    )
+}
+
+fn command_name(value: &str) -> String {
+    value.trim().to_owned()
 }
 
 fn inferred_shortcut(step: &RunnerStep) -> Option<&str> {
@@ -1140,6 +1261,48 @@ mod tests {
             .expect("observe should use AX")
             .summary
             .contains("CRM.app"));
+    }
+
+    #[test]
+    fn command_tokens_do_not_become_visible_output_text() {
+        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
+        let text_target = LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                name: Some("first number".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+
+        adapter
+            .execute(RunnerStep {
+                id: "enter-first-number".to_owned(),
+                action: "type_text".to_owned(),
+                target: text_target,
+                value: Some("12".to_owned()),
+                required_capability: "macos.type_text".to_owned(),
+            })
+            .expect("text entry should succeed");
+        adapter
+            .execute(RunnerStep {
+                id: "press-equals".to_owned(),
+                action: "type_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("=".to_owned()),
+                required_capability: "macos.type_text".to_owned(),
+            })
+            .expect("command token should succeed");
+
+        let visible = adapter
+            .observe(ObserveContext {
+                session_id: "command-token-test".to_owned(),
+                target: None,
+            })
+            .expect("observation should succeed")
+            .visible_text;
+
+        assert!(visible.iter().any(|value| value == "12"));
+        assert!(!visible.iter().any(|value| value == "="));
     }
 
     #[test]

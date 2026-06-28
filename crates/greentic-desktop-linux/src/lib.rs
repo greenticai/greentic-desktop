@@ -725,6 +725,9 @@ impl LinuxX11Adapter {
                         .elements
                         .insert("saved_status".to_owned(), value.clone());
                     message = value;
+                } else if is_command_text_step(&step, &value) {
+                    send_x11_command(&value)?;
+                    message = format!("sent command {}", command_name(&value));
                 } else {
                     type_x11_text(&value)?;
                     self.state
@@ -1026,6 +1029,19 @@ fn send_x11_shortcut(shortcut: &str) -> AdapterResult<()> {
     run_xdotool(["key", "--clearmodifiers", key])
 }
 
+fn send_x11_command(value: &str) -> AdapterResult<()> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let key = match normalized.as_str() {
+        "=" | "enter" | "return" => "Return".to_owned(),
+        "+" | "plus" | "add" | "sum" => "plus".to_owned(),
+        "-" | "minus" | "subtract" => "minus".to_owned(),
+        "*" | "x" | "×" | "multiply" | "times" => "asterisk".to_owned(),
+        "/" | "÷" | "divide" => "slash".to_owned(),
+        other => other.to_owned(),
+    };
+    run_xdotool(["key", "--clearmodifiers", &key])
+}
+
 fn save_linux_document_as(path: &str) -> AdapterResult<()> {
     let path_ref = Path::new(path);
     if let Some(parent) = path_ref.parent() {
@@ -1076,6 +1092,45 @@ fn is_keyboard_shortcut_step(step: &RunnerStep) -> bool {
             .value
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("save") || value.contains('+'))
+}
+
+fn is_command_text_step(step: &RunnerStep, value: &str) -> bool {
+    let id = step.id.to_ascii_lowercase();
+    let action = step.action.to_ascii_lowercase();
+    id.contains("press")
+        || id.contains("command")
+        || id.contains("operation")
+        || action.contains("press")
+        || action.contains("key")
+        || action.contains("command")
+        || is_command_token(value)
+}
+
+fn is_command_token(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "=" | "enter"
+            | "return"
+            | "+"
+            | "plus"
+            | "add"
+            | "sum"
+            | "-"
+            | "minus"
+            | "subtract"
+            | "*"
+            | "x"
+            | "×"
+            | "multiply"
+            | "times"
+            | "/"
+            | "÷"
+            | "divide"
+    )
+}
+
+fn command_name(value: &str) -> String {
+    value.trim().to_owned()
 }
 
 fn inferred_shortcut(step: &RunnerStep) -> Option<&str> {
