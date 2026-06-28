@@ -65,6 +65,14 @@ cargo build --all-features
 header "cargo doc"
 cargo doc --no-deps --all-features
 
+header "installer syntax"
+sh -n install.sh
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content ./install.ps1 -Raw))'
+else
+  printf 'pwsh is not available; skipping PowerShell parser check.\n'
+fi
+
 if [ "${GREENTIC_CHECK_FRONTEND:-0}" = "1" ]; then
   header "frontend build"
   if command -v bun >/dev/null 2>&1; then

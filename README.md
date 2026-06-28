@@ -47,9 +47,37 @@ greentic-desktop
 
 Automate Hub opens in the browser. From there you can complete setup, create from prompt, record a task, test and save runners, publish approved runners as MCP tools, and copy MCP client configuration for AI workers. See [Automate Hub GUI](docs/gui.md) for the full browser workflow.
 
+## Install Greentic Desktop
+
+### macOS / Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
+```
+
+### Windows PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
+```
+
+Then start Automate Hub:
+
+```bash
+greentic-desktop
+```
+
+Developer install with Rust remains available:
+
+```bash
+cargo binstall greentic-desktop
+```
+
+Manual release archive installation is also supported. See [One-Line Install](docs/install-one-line.md) and [Release And Installation](docs/release.md).
+
 ## Command-Line Entry Points
 
-For published releases, install the CLI with cargo-binstall:
+For Rust developers, install the CLI with cargo-binstall:
 
 ```bash
 cargo binstall greentic-desktop
@@ -86,6 +114,7 @@ gtc desktop info
 ## Detailed Documentation
 
 - [Getting Started](docs/getting-started.md)
+- [One-Line Install](docs/install-one-line.md)
 - [Automate Hub GUI](docs/gui.md)
 - [Runners](docs/runners.md)
 - [Adapters and Supported Desktops](docs/adapters.md)
