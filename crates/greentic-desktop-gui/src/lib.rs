@@ -1826,6 +1826,9 @@ fn execute_runner(
     let inputs = runner_inputs_from_body(body, &package.inputs);
     ensure_required_inputs_present(&package, &inputs)?;
     let secrets = runner_secrets_from_body(state, body, &package.secrets)?;
+    if let Some(reason) = production_replay_block_reason(&package, model_replay_allowed()) {
+        return Err(api_error_json("runner.real_adapter_missing", &reason));
+    }
     let request = ReplayRequest {
         package,
         session_profile: SessionProfile {
@@ -1842,8 +1845,14 @@ fn execute_runner(
         on_failure: OnFailure::Stop,
     };
     let outcome = replay_with_context(request, &context);
-    let status = if outcome.passed { "passed" } else { "failed" }.to_owned();
-    let failure = outcome.failure_reason.clone();
+    let output_failure = if outcome.passed {
+        validate_output_evidence(&outcome.outputs)
+    } else {
+        None
+    };
+    let passed = outcome.passed && output_failure.is_none();
+    let status = if passed { "passed" } else { "failed" }.to_owned();
+    let failure = outcome.failure_reason.clone().or(output_failure);
     let evidence_ref = outcome.evidence_ref.uri.clone();
     persist_replay_evidence_bundle(
         state,
@@ -1852,7 +1861,7 @@ fn execute_runner(
         &outcome.outputs_json(),
         failure.as_deref(),
     )?;
-    if !outcome.passed {
+    if !passed {
         return Err(api_error_json(
             "runner.execution_failed",
             failure.as_deref().unwrap_or("Runner execution failed."),
@@ -1870,6 +1879,79 @@ fn execute_runner(
         outputs_json: outcome.outputs_json(),
         steps_json: replay_steps_json(&outcome.traces),
     })
+}
+
+fn model_replay_allowed() -> bool {
+    cfg!(test)
+        || std::env::var("GREENTIC_ALLOW_IN_MEMORY_REPLAY_ADAPTERS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+fn production_replay_block_reason(
+    package: &RunnerPackage,
+    allow_model_replay: bool,
+) -> Option<String> {
+    if allow_model_replay || package.steps.is_empty() {
+        return None;
+    }
+    let mut capabilities = package
+        .steps
+        .iter()
+        .map(|step| step.required_capability.clone())
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    Some(format!(
+        "Real replay backend is not available for this runner. Current in-process adapters are model-only and cannot prove desktop side effects. Missing production execution for capabilities: {}.",
+        capabilities.join(", ")
+    ))
+}
+
+fn validate_output_evidence(outputs: &BTreeMap<String, String>) -> Option<String> {
+    outputs
+        .iter()
+        .find_map(|(output, value)| missing_local_path_output(output, value))
+}
+
+fn missing_local_path_output(output: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    if !looks_like_local_path(value) {
+        return None;
+    }
+    let path = expand_home_path(value);
+    (!path.exists()).then(|| {
+        format!("output evidence missing: {output} points to {value} but that path does not exist")
+    })
+}
+
+fn looks_like_local_path(value: &str) -> bool {
+    if value.is_empty()
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("evidence://")
+        || value.starts_with("local://")
+    {
+        return false;
+    }
+    std::path::Path::new(value).is_absolute()
+        || value.starts_with("~/")
+        || value.chars().nth(1).is_some_and(|ch| {
+            ch == ':'
+                && value
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+        })
+}
+
+fn expand_home_path(value: &str) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(value)
 }
 
 fn ensure_required_inputs_present(
@@ -6067,11 +6149,11 @@ mod tests {
         );
         let with_secret = String::from_utf8_lossy(&with_secret);
         assert!(
-            with_secret.contains("\"status\":\"passed\""),
+            with_secret.contains("runner.output_extraction_failed"),
             "{with_secret}"
         );
         assert!(
-            with_secret.contains("outputs.saved_status"),
+            with_secret.contains("did not extract any declared outputs"),
             "{with_secret}"
         );
         assert_eq!(
@@ -6547,6 +6629,33 @@ mod tests {
         assert!(response_head(&blocked).starts_with("HTTP/1.1 404 Not Found"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_replay_gate_blocks_model_only_adapters() {
+        let package = RunnerPackage {
+            id: "document.create".to_owned(),
+            version: "0.1.0-draft".to_owned(),
+            mode: RecordingMode::AssistedPrompt,
+            inputs: vec!["inputs.document_path".to_owned()],
+            secrets: Vec::new(),
+            steps: vec![RunnerStep {
+                id: "open".to_owned(),
+                action: "activate_app".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("Word".to_owned()),
+                required_capability: "macos.activate_app".to_owned(),
+            }],
+            assertions: Vec::new(),
+            outputs: vec!["outputs.saved_status".to_owned()],
+            open_questions: Vec::new(),
+        };
+
+        let blocked = production_replay_block_reason(&package, false)
+            .expect("model-only replay should be blocked in production mode");
+        assert!(blocked.contains("Real replay backend is not available"));
+        assert!(blocked.contains("macos.activate_app"));
+        assert!(production_replay_block_reason(&package, true).is_none());
     }
 
     #[test]
