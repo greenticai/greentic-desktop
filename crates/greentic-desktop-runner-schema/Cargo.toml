@@ -20,5 +20,6 @@ greentic-desktop-adapter.workspace = true
 greentic-desktop-core.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-workflow.workspace = true
+jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true

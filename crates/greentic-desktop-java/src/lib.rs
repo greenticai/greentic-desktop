@@ -72,6 +72,56 @@ pub fn stable_java_target(metadata: &JavaComponentMetadata) -> LocatorTarget {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaTargetEvidence {
+    pub app_name: Option<String>,
+    pub process_name: Option<String>,
+    pub executable_path: Option<String>,
+    pub accessibility_class: Option<String>,
+    pub explicit_profile: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaTargetRoute {
+    JavaSpecific,
+    NativeOsAccessibility,
+    AskUser,
+}
+
+pub fn classify_java_target(evidence: &JavaTargetEvidence) -> JavaTargetRoute {
+    if evidence.explicit_profile {
+        return JavaTargetRoute::JavaSpecific;
+    }
+    let joined = [
+        evidence.app_name.as_deref(),
+        evidence.process_name.as_deref(),
+        evidence.executable_path.as_deref(),
+        evidence.accessibility_class.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase();
+
+    if joined.contains("word")
+        || joined.contains("excel")
+        || joined.contains("powerpoint")
+        || joined.contains("winword")
+        || joined.contains("microsoft office")
+    {
+        JavaTargetRoute::NativeOsAccessibility
+    } else if joined.contains("java")
+        || joined.contains("javax.swing")
+        || joined.contains("javafx")
+        || joined.contains(".jar")
+    {
+        JavaTargetRoute::JavaSpecific
+    } else {
+        JavaTargetRoute::AskUser
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct JavaAccessBridgeRecordingBackend {
     access_bridge_available: bool,
@@ -599,6 +649,48 @@ mod tests {
             target.visual_fallback.and_then(|item| item.region),
             Some("center".to_owned())
         );
+    }
+
+    #[test]
+    fn routing_keeps_native_office_apps_out_of_java() {
+        let route = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Microsoft Word".to_owned()),
+            process_name: Some("WINWORD.EXE".to_owned()),
+            executable_path: None,
+            accessibility_class: None,
+            explicit_profile: false,
+        });
+
+        assert_eq!(route, JavaTargetRoute::NativeOsAccessibility);
+    }
+
+    #[test]
+    fn routing_uses_java_only_for_explicit_or_java_metadata() {
+        let explicit = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Billing".to_owned()),
+            process_name: None,
+            executable_path: None,
+            accessibility_class: None,
+            explicit_profile: true,
+        });
+        let detected = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Billing".to_owned()),
+            process_name: Some("java".to_owned()),
+            executable_path: Some("/apps/billing.jar".to_owned()),
+            accessibility_class: Some("javax.swing.JPanel".to_owned()),
+            explicit_profile: false,
+        });
+        let ambiguous = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Billing".to_owned()),
+            process_name: None,
+            executable_path: None,
+            accessibility_class: None,
+            explicit_profile: false,
+        });
+
+        assert_eq!(explicit, JavaTargetRoute::JavaSpecific);
+        assert_eq!(detected, JavaTargetRoute::JavaSpecific);
+        assert_eq!(ambiguous, JavaTargetRoute::AskUser);
     }
 
     #[test]

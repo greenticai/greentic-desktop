@@ -17,4 +17,5 @@ path = "src/lib.rs"
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
+greentic-desktop-automation-foundation.workspace = true
 greentic-desktop-recorder.workspace = true

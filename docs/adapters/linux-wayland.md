@@ -121,3 +121,5 @@ The built-in manifest requests:
 - `desktop.accessibility`
 
 If a workflow needs arbitrary click/type control, use an X11 session, a supported native app integration, or a managed environment that explicitly permits those operations.
+
+Wayland screen and remote-control flows must go through desktop portals such as `ashpd`/XDG RemoteDesktop and ScreenCast. The adapter should keep returning explicit pending, denied, or unavailable states whenever the compositor has not granted those capabilities.

@@ -35,11 +35,11 @@ irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.p
 The installers use the GitHub Releases API to discover the latest release by default. They also support exact tags:
 
 ```bash
-GREENTIC_DESKTOP_VERSION=v0.1.9 curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
+GREENTIC_DESKTOP_VERSION=v0.1.10 curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
 ```
 
 ```powershell
-$env:GREENTIC_DESKTOP_VERSION="v0.1.9"; irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
+$env:GREENTIC_DESKTOP_VERSION="v0.1.10"; irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
 ```
 
 Supported targets:

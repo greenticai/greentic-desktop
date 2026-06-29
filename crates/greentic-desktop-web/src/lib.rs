@@ -7,6 +7,7 @@ use greentic_desktop_recorder::{
     RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
     RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
 };
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -475,7 +476,10 @@ function initRecorder() {
   await page.goto(initialUrl || 'about:blank');
   if (process.env.GREENTIC_WEB_RECORDER_SMOKE === '1') {
     const input = page.locator('input,textarea,[contenteditable="true"]').first();
-    if (await input.count()) await input.fill('41');
+    if (await input.count()) {
+      await input.click();
+      await input.pressSequentially('41');
+    }
     const button = page.locator('button,input[type="button"],input[type="submit"]').first();
     if (await button.count()) await button.click();
     await page.waitForTimeout(1000);
@@ -548,9 +552,72 @@ struct WebAdapterState {
 
 #[derive(Debug)]
 struct PlaywrightReplaySidecar {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    next_id: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PlaywrightSidecarRequest {
+    id: String,
+    #[serde(rename = "type")]
+    kind: PlaywrightSidecarRequestKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<RunnerStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assertion: Option<Assertion>,
+}
+
+impl PlaywrightSidecarRequest {
+    fn observe(id: String, session_id: String) -> Self {
+        Self {
+            id,
+            kind: PlaywrightSidecarRequestKind::Observe,
+            session_id: Some(session_id),
+            step: None,
+            assertion: None,
+        }
+    }
+
+    fn step(id: String, step: RunnerStep) -> Self {
+        Self {
+            id,
+            kind: PlaywrightSidecarRequestKind::Step,
+            session_id: None,
+            step: Some(step),
+            assertion: None,
+        }
+    }
+
+    fn assertion(id: String, assertion: Assertion) -> Self {
+        Self {
+            id,
+            kind: PlaywrightSidecarRequestKind::Assert,
+            session_id: None,
+            step: None,
+            assertion: Some(assertion),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PlaywrightSidecarRequestKind {
+    Observe,
+    Step,
+    Assert,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightSidecarResponse {
+    id: Option<String>,
+    ok: bool,
+    #[serde(default)]
+    result: serde_json::Value,
+    error: Option<String>,
 }
 
 impl PlaywrightWebAdapter {
@@ -592,12 +659,7 @@ impl DesktopAdapter for PlaywrightWebAdapter {
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        let response = self.with_sidecar(|sidecar| {
-            sidecar.request(serde_json::json!({
-                "type": "observe",
-                "session_id": ctx.session_id,
-            }))
-        })?;
+        let response = self.with_sidecar(|sidecar| sidecar.observe(ctx.session_id))?;
         let summary = response
             .get("summary")
             .and_then(|value| value.as_str())
@@ -628,12 +690,7 @@ impl DesktopAdapter for PlaywrightWebAdapter {
         }
 
         let original_step = step.clone();
-        let response = self.with_sidecar(|sidecar| {
-            sidecar.request(serde_json::json!({
-                "type": "step",
-                "step": step,
-            }))
-        })?;
+        let response = self.with_sidecar(|sidecar| sidecar.step(step))?;
         self.state
             .lock()
             .expect("web adapter mutex poisoned")
@@ -666,12 +723,7 @@ impl DesktopAdapter for PlaywrightWebAdapter {
         }
 
         let assertion_id = assertion.id.clone();
-        let response = self.with_sidecar(|sidecar| {
-            sidecar.request(serde_json::json!({
-                "type": "assert",
-                "assertion": assertion,
-            }))
-        })?;
+        let response = self.with_sidecar(|sidecar| sidecar.assertion(assertion))?;
         let passed = response
             .get("passed")
             .and_then(|value| value.as_bool())
@@ -762,16 +814,43 @@ impl PlaywrightReplaySidecar {
             AdapterError::ExecutionFailed("Playwright sidecar stdout is unavailable.".to_owned())
         })?;
         Ok(Self {
-            _child: child,
+            child,
             stdin,
             stdout: BufReader::new(stdout),
+            next_id: 0,
         })
     }
 
-    fn request(&mut self, mut request: serde_json::Value) -> AdapterResult<serde_json::Value> {
-        if request.get("id").is_none() {
-            request["id"] = serde_json::Value::String(epoch_millis().to_string());
+    fn observe(&mut self, session_id: String) -> AdapterResult<serde_json::Value> {
+        let id = self.next_request_id();
+        self.request(PlaywrightSidecarRequest::observe(id, session_id))
+    }
+
+    fn step(&mut self, step: RunnerStep) -> AdapterResult<serde_json::Value> {
+        let id = self.next_request_id();
+        self.request(PlaywrightSidecarRequest::step(id, step))
+    }
+
+    fn assertion(&mut self, assertion: Assertion) -> AdapterResult<serde_json::Value> {
+        let id = self.next_request_id();
+        self.request(PlaywrightSidecarRequest::assertion(id, assertion))
+    }
+
+    fn next_request_id(&mut self) -> String {
+        self.next_id = self.next_id.saturating_add(1);
+        format!("web-sidecar-{}-{}", epoch_millis(), self.next_id)
+    }
+
+    fn request(&mut self, request: PlaywrightSidecarRequest) -> AdapterResult<serde_json::Value> {
+        if let Some(status) = self.child.try_wait().map_err(|err| {
+            AdapterError::ExecutionFailed(format!("failed to inspect Playwright sidecar: {err}"))
+        })? {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Playwright sidecar exited before request {} with status {status}",
+                request.id
+            )));
         }
+        let request_id = request.id.clone();
         let line = serde_json::to_string(&request).map_err(|err| {
             AdapterError::ExecutionFailed(format!("failed to encode Playwright request: {err}"))
         })?;
@@ -786,28 +865,28 @@ impl PlaywrightReplaySidecar {
             AdapterError::ExecutionFailed(format!("failed to read Playwright response: {err}"))
         })?;
         if response.trim().is_empty() {
-            return Err(AdapterError::ExecutionFailed(
-                "Playwright web replay sidecar exited without a response.".to_owned(),
-            ));
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Playwright web replay sidecar exited without response to {request_id}."
+            )));
         }
-        let response: serde_json::Value = serde_json::from_str(&response).map_err(|err| {
-            AdapterError::ExecutionFailed(format!("invalid Playwright response JSON: {err}"))
-        })?;
-        if response
-            .get("ok")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            Ok(response
-                .get("result")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null))
+        let response: PlaywrightSidecarResponse =
+            serde_json::from_str(&response).map_err(|err| {
+                AdapterError::ExecutionFailed(format!("invalid Playwright response JSON: {err}"))
+            })?;
+        if response.id.as_deref() != Some(request_id.as_str()) {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "Playwright sidecar response id {:?} did not match request id {request_id}",
+                response.id
+            )));
+        }
+        if response.ok {
+            Ok(response.result)
         } else {
-            let message = response
-                .get("error")
-                .and_then(|value| value.as_str())
-                .unwrap_or("Playwright web replay failed");
-            Err(AdapterError::ExecutionFailed(message.to_owned()))
+            Err(AdapterError::ExecutionFailed(
+                response
+                    .error
+                    .unwrap_or_else(|| "Playwright web replay failed".to_owned()),
+            ))
         }
     }
 }
@@ -1438,12 +1517,12 @@ mod tests {
         assert_eq!(manifest.capture_state.as_str(), "recording");
         let raw_path = out.join("raw/events.jsonl");
         let mut raw = String::new();
-        for _ in 0..60 {
+        for _ in 0..180 {
             raw = fs::read_to_string(&raw_path).unwrap_or_default();
             if raw.contains(r#""kind":"input""#) && raw.contains(r#""kind":"click""#) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
 
         assert!(raw.contains(r#""kind":"input""#), "{raw}");
@@ -1476,6 +1555,32 @@ mod tests {
         assert!(json.contains("\"test_id\":\"password\""));
         assert!(json.contains("\"redaction\":\"redacted\""));
         assert!(!json.contains("super-secret"));
+    }
+
+    #[test]
+    fn playwright_sidecar_requests_are_typed_and_correlated() {
+        let step = RunnerStep {
+            id: "step-1".to_owned(),
+            action: "fill".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some("Ada".to_owned()),
+            required_capability: "web.fill".to_owned(),
+        };
+        let request = PlaywrightSidecarRequest::step("req-42".to_owned(), step);
+
+        let json = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(json["id"], "req-42");
+        assert_eq!(json["type"], "step");
+        assert_eq!(json["step"]["required_capability"], "web.fill");
+        assert!(json.get("assertion").is_none());
+
+        let response: PlaywrightSidecarResponse =
+            serde_json::from_str(r#"{"id":"req-42","ok":true,"result":{"success":true}}"#)
+                .expect("response should deserialize");
+        assert_eq!(response.id.as_deref(), Some("req-42"));
+        assert!(response.ok);
+        assert_eq!(response.result["success"], true);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

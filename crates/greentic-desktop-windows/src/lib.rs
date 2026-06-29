@@ -3,6 +3,7 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_automation_foundation::{ScreenshotBackend, XcapScreenshotBackend};
 use greentic_desktop_recorder::{
     RecordingBackend, RecordingCaptureState, RecordingEventSink, RecordingHandle,
     RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
@@ -444,26 +445,11 @@ foreach ($item in $all) {{ if ($item.Current.Name) {{ $item.Current.Name }} }}
 }
 
 fn windows_screenshot(path: &Path) -> AdapterResult<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            AdapterError::ExecutionFailed(format!("failed to create screenshot directory: {err}"))
+    XcapScreenshotBackend
+        .capture_primary_monitor(path)
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xcap screenshot capture failed: {err}"))
         })?;
-    }
-    let script = format!(
-        r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bitmap.Save({path}, [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose()
-$bitmap.Dispose()
-"#,
-        path = ps_quote(&path.display().to_string())
-    );
-    run_powershell(&script)?;
     if path.exists() {
         Ok(())
     } else {

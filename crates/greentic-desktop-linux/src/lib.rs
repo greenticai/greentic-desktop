@@ -3,6 +3,7 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_automation_foundation::{ScreenshotBackend, XcapScreenshotBackend};
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
 use greentic_desktop_recorder::{
     RecordingBackend, RecordingCaptureState, RecordingEventSink, RecordingHandle,
@@ -773,19 +774,16 @@ fn read_at_spi_text() -> AdapterResult<Vec<String>> {
 }
 
 fn x11_screenshot(path: &Path) -> AdapterResult<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            AdapterError::ExecutionFailed(format!("failed to create screenshot directory: {err}"))
+    XcapScreenshotBackend
+        .capture_primary_monitor(path)
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xcap screenshot capture failed: {err}"))
         })?;
-    }
-    let target = path.to_string_lossy();
-    run_optional_command("import", ["-window", "root", target.as_ref()])
-        .or_else(|_| run_optional_command("gnome-screenshot", ["-f", target.as_ref()]))?;
     if path.exists() {
         Ok(())
     } else {
         Err(AdapterError::ExecutionFailed(format!(
-            "Linux screenshot command did not create {}",
+            "Linux screenshot backend did not create {}",
             path.display()
         )))
     }

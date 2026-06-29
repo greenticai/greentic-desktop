@@ -1,3 +1,4 @@
+use axum::{routing::get, Json, Router};
 use greentic_desktop_adapter::{
     select_best_adapter, validate_required_capabilities, AdapterCapabilities, CapabilityValidation,
 };
@@ -9,17 +10,21 @@ use greentic_desktop_core::{
 use greentic_desktop_extension::{
     built_in_extension, ExtensionError, ExtensionManager, ExtensionManifest, SidecarProcess,
 };
-use greentic_desktop_mcp::McpServerState;
 use greentic_desktop_registry::{RegistryError, SignedRunnerManifest, SigningKey};
 use greentic_desktop_session::DesktopSession;
 use greentic_desktop_telemetry::TelemetryLog;
 use greentic_distributor_client::{
     DistributorError, GreenticDistributorClient, ResolvedArtifact, StoreExtension,
 };
+use rmcp::{
+    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
+    ServerHandler,
+};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -377,13 +382,11 @@ impl DesktopRuntime {
 
     pub fn serve_mcp(&self, bind: &str) -> Result<(), RuntimeError> {
         self.telemetry.record("tool_call", "desktop.mcp.serve");
-        let listener = TcpListener::bind(bind)?;
-
-        for stream in listener.incoming() {
-            handle_mcp_connection(stream?)?;
-        }
-
-        Ok(())
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| RuntimeError::Pack(format!("failed to start MCP runtime: {err}")))?
+            .block_on(serve_runtime_mcp(bind.to_owned()))
     }
 
     fn find_runner_manifest(&self, runner_id: &str) -> Result<PathBuf, RuntimeError> {
@@ -523,63 +526,38 @@ fn set_owner_only_permissions(path: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn handle_mcp_connection(mut stream: TcpStream) -> Result<(), RuntimeError> {
-    let (request_line, request_body) = read_http_request(&mut stream)?;
-    let body = if request_line.starts_with("GET /health") {
-        "{\"status\":\"ok\"}".to_owned()
-    } else {
-        let mut state = McpServerState::new(Vec::new(), Vec::<String>::new());
-        state.handle_jsonrpc(&request_body)
-    };
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes())?;
-    Ok(())
-}
+#[derive(Clone)]
+struct EmptyRuntimeMcpServer;
 
-fn read_http_request(stream: &mut TcpStream) -> Result<(String, String), RuntimeError> {
-    let mut request = Vec::new();
-    let mut chunk = [0; 1024];
-    let header_end = loop {
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break find_header_end(&request).unwrap_or(request.len());
-        }
-        request.extend_from_slice(&chunk[..read]);
-        if let Some(header_end) = find_header_end(&request) {
-            break header_end;
-        }
-    };
-    let header = String::from_utf8_lossy(&request[..header_end]).to_string();
-    let request_line = header.lines().next().unwrap_or_default().to_owned();
-    let content_length = header
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
-    let body_start = header_end + 4;
-    while request.len().saturating_sub(body_start) < content_length {
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&chunk[..read]);
+impl ServerHandler for EmptyRuntimeMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2025_06_18)
+            .with_server_info(Implementation::new(
+                "greentic-desktop",
+                env!("CARGO_PKG_VERSION"),
+            ))
     }
-    let available = request.len().saturating_sub(body_start);
-    let body_len = available.min(content_length);
-    let body = String::from_utf8_lossy(&request[body_start..body_start + body_len]).to_string();
-    Ok((request_line, body))
 }
 
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+async fn serve_runtime_mcp(bind: String) -> Result<(), RuntimeError> {
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_allowed_hosts(["localhost", "127.0.0.1", "::1"]);
+    let mcp_service: StreamableHttpService<EmptyRuntimeMcpServer, LocalSessionManager> =
+        StreamableHttpService::new(|| Ok(EmptyRuntimeMcpServer), Default::default(), config);
+    let router = Router::new()
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({"status": "ok"})) }),
+        )
+        .nest_service("/mcp", mcp_service);
+
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| RuntimeError::Pack(format!("MCP HTTP server failed: {err}")))
 }
 
 #[cfg(test)]
@@ -858,5 +836,14 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("test dir should be removable");
+    }
+
+    #[test]
+    fn runtime_mcp_server_uses_rmcp_server_info() {
+        let info = EmptyRuntimeMcpServer.get_info();
+
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
+        assert_eq!(info.server_info.name, "greentic-desktop");
+        assert!(info.capabilities.tools.is_some());
     }
 }

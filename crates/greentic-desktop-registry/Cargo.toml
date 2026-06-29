@@ -16,4 +16,5 @@ name = "greentic_desktop_registry"
 path = "src/lib.rs"
 
 [dependencies]
-sha2 = "0.10"
+ed25519-dalek.workspace = true
+sha2.workspace = true

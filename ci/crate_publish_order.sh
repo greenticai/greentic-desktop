@@ -3,6 +3,9 @@
 PUBLISH_CRATE_ORDER=(
   greentic-desktop-core
   greentic-desktop-config
+  greentic-desktop-registry
+  greentic-desktop-security
+  greentic-desktop-automation-foundation
   greentic-desktop-llm
   greentic-desktop-session
   greentic-desktop-telemetry
@@ -21,10 +24,8 @@ PUBLISH_CRATE_ORDER=(
   greentic-desktop-macos
   greentic-desktop-linux
   greentic-desktop-evidence
-  greentic-desktop-registry
   greentic-desktop-runner-schema
   greentic-desktop-policy
-  greentic-desktop-security
   greentic-desktop-replay
   greentic-desktop-mcp
   greentic-desktop-planner

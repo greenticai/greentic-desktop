@@ -3,6 +3,7 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_automation_foundation::{ScreenshotBackend, XcapScreenshotBackend};
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
 use greentic_desktop_recorder::{
     RecordingBackend, RecordingCaptureState, RecordingEventSink, RecordingHandle,
@@ -933,12 +934,19 @@ fn take_macos_screenshot(path: &Path) -> AdapterResult<()> {
             AdapterError::ExecutionFailed(format!("failed to create screenshot directory: {err}"))
         })?;
     }
-    run_command("screencapture", ["-x", path.to_string_lossy().as_ref()])?;
+    XcapScreenshotBackend
+        .capture_primary_monitor(path)
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!(
+                "xcap screenshot capture failed: {}",
+                err.message
+            ))
+        })?;
     if path.exists() {
         Ok(())
     } else {
         Err(AdapterError::ExecutionFailed(format!(
-            "screencapture did not create {}",
+            "xcap screenshot backend did not create {}",
             path.display()
         )))
     }

@@ -2,11 +2,13 @@ use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterError, AdapterResult, Assertion, AssertionResult, DesktopAdapter,
     Observation, ObserveContext, RecordedEvent, RunnerStep, StepResult,
 };
+use greentic_desktop_automation_foundation::{ScreenshotBackend, XcapScreenshotBackend};
 use greentic_desktop_recorder::{
     RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
     RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
 };
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const VISION_ADAPTER_ID: &str = "greentic.desktop.vision";
@@ -342,6 +344,20 @@ impl DesktopAdapter for VisionAdapter {
             ));
         }
 
+        if step.required_capability == "vision.screenshot" {
+            let path = step
+                .value
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(default_vision_screenshot_path);
+            capture_vision_screenshot(&path)?;
+            return Ok(StepResult {
+                step_id: step.id,
+                success: true,
+                message: path.display().to_string(),
+            });
+        }
+
         let output = self.run_backend(VisionBackendAction::Execute, Some(&step), None)?;
 
         Ok(StepResult {
@@ -393,6 +409,37 @@ impl DesktopAdapter for VisionAdapter {
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
         Ok(None)
     }
+}
+
+fn capture_vision_screenshot(path: &Path) -> AdapterResult<()> {
+    XcapScreenshotBackend
+        .capture_primary_monitor(path)
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xcap screenshot capture failed: {err}"))
+        })?;
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "vision screenshot backend did not create {}",
+            path.display()
+        )))
+    }
+}
+
+fn default_vision_screenshot_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "greentic-vision-screenshot-{}-{}.png",
+        std::process::id(),
+        epoch_millis()
+    ))
+}
+
+fn epoch_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 impl VisionAdapter {
@@ -615,6 +662,19 @@ mod tests {
         assert!(capabilities.supports("vision.screenshot"));
         assert!(capabilities.supports("vision.assert_visual"));
         assert_eq!(capabilities.adapter_id, VISION_ADAPTER_ID);
+    }
+
+    #[test]
+    fn default_vision_screenshot_path_is_png() {
+        let path = default_vision_screenshot_path();
+
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+        assert!(path
+            .to_string_lossy()
+            .contains("greentic-vision-screenshot"));
     }
 
     #[test]

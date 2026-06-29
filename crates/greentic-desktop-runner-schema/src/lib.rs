@@ -615,6 +615,7 @@ pub struct SchemaDiagnostic {
 
 pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaDiagnostic> {
     let cleaned = clean_llm_json(raw);
+    validate_runner_draft_json_value(&cleaned)?;
     let parsed: JsonRunnerDraftDocument = serde_json::from_str(&cleaned).map_err(|err| {
         if err.is_data() {
             diagnostic(
@@ -670,6 +671,36 @@ pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaD
     };
     validate_runner_draft(&document)?;
     Ok(document)
+}
+
+fn validate_runner_draft_json_value(cleaned: &str) -> Result<(), SchemaDiagnostic> {
+    let value: serde_json::Value = serde_json::from_str(cleaned).map_err(|err| {
+        diagnostic(
+            "planner.invalid_json",
+            &format!("LLM output is not valid runner JSON: {err}"),
+        )
+    })?;
+    let schema: serde_json::Value =
+        serde_json::from_str(&runner_draft_json_schema()).map_err(|err| {
+            diagnostic(
+                "planner.schema_mismatch",
+                &format!("runner JSON schema could not be loaded: {err}"),
+            )
+        })?;
+    jsonschema::validator_for(&schema)
+        .map_err(|err| {
+            diagnostic(
+                "planner.schema_mismatch",
+                &format!("runner JSON schema could not be compiled: {err}"),
+            )
+        })?
+        .validate(&value)
+        .map_err(|err| {
+            diagnostic(
+                "planner.schema_mismatch",
+                &format!("runner JSON schema mismatch: {err}"),
+            )
+        })
 }
 
 fn clean_llm_json(raw: &str) -> String {
@@ -927,7 +958,7 @@ mod tests {
 
         assert_eq!(err.code, "planner.schema_mismatch");
         assert!(
-            err.message.contains("missing field `id`"),
+            err.message.contains("\"id\" is a required property"),
             "{}",
             err.message
         );

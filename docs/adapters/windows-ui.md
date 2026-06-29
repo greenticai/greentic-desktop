@@ -124,3 +124,5 @@ Example MCP call:
 ## Permissions And Notes
 
 The built-in manifest requests `desktop.ui_automation`. Run this adapter inside a desktop session where the target application is installed and visible to the user/session running Greentic Desktop.
+
+Screenshot evidence is captured through the shared `xcap` backend. UI Automation traversal and element actions still require the Windows UI Automation implementation path, and new production primitives should use `windows` or a maintained UIA crate directly rather than adding more generated PowerShell.

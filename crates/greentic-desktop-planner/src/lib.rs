@@ -1402,7 +1402,8 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("\"task\":\"desktop.prompt_to_runner\""));
         assert!(requests[1].contains("\"task\":\"desktop.repair_runner_json\""));
-        assert!(requests[1].contains("risk_level must be low"));
+        assert!(requests[1].contains("risk_level"));
+        assert!(requests[1].contains("one of"));
         assert!(requests[1].contains("moderate"));
     }
 
@@ -1424,7 +1425,7 @@ mod tests {
 
         assert_eq!(err.code, "planner.schema_mismatch");
         assert!(
-            err.message.contains("missing field") || err.message.contains("runner_id"),
+            err.message.contains("required property") || err.message.contains("runner_id"),
             "{}",
             err.message
         );
@@ -1456,7 +1457,7 @@ mod tests {
 
         assert_eq!(err.code, "planner.schema_mismatch");
         assert!(
-            err.message.contains("missing field `id`"),
+            err.message.contains("\"id\" is a required property"),
             "{}",
             err.message
         );

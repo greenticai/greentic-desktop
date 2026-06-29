@@ -130,3 +130,5 @@ The built-in manifest requests:
 - `desktop.input_monitoring`
 
 Grant these permissions to the process that runs Greentic Desktop before recording or replaying native macOS workflows.
+
+Screenshot evidence is captured through the shared `xcap` backend. Accessibility element traversal and element-targeted actions still depend on the macOS AX implementation; avoid app-specific scripts or AppleScript-only flows when designing new runner primitives.

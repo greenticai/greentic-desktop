@@ -127,3 +127,5 @@ Example MCP call:
 ## Permissions And Notes
 
 The built-in manifest requests `desktop.java_accessibility`. Make sure the Java accessibility bridge or equivalent platform accessibility support is enabled for the target environment.
+
+This adapter is for Java applications, not for generic desktop documents. Native apps such as Word, Excel, or platform file dialogs should route through the OS accessibility adapter unless an explicit app profile or process/accessibility metadata proves the target is Java. Direct JNI/JVM integration should only be added for a fixture that cannot be solved through OS accessibility metadata.

@@ -50,8 +50,14 @@ source ci/crate_publish_order.sh
 header "publish crate order"
 validate_publish_crate_order
 
+header "workspace dependency policy"
+bash ci/workspace_dependency_policy_check.sh
+
 header "no-mock production check"
 bash ci/no_mock_production_check.sh
+
+header "no-handrolled scripting check"
+bash ci/no_handrolled_scripting_check.sh
 
 header "cargo fmt"
 cargo fmt --all -- --check

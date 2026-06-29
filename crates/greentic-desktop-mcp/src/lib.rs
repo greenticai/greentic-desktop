@@ -7,7 +7,13 @@ use greentic_desktop_security::{
     enforce_policy, ActionRequest, PolicyContext, PolicyDecision, SecurityPolicy,
 };
 use greentic_desktop_session::SessionProfile;
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, InitializeResult, JsonObject, ListToolsResult,
+    Meta, ProtocolVersion, ServerCapabilities, Tool,
+};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -355,19 +361,16 @@ pub fn parse_jsonrpc_request(body: &str) -> Result<McpJsonRpcRequest, McpJsonRpc
 }
 
 pub fn render_initialize_response(id: Option<&serde_json::Value>) -> String {
+    let result = InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+        .with_protocol_version(ProtocolVersion::V_2025_06_18)
+        .with_server_info(Implementation::new(
+            "greentic-desktop",
+            env!("CARGO_PKG_VERSION"),
+        ));
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": json_id(id),
-        "result": {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "serverInfo": {
-                "name": "greentic-desktop",
-                "version": env!("CARGO_PKG_VERSION")
-            },
-            "capabilities": {
-                "tools": {}
-            }
-        }
+        "result": result
     })
     .to_string()
 }
@@ -382,27 +385,11 @@ pub fn render_empty_response(id: Option<&serde_json::Value>) -> String {
 }
 
 pub fn render_tools_list_response(id: Option<&serde_json::Value>, tools: &[McpTool]) -> String {
-    let tools = tools
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": serde_json::from_str::<serde_json::Value>(&tool.input_schema_json)
-                    .unwrap_or_else(|_| serde_json::json!({"type":"object"})),
-                "outputSchema": serde_json::from_str::<serde_json::Value>(&tool.output_schema_json)
-                    .unwrap_or_else(|_| serde_json::json!({"type":"object"})),
-                "annotations": {
-                    "risk": format!("{:?}", tool.risk),
-                    "availabilityDiagnostics": tool.availability_diagnostics,
-                }
-            })
-        })
-        .collect::<Vec<_>>();
+    let tools = ListToolsResult::with_all_items(tools.iter().map(rmcp_tool).collect::<Vec<_>>());
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": json_id(id),
-        "result": {"tools": tools}
+        "result": tools
     })
     .to_string()
 }
@@ -411,20 +398,19 @@ pub fn render_tool_call_response(id: Option<&serde_json::Value>, result: &McpCal
     if result.success {
         let outputs = serde_json::from_str::<serde_json::Value>(&result.outputs_json)
             .unwrap_or_else(|_| serde_json::json!({}));
+        let mut call_result = CallToolResult::structured(serde_json::json!({
+                "status": "passed",
+                "evidenceRef": result.evidence_uri,
+                "outputs": outputs
+        }));
+        call_result.content = vec![ContentBlock::text(format!(
+            "Runner completed. Evidence: {}",
+            result.evidence_uri
+        ))];
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": json_id(id),
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": format!("Runner completed. Evidence: {}", result.evidence_uri)
-                }],
-                "structuredContent": {
-                    "status": "passed",
-                    "evidenceRef": result.evidence_uri,
-                    "outputs": outputs
-                }
-            }
+            "result": call_result
         })
         .to_string()
     } else {
@@ -449,6 +435,46 @@ pub fn render_jsonrpc_error(id: Option<&serde_json::Value>, code: i64, message: 
         }
     })
     .to_string()
+}
+
+fn rmcp_tool(tool: &McpTool) -> Tool {
+    let input_schema = json_object_or_default(&tool.input_schema_json);
+    let output_schema = json_object_or_default(&tool.output_schema_json);
+    let mut rmcp_tool = Tool::new(
+        Cow::Owned(tool.name.clone()),
+        Cow::Owned(tool.description.clone()),
+        Arc::new(input_schema),
+    )
+    .with_raw_output_schema(Arc::new(output_schema));
+    rmcp_tool.meta = Some(Meta(JsonObject::from_iter([
+        (
+            "greenticRisk".to_owned(),
+            serde_json::Value::String(format!("{:?}", tool.risk)),
+        ),
+        (
+            "greenticAvailabilityDiagnostics".to_owned(),
+            serde_json::Value::Array(
+                tool.availability_diagnostics
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        ),
+    ])));
+    rmcp_tool
+}
+
+fn json_object_or_default(raw: &str) -> JsonObject {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_else(|| {
+            JsonObject::from_iter([(
+                "type".to_owned(),
+                serde_json::Value::String("object".to_owned()),
+            )])
+        })
 }
 
 fn json_id(id: Option<&serde_json::Value>) -> serde_json::Value {

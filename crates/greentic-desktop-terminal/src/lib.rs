@@ -11,9 +11,12 @@ use greentic_desktop_workflow::{
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowOutput, WorkflowOutputExtractor,
     WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use vte::{Params, Parser, Perform};
 
 pub const TERMINAL_ADAPTER_ID: &str = "greentic.desktop.terminal-tn3270";
 pub const TERMINAL_RECORDER_BACKEND_ID: &str = "greentic.recording.terminal.owned";
@@ -468,7 +471,7 @@ fn terminal_runtime_payload(step: Option<&RunnerStep>, assertion: Option<&Assert
 
 fn parse_terminal_command_output(stdout: &str) -> TerminalCommandOutput {
     let mut output = TerminalCommandOutput::default();
-    for line in stdout.lines() {
+    for line in parse_terminal_screen(stdout) {
         if let Some(value) = line.strip_prefix("message:") {
             output.message = Some(value.trim().to_owned());
         } else if let Some(value) = line.strip_prefix("screen:") {
@@ -480,6 +483,158 @@ fn parse_terminal_command_output(stdout: &str) -> TerminalCommandOutput {
         }
     }
     output
+}
+
+pub fn run_local_pty_command(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AdapterResult<Vec<String>> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to open PTY: {err}")))?;
+    let mut command = CommandBuilder::new(program);
+    for arg in args {
+        command.arg(arg);
+    }
+    let mut child = pair.slave.spawn_command(command).map_err(|err| {
+        AdapterError::ExecutionFailed(format!("failed to spawn PTY command: {err}"))
+    })?;
+    drop(pair.slave);
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to read PTY: {err}")))?;
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while Instant::now() < deadline {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "failed to read PTY output: {err}"
+                )));
+            }
+        }
+        if let Ok(Some(_status)) = child.try_wait() {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let output = String::from_utf8_lossy(&bytes);
+    Ok(parse_terminal_screen(&output))
+}
+
+pub fn parse_terminal_screen(output: &str) -> Vec<String> {
+    let mut parser = Parser::new();
+    let mut screen = AnsiScreen::default();
+    parser.advance(&mut screen, output.as_bytes());
+    screen.lines()
+}
+
+#[derive(Debug, Default)]
+struct AnsiScreen {
+    row: usize,
+    col: usize,
+    rows: Vec<Vec<char>>,
+}
+
+impl AnsiScreen {
+    fn put_char(&mut self, value: char) {
+        while self.rows.len() <= self.row {
+            self.rows.push(Vec::new());
+        }
+        let line = &mut self.rows[self.row];
+        while line.len() < self.col {
+            line.push(' ');
+        }
+        if line.len() == self.col {
+            line.push(value);
+        } else {
+            line[self.col] = value;
+        }
+        self.col += 1;
+    }
+
+    fn newline(&mut self) {
+        self.row += 1;
+        self.col = 0;
+    }
+
+    fn carriage_return(&mut self) {
+        self.col = 0;
+    }
+
+    fn lines(self) -> Vec<String> {
+        self.rows
+            .into_iter()
+            .map(|line| line.into_iter().collect::<String>().trim_end().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+}
+
+impl Perform for AnsiScreen {
+    fn print(&mut self, c: char) {
+        self.put_char(c);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\n' => self.newline(),
+            b'\r' => self.carriage_return(),
+            0x08 => {
+                self.col = self.col.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
+
+    fn put(&mut self, _byte: u8) {}
+
+    fn unhook(&mut self) {}
+
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+
+    fn csi_dispatch(
+        &mut self,
+        params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        if action == 'H' || action == 'f' {
+            let mut params = params.iter();
+            let row = params
+                .next()
+                .and_then(|values| values.first().copied())
+                .unwrap_or(1)
+                .saturating_sub(1) as usize;
+            let col = params
+                .next()
+                .and_then(|values| values.first().copied())
+                .unwrap_or(1)
+                .saturating_sub(1) as usize;
+            self.row = row;
+            self.col = col;
+        }
+    }
+
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -775,6 +930,46 @@ mod tests {
             err.to_string()
                 .contains("No owned terminal runtime is configured"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn parses_ansi_terminal_screen_with_cursor_positioning() {
+        let screen = parse_terminal_screen("first\r\n\x1b[3;5Hfield");
+
+        assert_eq!(screen, vec!["first".to_owned(), "    field".to_owned()]);
+        assert_eq!(
+            extract_field_from_screen(
+                &screen,
+                ScreenField {
+                    row: 1,
+                    col: 4,
+                    len: 5,
+                }
+            ),
+            Some("field".to_owned())
+        );
+    }
+
+    #[test]
+    fn local_pty_fixture_runs_command_and_parses_output() {
+        if cfg!(windows) {
+            return;
+        }
+        let screen = run_local_pty_command(
+            "sh",
+            &[
+                "-lc",
+                "printf 'ACCOUNT STATUS: ACTIVE\\nBALANCE: 100.00\\n'",
+            ],
+            Duration::from_secs(2),
+        )
+        .expect("local PTY command should run");
+
+        assert!(screen.iter().any(|line| line.contains("ACCOUNT STATUS")));
+        assert_eq!(
+            extract_after_anchor_from_screen(&screen, "BALANCE:"),
+            Some("100.00".to_owned())
         );
     }
 
