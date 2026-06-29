@@ -49,6 +49,7 @@ jobs:
             libegl1-mesa-dev \
             libpipewire-0.3-dev \
             libwayland-dev \
+            libxi-dev \
             libx11-dev \
             libxcb1-dev \
             libxdo-dev \
@@ -69,6 +70,7 @@ jobs:
             libegl1-mesa-dev \
             libpipewire-0.3-dev \
             libwayland-dev \
+            libxi-dev \
             libx11-dev \
             libxcb1-dev \
             libxdo-dev \
@@ -91,6 +93,7 @@ jobs:
             libegl1-mesa-dev \
             libpipewire-0.3-dev \
             libwayland-dev \
+            libxi-dev \
             libx11-dev \
             libxcb1-dev \
             libxdo-dev \
