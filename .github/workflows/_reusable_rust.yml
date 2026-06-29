@@ -25,6 +25,7 @@ jobs:
           sudo apt-get install -y \
             libdbus-1-dev \
             libegl1-mesa-dev \
+            libgbm-dev \
             libpipewire-0.3-dev \
             libwayland-dev \
             libxi-dev \
