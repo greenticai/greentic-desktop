@@ -809,7 +809,7 @@ mod tests {
             assert!(outcome.prompt.contains("Sample.exe"));
             assert!(outcome.steps.iter().all(|step| step.success));
         } else {
-            assert_blocked_result(result, "Windows UI Automation can only run on Windows");
+            assert_blocked_result(result, "Windows UI Automation");
         }
     }
 

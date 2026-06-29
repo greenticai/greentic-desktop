@@ -516,13 +516,13 @@ fn monotonic_nanos() -> u128 {
         .unwrap_or_default()
 }
 
-fn set_owner_only_permissions(path: &Path) -> Result<(), RuntimeError> {
+fn set_owner_only_permissions(_path: &Path) -> Result<(), RuntimeError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)?.permissions();
+        let mut permissions = fs::metadata(_path)?.permissions();
         permissions.set_mode(0o600);
-        fs::set_permissions(path, permissions)?;
+        fs::set_permissions(_path, permissions)?;
     }
     Ok(())
 }
