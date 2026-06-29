@@ -38,4 +38,7 @@ greentic-desktop-vision.workspace = true
 greentic-desktop-web.workspace = true
 greentic-desktop-workflow.workspace = true
 greentic-desktop-windows.workspace = true
+axum.workspace = true
+rmcp.workspace = true
 serde_json.workspace = true
+tokio.workspace = true

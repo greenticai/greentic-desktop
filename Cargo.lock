@@ -1878,6 +1878,7 @@ dependencies = [
  "greentic-desktop-core",
  "greentic-desktop-extension",
  "greentic-desktop-registry",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1908,6 +1909,7 @@ dependencies = [
 name = "greentic-desktop-gui"
 version = "0.1.10"
 dependencies = [
+ "axum",
  "greentic-desktop-adapter",
  "greentic-desktop-core",
  "greentic-desktop-evidence",
@@ -1931,7 +1933,9 @@ dependencies = [
  "greentic-desktop-windows",
  "greentic-desktop-workflow",
  "greentic-distributor-client",
+ "rmcp",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -4285,6 +4289,7 @@ dependencies = [
  "pastey 0.2.3",
  "pin-project-lite",
  "rand 0.10.1",
+ "reqwest",
  "rmcp-macros",
  "schemars",
  "serde",

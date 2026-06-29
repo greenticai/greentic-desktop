@@ -229,6 +229,22 @@ impl McpServerState {
         }
     }
 
+    pub fn call_tool_with_arguments(
+        &mut self,
+        tool_name: String,
+        arguments: BTreeMap<String, String>,
+    ) -> McpCallResult {
+        let (inputs, secrets) = self.partition_call_arguments(&tool_name, arguments);
+        self.call_tool(McpCallRequest {
+            tool_name,
+            inputs,
+            secrets,
+            approved_by_human: false,
+            environment: "local".to_owned(),
+            approvals: 0,
+        })
+    }
+
     pub fn render_tools_list_json(&self) -> String {
         let tools = self
             .list_tools()
@@ -385,7 +401,7 @@ pub fn render_empty_response(id: Option<&serde_json::Value>) -> String {
 }
 
 pub fn render_tools_list_response(id: Option<&serde_json::Value>, tools: &[McpTool]) -> String {
-    let tools = ListToolsResult::with_all_items(tools.iter().map(rmcp_tool).collect::<Vec<_>>());
+    let tools = rmcp_list_tools_result(tools);
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": json_id(id),
@@ -396,17 +412,7 @@ pub fn render_tools_list_response(id: Option<&serde_json::Value>, tools: &[McpTo
 
 pub fn render_tool_call_response(id: Option<&serde_json::Value>, result: &McpCallResult) -> String {
     if result.success {
-        let outputs = serde_json::from_str::<serde_json::Value>(&result.outputs_json)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let mut call_result = CallToolResult::structured(serde_json::json!({
-                "status": "passed",
-                "evidenceRef": result.evidence_uri,
-                "outputs": outputs
-        }));
-        call_result.content = vec![ContentBlock::text(format!(
-            "Runner completed. Evidence: {}",
-            result.evidence_uri
-        ))];
+        let call_result = rmcp_call_tool_result(result);
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": json_id(id),
@@ -437,7 +443,35 @@ pub fn render_jsonrpc_error(id: Option<&serde_json::Value>, code: i64, message: 
     .to_string()
 }
 
-fn rmcp_tool(tool: &McpTool) -> Tool {
+pub fn rmcp_list_tools_result(tools: &[McpTool]) -> ListToolsResult {
+    ListToolsResult::with_all_items(tools.iter().map(rmcp_tool).collect::<Vec<_>>())
+}
+
+pub fn rmcp_call_tool_result(result: &McpCallResult) -> CallToolResult {
+    if result.success {
+        let outputs = serde_json::from_str::<serde_json::Value>(&result.outputs_json)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut call_result = CallToolResult::structured(serde_json::json!({
+                "status": "passed",
+                "evidenceRef": result.evidence_uri,
+                "outputs": outputs
+        }));
+        call_result.content = vec![ContentBlock::text(format!(
+            "Runner completed. Evidence: {}",
+            result.evidence_uri
+        ))];
+        call_result
+    } else {
+        let message = result
+            .failure
+            .as_ref()
+            .map(|failure| failure.message.as_str())
+            .unwrap_or("runner failed");
+        CallToolResult::error(vec![ContentBlock::text(message.to_owned())])
+    }
+}
+
+pub fn rmcp_tool(tool: &McpTool) -> Tool {
     let input_schema = json_object_or_default(&tool.input_schema_json);
     let output_schema = json_object_or_default(&tool.output_schema_json);
     let mut rmcp_tool = Tool::new(

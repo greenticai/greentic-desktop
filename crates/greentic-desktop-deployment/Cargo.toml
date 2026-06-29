@@ -14,3 +14,4 @@ publish = false
 greentic-desktop-core.workspace = true
 greentic-desktop-extension.workspace = true
 greentic-desktop-registry.workspace = true
+sha2.workspace = true

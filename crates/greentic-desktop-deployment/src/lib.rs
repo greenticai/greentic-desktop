@@ -1,5 +1,6 @@
 use greentic_desktop_extension::ExtensionManifest;
 use greentic_desktop_registry::{RegistryStage, SignedRunnerManifest, SigningKey};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -482,7 +483,7 @@ fn semver_parts(value: &str) -> (u64, u64, u64) {
 }
 
 fn checksum_for_payload(payload: &UpdatePayload) -> String {
-    format!("sha256:{}", deterministic_hash(&payload.canonical()))
+    format!("sha256:{}", sha256_hex(payload.canonical().as_bytes()))
 }
 
 fn signature_for(manifest: &UpdateManifest, payload: &UpdatePayload, key: &SigningKey) -> String {
@@ -510,6 +511,11 @@ fn deterministic_hash(value: &str) -> String {
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn runtime_name(runtime: &greentic_desktop_extension::ExtensionRuntime) -> &'static str {

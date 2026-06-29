@@ -10,6 +10,7 @@ use greentic_desktop_core::{
 use greentic_desktop_extension::{
     built_in_extension, ExtensionError, ExtensionManager, ExtensionManifest, SidecarProcess,
 };
+use greentic_desktop_mcp::{rmcp_call_tool_result, rmcp_list_tools_result, McpServerState};
 use greentic_desktop_registry::{RegistryError, SignedRunnerManifest, SigningKey};
 use greentic_desktop_session::DesktopSession;
 use greentic_desktop_telemetry::TelemetryLog;
@@ -17,16 +18,22 @@ use greentic_distributor_client::{
     DistributorError, GreenticDistributorClient, ResolvedArtifact, StoreExtension,
 };
 use rmcp::{
-    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
     ServerHandler,
 };
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct DesktopRuntime {
@@ -527,9 +534,19 @@ fn set_owner_only_permissions(path: &Path) -> Result<(), RuntimeError> {
 }
 
 #[derive(Clone)]
-struct EmptyRuntimeMcpServer;
+pub struct RuntimeMcpServer {
+    state: Arc<Mutex<McpServerState>>,
+}
 
-impl ServerHandler for EmptyRuntimeMcpServer {
+impl RuntimeMcpServer {
+    pub fn new(state: McpServerState) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+}
+
+impl ServerHandler for RuntimeMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_06_18)
@@ -537,6 +554,32 @@ impl ServerHandler for EmptyRuntimeMcpServer {
                 "greentic-desktop",
                 env!("CARGO_PKG_VERSION"),
             ))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ErrorData::internal_error("MCP state lock is poisoned", None))?;
+        Ok(rmcp_list_tools_result(&state.list_tools()))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let arguments = mcp_arguments_to_strings(request.arguments.unwrap_or_default());
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ErrorData::internal_error("MCP state lock is poisoned", None))?;
+        let result = state.call_tool_with_arguments(request.name.into_owned(), arguments);
+        Ok(rmcp_call_tool_result(&result))
     }
 }
 
@@ -546,8 +589,9 @@ async fn serve_runtime_mcp(bind: String) -> Result<(), RuntimeError> {
         .with_stateful_mode(false)
         .with_json_response(true)
         .with_allowed_hosts(["localhost", "127.0.0.1", "::1"]);
-    let mcp_service: StreamableHttpService<EmptyRuntimeMcpServer, LocalSessionManager> =
-        StreamableHttpService::new(|| Ok(EmptyRuntimeMcpServer), Default::default(), config);
+    let server = RuntimeMcpServer::new(McpServerState::new(Vec::new(), Vec::<String>::new()));
+    let mcp_service: StreamableHttpService<RuntimeMcpServer, LocalSessionManager> =
+        StreamableHttpService::new(move || Ok(server.clone()), Default::default(), config);
     let router = Router::new()
         .route(
             "/health",
@@ -558,6 +602,21 @@ async fn serve_runtime_mcp(bind: String) -> Result<(), RuntimeError> {
     axum::serve(listener, router)
         .await
         .map_err(|err| RuntimeError::Pack(format!("MCP HTTP server failed: {err}")))
+}
+
+fn mcp_arguments_to_strings(arguments: JsonObject) -> BTreeMap<String, String> {
+    arguments
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -840,7 +899,8 @@ mod tests {
 
     #[test]
     fn runtime_mcp_server_uses_rmcp_server_info() {
-        let info = EmptyRuntimeMcpServer.get_info();
+        let info =
+            RuntimeMcpServer::new(McpServerState::new(Vec::new(), Vec::<String>::new())).get_info();
 
         assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
         assert_eq!(info.server_info.name, "greentic-desktop");

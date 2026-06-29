@@ -1,3 +1,11 @@
+use axum::{
+    extract::Request,
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use greentic_desktop_adapter::{
     AdapterCapabilities, AdapterHealth, AdapterReadiness, LocatorTarget, RunnerStep,
 };
@@ -21,8 +29,8 @@ use greentic_desktop_macos::{
     MacOsAccessibilityAdapter, MacOsAccessibilityRecordingBackend, MACOS_ADAPTER_ID,
 };
 use greentic_desktop_mcp::{
-    mcp_tool_descriptor_for_package, parse_jsonrpc_request, render_initialize_response,
-    render_jsonrpc_error, render_tool_call_response, render_tools_list_response, McpCallResult,
+    mcp_tool_descriptor_for_package, rmcp_call_tool_result, rmcp_list_tools_result, McpCallResult,
+    McpTool,
 };
 use greentic_desktop_planner::{
     plan_prompt_with_llm, PlannerOptions, PlanningContext, RunnerDraft,
@@ -60,20 +68,27 @@ use greentic_desktop_web::{
 use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend, WINDOWS_ADAPTER_ID};
 use greentic_desktop_workflow::{WorkflowOutputExtractor, WorkflowValueType};
 use greentic_distributor_client::GreenticDistributorClient;
+use rmcp::{
+    model::{
+        CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
+    ServerHandler,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-
-const MCP_MAX_CONNECTION_WORKERS: usize = 32;
-const MCP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiHostOptions {
@@ -1752,56 +1767,88 @@ fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
         return Ok(mcp_lifecycle_json("running", &service.bind, state));
     }
 
-    let listener = TcpListener::bind(&state.mcp_bind).map_err(|err| {
-        api_error_json(
-            "mcp.bind_failed",
-            &format!("Could not start MCP server on {}: {err}", state.mcp_bind),
-        )
-    })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
-    let bind = listener
-        .local_addr()
-        .map(|addr| addr.to_string())
-        .unwrap_or_else(|_| state.mcp_bind.clone());
     let api_state = state.clone();
-    let active_workers = Arc::new(AtomicUsize::new(0));
+    let requested_bind = state.mcp_bind.clone();
+    let token = state.gui_token.clone();
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
-    let join = thread::spawn(move || loop {
-        if shutdown_rx.try_recv().is_ok() {
-            break;
-        }
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let current = active_workers.fetch_add(1, Ordering::SeqCst);
-                if current >= MCP_MAX_CONNECTION_WORKERS {
-                    active_workers.fetch_sub(1, Ordering::SeqCst);
-                    let response = http_response(
-                        503,
-                        "Service Unavailable",
-                        "application/json; charset=utf-8",
-                        br#"{"error":"mcp.server_busy"}"#,
-                        false,
-                    );
-                    let _ = stream.write_all(&response);
-                    continue;
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<String, String>>(1);
+    let join = thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let _ = ready_tx.send(Err(api_error_json("runtime.io", &err.to_string())));
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let listener = match tokio::net::TcpListener::bind(&requested_bind).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    let _ = ready_tx.send(Err(api_error_json(
+                        "mcp.bind_failed",
+                        &format!("Could not start MCP server on {requested_bind}: {err}"),
+                    )));
+                    return;
                 }
-                let state = api_state.clone();
-                let active_workers = active_workers.clone();
-                thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(MCP_CONNECTION_TIMEOUT));
-                    let _ = stream.set_write_timeout(Some(MCP_CONNECTION_TIMEOUT));
-                    let _ = handle_mcp_connection(stream, &state);
-                    active_workers.fetch_sub(1, Ordering::SeqCst);
-                });
+            };
+            let bind = listener
+                .local_addr()
+                .map(|addr| addr.to_string())
+                .unwrap_or(requested_bind);
+            let config = StreamableHttpServerConfig::default()
+                .with_stateful_mode(false)
+                .with_json_response(true)
+                .with_allowed_hosts(["localhost", "127.0.0.1", "::1"]);
+            let server_state = api_state.clone();
+            let mcp_service: StreamableHttpService<GuiMcpServer, LocalSessionManager> =
+                StreamableHttpService::new(
+                    move || {
+                        Ok(GuiMcpServer {
+                            state: server_state.clone(),
+                        })
+                    },
+                    Default::default(),
+                    config,
+                );
+            let mut router = Router::new()
+                .route(
+                    "/health",
+                    get(|| async { Json(serde_json::json!({"status": "ok"})) }),
+                )
+                .nest_service("/mcp", mcp_service);
+            if !token.is_empty() {
+                router = router.layer(middleware::from_fn(move |request, next| {
+                    mcp_auth_middleware(token.clone(), request, next)
+                }));
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => break,
-        }
+            let _ = ready_tx.send(Ok(bind));
+            let shutdown = async move {
+                let _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()).await;
+            };
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await;
+        });
     });
+
+    let bind = match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(bind)) => bind,
+        Ok(Err(error)) => {
+            let _ = join.join();
+            return Err(error);
+        }
+        Err(_) => {
+            let _ = shutdown_tx.send(());
+            let _ = join.join();
+            return Err(api_error_json(
+                "mcp.start_timeout",
+                "Timed out waiting for MCP server to start.",
+            ));
+        }
+    };
 
     services.insert(
         key,
@@ -1843,117 +1890,6 @@ fn mcp_lifecycle_json(status: &str, bind: &str, state: &GuiApiState) -> String {
     )
 }
 
-fn handle_mcp_connection(mut stream: TcpStream, state: &GuiApiState) -> Result<(), GuiError> {
-    let request = read_http_request(&mut stream)?;
-    if request.body.is_empty() {
-        return Ok(());
-    }
-    if !mcp_http_request_is_authorized(&request, state) {
-        let data = render_jsonrpc_error(None, -32001, "MCP HTTP authentication required");
-        let response = http_response(
-            401,
-            "Unauthorized",
-            "application/json; charset=utf-8",
-            data.as_bytes(),
-            false,
-        );
-        stream.write_all(&response)?;
-        return Ok(());
-    }
-    let data = mcp_protocol_json(&request.body, state);
-    let response = http_response(
-        200,
-        "OK",
-        "application/json; charset=utf-8",
-        data.as_bytes(),
-        false,
-    );
-    stream.write_all(&response)?;
-    Ok(())
-}
-
-#[derive(Debug, Clone, Default)]
-struct McpHttpRequest {
-    body: String,
-    authorization: Option<String>,
-    origin: Option<String>,
-}
-
-fn read_http_request(stream: &mut TcpStream) -> Result<McpHttpRequest, GuiError> {
-    let mut request = Vec::new();
-    let mut chunk = [0; 1024];
-    let header_end = loop {
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break find_header_end(&request).unwrap_or(request.len());
-        }
-        request.extend_from_slice(&chunk[..read]);
-        if let Some(header_end) = find_header_end(&request) {
-            break header_end;
-        }
-    };
-    let header = String::from_utf8_lossy(&request[..header_end]);
-    let authorization = http_header(&header, "authorization");
-    let origin = http_header(&header, "origin");
-    let content_length = header
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
-    let body_start = header_end + 4;
-    while request.len().saturating_sub(body_start) < content_length {
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&chunk[..read]);
-    }
-    let available = request.len().saturating_sub(body_start);
-    let body_len = available.min(content_length);
-    Ok(McpHttpRequest {
-        body: String::from_utf8_lossy(&request[body_start..body_start + body_len]).to_string(),
-        authorization,
-        origin,
-    })
-}
-
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn http_header(header: &str, name: &str) -> Option<String> {
-    header.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    })
-}
-
-fn mcp_http_request_is_authorized(request: &McpHttpRequest, state: &GuiApiState) -> bool {
-    if state.gui_token.is_empty() {
-        return true;
-    }
-    if let Some(origin) = &request.origin {
-        if !origin.starts_with("http://127.0.0.1:")
-            && !origin.starts_with("http://localhost:")
-            && !origin.starts_with("https://127.0.0.1:")
-            && !origin.starts_with("https://localhost:")
-        {
-            return false;
-        }
-    }
-    request
-        .authorization
-        .as_deref()
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| constant_time_eq(token.as_bytes(), state.gui_token.as_bytes()))
-}
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -1965,30 +1901,72 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-fn mcp_protocol_json(body: &str, state: &GuiApiState) -> String {
-    match parse_jsonrpc_request(body) {
-        Ok(request) => match request.method.as_str() {
-            "initialize" => render_initialize_response(request.id.as_ref()),
-            "tools/list" => mcp_protocol_tools_list_json(request.id.as_ref(), state),
-            "tools/call" => {
-                let Some(name) = request.tool_name else {
-                    return render_jsonrpc_error(
-                        request.id.as_ref(),
-                        -32602,
-                        "tools/call params.name is required",
-                    );
-                };
-                mcp_protocol_tool_call_json(request.id.as_ref(), &name, request.arguments, state)
-            }
-            _ => render_jsonrpc_error(request.id.as_ref(), -32601, "method not found"),
-        },
-        Err(error) => render_jsonrpc_error(None, error.code, &error.message),
+async fn mcp_auth_middleware(token: String, request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        if !origin.starts_with("http://127.0.0.1:")
+            && !origin.starts_with("http://localhost:")
+            && !origin.starts_with("https://127.0.0.1:")
+            && !origin.starts_with("https://localhost:")
+        {
+            return (StatusCode::UNAUTHORIZED, "MCP HTTP authentication required").into_response();
+        }
+    }
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), token.as_bytes()));
+    if authorized {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "MCP HTTP authentication required").into_response()
     }
 }
 
-fn mcp_protocol_tools_list_json(id: Option<&serde_json::Value>, state: &GuiApiState) -> String {
+#[derive(Clone)]
+struct GuiMcpServer {
+    state: GuiApiState,
+}
+
+impl ServerHandler for GuiMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2025_06_18)
+            .with_server_info(Implementation::new(
+                "greentic-desktop",
+                env!("CARGO_PKG_VERSION"),
+            ))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(rmcp_list_tools_result(&gui_mcp_tools(&self.state)))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let result = gui_mcp_call_tool(
+            &self.state,
+            request.name.as_ref(),
+            mcp_arguments_to_strings(request.arguments.unwrap_or_default()),
+        );
+        Ok(rmcp_call_tool_result(&result))
+    }
+}
+
+fn gui_mcp_tools(state: &GuiApiState) -> Vec<McpTool> {
     let adapters = replay_adapter_registry(state).capabilities();
-    let tools = enabled_mcp_tools(state)
+    enabled_mcp_tools(state)
         .iter()
         .filter_map(|runner| {
             let package = runner_package_for_mcp_descriptor(&runner_yaml(runner))?;
@@ -2000,8 +1978,7 @@ fn mcp_protocol_tools_list_json(id: Option<&serde_json::Value>, state: &GuiApiSt
                 format!("Run Greentic desktop runner {}", runner.name),
             ))
         })
-        .collect::<Vec<_>>();
-    render_tools_list_response(id, &tools)
+        .collect::<Vec<_>>()
 }
 
 fn runner_package_for_mcp_descriptor(yaml: &str) -> Option<RunnerPackage> {
@@ -2020,12 +1997,11 @@ fn runner_package_for_mcp_descriptor(yaml: &str) -> Option<RunnerPackage> {
     })
 }
 
-fn mcp_protocol_tool_call_json(
-    id: Option<&serde_json::Value>,
+fn gui_mcp_call_tool(
+    state: &GuiApiState,
     name: &str,
     arguments: BTreeMap<String, String>,
-    state: &GuiApiState,
-) -> String {
+) -> McpCallResult {
     let runner_id = name.trim_start_matches("runner.").replace('.', "_");
     let matched = enabled_mcp_tools(state)
         .into_iter()
@@ -2043,19 +2019,49 @@ fn mcp_protocol_tool_call_json(
             )
             .to_string(),
         ) {
-            Ok(result) => render_tool_call_response(
-                id,
-                &McpCallResult {
-                    success: result.status == "passed",
-                    outputs_json: result.outputs_json,
-                    failure: None,
-                    evidence_uri: result.evidence_ref,
-                },
-            ),
-            Err(error) => render_jsonrpc_error(id, -32005, &error),
+            Ok(result) => McpCallResult {
+                success: result.status == "passed",
+                outputs_json: result.outputs_json,
+                failure: None,
+                evidence_uri: result.evidence_ref,
+            },
+            Err(error) => McpCallResult {
+                success: false,
+                outputs_json: "{}".to_owned(),
+                failure: Some(greentic_desktop_mcp::StructuredFailure {
+                    code: "runner.execution_failed".to_owned(),
+                    message: error,
+                    evidence_uri: None,
+                }),
+                evidence_uri: String::new(),
+            },
         },
-        None => render_jsonrpc_error(id, -32004, "Tool is not enabled"),
+        None => McpCallResult {
+            success: false,
+            outputs_json: "{}".to_owned(),
+            failure: Some(greentic_desktop_mcp::StructuredFailure {
+                code: "tool.disabled_or_missing".to_owned(),
+                message: "Tool is not enabled".to_owned(),
+                evidence_uri: None,
+            }),
+            evidence_uri: String::new(),
+        },
     }
+}
+
+fn mcp_arguments_to_strings(arguments: JsonObject) -> BTreeMap<String, String> {
+    arguments
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            )
+        })
+        .collect()
 }
 
 fn mcp_tool_action_json(path: &str, state: &GuiApiState) -> Result<String, String> {
@@ -5509,7 +5515,7 @@ mod tests {
             let mut stream = TcpStream::connect(addr).expect("connect to HTTP server");
             if write!(
                 stream,
-                "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\n{extra_headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\n{extra_headers}accept: application/json, text/event-stream\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
@@ -7121,7 +7127,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"runner.calculator.basic","arguments":{"number_1":"1","number_2":"1","operation":"+"}}}"#,
         );
         let call = String::from_utf8_lossy(&call);
-        assert!(call.contains("\"error\""), "{call}");
+        assert!(call.contains("\"isError\":true"), "{call}");
         let stop = post(handle.addr(), "/api/v1/mcp/stop", "{}");
         assert!(String::from_utf8_lossy(&stop).contains("\"status\":\"stopped\""));
         let versions = get(handle.addr(), "/api/v1/runners/calculator.basic/versions");
@@ -7263,7 +7269,7 @@ mod tests {
             ),
         );
         let call = String::from_utf8_lossy(&call);
-        assert!(call.contains("\"error\""), "{call}");
+        assert!(call.contains("\"isError\":true"), "{call}");
 
         let stop = post(handle.addr(), "/api/v1/mcp/stop", "{}");
         assert!(String::from_utf8_lossy(&stop).contains("\"status\":\"stopped\""));
@@ -7318,7 +7324,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"runner.crm.create_customer","arguments":{"number_1":"1","number_2":"1","operation":"+"}}}"#,
         );
         let call = String::from_utf8_lossy(&call);
-        assert!(call.contains("\"error\""), "{call}");
+        assert!(call.contains("\"isError\":true"), "{call}");
         assert!(
             call.contains("Runner manifest does not contain executable steps"),
             "{call}"
@@ -7425,7 +7431,7 @@ mod tests {
         let missing = post_json(
             bind,
             "/mcp",
-            r#"{"jsonrpc":"2.0","id":"init","method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"greentic-test","version":"0.0.0"}}}"#,
         );
         assert!(
             response_head(&missing).starts_with("HTTP/1.1 401"),
@@ -7438,7 +7444,7 @@ mod tests {
         let wrong_origin = post_json_with_headers(
             bind,
             "/mcp",
-            r#"{"jsonrpc":"2.0","id":"init","method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"greentic-test","version":"0.0.0"}}}"#,
             "authorization: Bearer mcp-test-token\r\norigin: https://evil.example\r\n",
         );
         assert!(
@@ -7450,7 +7456,7 @@ mod tests {
         let authorized = post_json_with_headers(
             bind,
             "/mcp",
-            r#"{"jsonrpc":"2.0","id":"init","method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"greentic-test","version":"0.0.0"}}}"#,
             "authorization: Bearer mcp-test-token\r\norigin: http://127.0.0.1:12345\r\n",
         );
         let body = String::from_utf8_lossy(response_body(&authorized));
@@ -7576,33 +7582,64 @@ mod tests {
             .parse::<SocketAddr>()
             .expect("mcp bind should parse");
 
-        let list = post_json(
-            bind,
-            "/mcp",
-            r#"{"jsonrpc":"2.0","id":"list","method":"tools/list"}"#,
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        let call_result = runtime.block_on(async {
+            use rmcp::{
+                model::{CallToolRequestParams, ClientInfo},
+                transport::{
+                    streamable_http_client::StreamableHttpClientTransportConfig,
+                    StreamableHttpClientTransport,
+                },
+                ServiceExt,
+            };
+            let transport = StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(format!("http://{bind}/mcp")),
+            );
+            let client = ClientInfo::default()
+                .serve(transport)
+                .await
+                .expect("rmcp client should connect");
+            let tools = client
+                .list_all_tools()
+                .await
+                .expect("rmcp client should list tools");
+            assert!(
+                tools
+                    .iter()
+                    .any(|tool| tool.name == "runner.generic.web.append_row"),
+                "{tools:?}"
+            );
+            let arguments = serde_json::json!({
+                "name": "Ada Lovelace",
+                "email": "ada@example.test"
+            })
+            .as_object()
+            .expect("arguments should be object")
+            .clone();
+            client
+                .call_tool(
+                    CallToolRequestParams::new("runner.generic.web.append_row")
+                        .with_arguments(arguments),
+                )
+                .await
+                .expect("rmcp client should call runner")
+        });
+        assert_eq!(call_result.is_error, Some(false), "{call_result:?}");
+        let structured = call_result
+            .structured_content
+            .as_ref()
+            .expect("runner call should return structured content");
+        assert_eq!(structured["status"], "passed");
+        assert_eq!(
+            structured["outputs"]["outputs.result"],
+            "Saved row for Ada Lovelace <ada@example.test>"
         );
-        let list_body = String::from_utf8_lossy(response_body(&list));
-        assert!(
-            list_body.contains("runner.generic.web.append_row"),
-            "{list_body}"
-        );
-        assert!(list_body.contains("\"inputSchema\""), "{list_body}");
-
-        let call = post_json(
-            bind,
-            "/mcp",
-            r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"runner.generic.web.append_row","arguments":{"name":"Ada Lovelace","email":"ada@example.test"}}}"#,
-        );
-        let call_body = String::from_utf8_lossy(response_body(&call));
-        assert!(call_body.contains("\"status\":\"passed\""), "{call_body}");
-        assert!(
-            call_body
-                .contains("\"outputs.result\":\"Saved row for Ada Lovelace <ada@example.test>\""),
-            "{call_body}"
-        );
-        assert!(
-            call_body.contains("evidence://run_generic.web.append_row/bundle.json"),
-            "{call_body}"
+        assert_eq!(
+            structured["evidenceRef"],
+            "evidence://run_generic.web.append_row/bundle.json"
         );
         let evidence_dir = root.join("evidence").join("run_generic.web.append_row");
         let bundle = std::fs::read_to_string(evidence_dir.join("bundle.json"))
