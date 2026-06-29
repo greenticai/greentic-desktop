@@ -497,7 +497,7 @@ fn extract_outputs(
 fn extract_output_value(
     output: &str,
     observations: &[Observation],
-    step_results: &[StepResult],
+    _step_results: &[StepResult],
 ) -> Option<String> {
     let name = output
         .trim_start_matches("outputs.")
@@ -528,13 +528,6 @@ fn extract_output_value(
         .flat_map(|observation| observation.visible_text.iter().rev())
         .find(|line| !line.trim().is_empty())
         .cloned()
-        .or_else(|| {
-            step_results
-                .iter()
-                .rev()
-                .find(|result| !result.message.trim().is_empty())
-                .map(|result| result.message.clone())
-        })
 }
 
 fn retry_policy(step: &RunnerStep) -> RetryPolicy {

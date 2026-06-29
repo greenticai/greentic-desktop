@@ -24,6 +24,21 @@ jobs:
     with:
       command: cargo test --all-features
 
+  installer-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check installer scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n install.sh
+          if command -v pwsh >/dev/null 2>&1; then
+            pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content ./install.ps1 -Raw))'
+          else
+            echo "pwsh is not available; skipping PowerShell parser check."
+          fi
+
   package-dry-run:
     uses: ./.github/workflows/_reusable_rust.yml
     with:
