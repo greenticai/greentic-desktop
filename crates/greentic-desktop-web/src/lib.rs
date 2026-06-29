@@ -9,13 +9,16 @@ use greentic_desktop_recorder::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub const PLAYWRIGHT_ADAPTER_ID: &str = "greentic.desktop.playwright";
 pub const PLAYWRIGHT_RECORDER_BACKEND_ID: &str = "greentic.recording.web.playwright";
+const PLAYWRIGHT_REPLAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn playwright_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -554,7 +557,7 @@ struct WebAdapterState {
 struct PlaywrightReplaySidecar {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
+    responses: Receiver<std::io::Result<String>>,
     next_id: u64,
 }
 
@@ -813,10 +816,35 @@ impl PlaywrightReplaySidecar {
         let stdout = child.stdout.take().ok_or_else(|| {
             AdapterError::ExecutionFailed("Playwright sidecar stdout is unavailable.".to_owned())
         })?;
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = stderr.read_to_end(&mut sink);
+            });
+        }
+        let (response_tx, responses) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if response_tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = response_tx.send(Err(err));
+                        break;
+                    }
+                }
+            }
+        });
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            responses,
             next_id: 0,
         })
     }
@@ -860,10 +888,17 @@ impl PlaywrightReplaySidecar {
         self.stdin.flush().map_err(|err| {
             AdapterError::ExecutionFailed(format!("failed to flush Playwright request: {err}"))
         })?;
-        let mut response = String::new();
-        self.stdout.read_line(&mut response).map_err(|err| {
-            AdapterError::ExecutionFailed(format!("failed to read Playwright response: {err}"))
-        })?;
+        let response = self
+            .responses
+            .recv_timeout(PLAYWRIGHT_REPLAY_RESPONSE_TIMEOUT)
+            .map_err(|err| {
+                AdapterError::ExecutionFailed(format!(
+                    "timed out waiting for Playwright response to {request_id}: {err}"
+                ))
+            })?
+            .map_err(|err| {
+                AdapterError::ExecutionFailed(format!("failed to read Playwright response: {err}"))
+            })?;
         if response.trim().is_empty() {
             return Err(AdapterError::ExecutionFailed(format!(
                 "Playwright web replay sidecar exited without response to {request_id}."

@@ -477,7 +477,14 @@ fn run_assertions(
             .capabilities
             .into_iter()
             .find(|capability| capability.contains("assert") || capability.contains("wait"))
-            .unwrap_or_else(|| request.package.steps[0].required_capability.clone());
+            .or_else(|| {
+                request
+                    .package
+                    .steps
+                    .first()
+                    .map(|step| step.required_capability.clone())
+            })
+            .unwrap_or_else(|| "assertion.validate".to_owned());
         let result = adapter.validate(Assertion {
             id: format!("assertion_{}", index + 1),
             required_capability: capability.clone(),
@@ -530,37 +537,53 @@ fn extract_outputs(
 fn extract_output_value(
     output: &str,
     observations: &[Observation],
-    _step_results: &[StepResult],
+    step_results: &[StepResult],
 ) -> Option<String> {
     let name = output
         .trim_start_matches("outputs.")
         .replace('_', " ")
         .to_ascii_lowercase();
-    for line in observations
+    let observation_lines = observations
         .iter()
         .rev()
-        .flat_map(|observation| observation.visible_text.iter())
-    {
+        .flat_map(|observation| observation.visible_text.iter());
+    if let Some(value) = extract_labeled_output(&name, observation_lines) {
+        return Some(value);
+    }
+    let step_lines = step_results
+        .iter()
+        .rev()
+        .filter(|result| result.success)
+        .filter(|result| !result.message.trim().is_empty())
+        .map(|result| &result.message);
+    if let Some(value) = extract_labeled_output(&name, step_lines) {
+        return Some(value);
+    }
+    None
+}
+
+fn extract_labeled_output<'a>(
+    name: &str,
+    lines: impl Iterator<Item = &'a String>,
+) -> Option<String> {
+    for line in lines {
         let lower = line.to_ascii_lowercase();
         for separator in [":", "="] {
-            if let Some(index) = lower.find(&format!("{name}{separator}")) {
-                return Some(
-                    line[index + name.len() + separator.len()..]
-                        .trim()
-                        .to_owned(),
-                );
+            let prefix = format!("{name}{separator}");
+            let spaced_prefix = format!("{name} {separator}");
+            let value_start = if lower.starts_with(&prefix) {
+                Some(prefix.len())
+            } else if lower.starts_with(&spaced_prefix) {
+                Some(spaced_prefix.len())
+            } else {
+                None
+            };
+            if let Some(index) = value_start {
+                return Some(line[index..].trim().to_owned());
             }
         }
-        if !name.is_empty() && lower.contains(&name) {
-            return Some(line.clone());
-        }
     }
-    observations
-        .iter()
-        .rev()
-        .flat_map(|observation| observation.visible_text.iter().rev())
-        .find(|line| !line.trim().is_empty())
-        .cloned()
+    None
 }
 
 fn local_path_output(value: &str) -> Option<&str> {
@@ -1013,7 +1036,7 @@ mod tests {
             std::env::temp_dir().join(format!("greentic-missing-output-{}", unique_suffix()));
         let adapter = Arc::new(TestAdapter::new(
             &["web.fill"],
-            vec![missing.to_string_lossy().as_ref()],
+            vec![&format!("saved status: {}", missing.to_string_lossy())],
             true,
         ));
         let mut registry = AdapterRegistry::new();
@@ -1042,7 +1065,7 @@ mod tests {
         fs::write(&file, "saved").expect("output file");
         let adapter = Arc::new(TestAdapter::new(
             &["web.fill"],
-            vec![file.to_string_lossy().as_ref()],
+            vec![&format!("saved status: {}", file.to_string_lossy())],
             true,
         ));
         let mut registry = AdapterRegistry::new();

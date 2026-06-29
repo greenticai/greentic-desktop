@@ -90,6 +90,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+const MAX_GUI_HTTP_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const GUI_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiHostOptions {
     pub bind: SocketAddr,
@@ -177,7 +180,10 @@ impl GuiHost {
 
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let _ = handle_connection(stream, addr, &api_state);
+                    let api_state = Arc::clone(&api_state);
+                    thread::spawn(move || {
+                        let _ = handle_connection(stream, addr, api_state);
+                    });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(25));
@@ -283,25 +289,22 @@ pub fn browser_command_for(os: &str, url: &str) -> BrowserCommand {
 fn handle_connection(
     mut stream: TcpStream,
     addr: SocketAddr,
-    api_state: &GuiApiState,
+    api_state: Arc<GuiApiState>,
 ) -> Result<(), GuiError> {
     stream.set_nonblocking(false)?;
-    let mut buffer = [0; 8192];
-    let read = stream.read(&mut buffer)?;
-    if read == 0 {
+    stream.set_read_timeout(Some(GUI_HTTP_READ_TIMEOUT))?;
+    let Some((request, body)) = read_http_request(&mut stream)? else {
         return Ok(());
-    }
+    };
 
-    let request = String::from_utf8_lossy(&buffer[..read]);
     let (method, path) = parse_request_line(&request).unwrap_or(("GET", "/"));
-    let body = request.split_once("\r\n\r\n").map_or("", |(_, body)| body);
     let response = if path.starts_with("/api/") {
-        if let Some(error) = reject_unsafe_api_request(method, &request, addr, api_state) {
+        if let Some(error) = reject_unsafe_api_request(method, &request, addr, &api_state) {
             let response = json_response(403, "Forbidden", &error, method == "HEAD");
             stream.write_all(&response)?;
             return Ok(());
         }
-        api_response(method, path, body, addr, api_state)
+        api_response(method, path, &body, addr, &api_state)
     } else if method != "GET" && method != "HEAD" {
         http_response(
             405,
@@ -317,6 +320,85 @@ fn handle_connection(
 
     stream.write_all(&response)?;
     Ok(())
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<Option<(String, String)>, GuiError> {
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        if let Some(index) = find_header_end(&bytes) {
+            break index;
+        }
+        if bytes.len() >= MAX_GUI_HTTP_REQUEST_BYTES {
+            return Err(invalid_http_request(
+                "HTTP request headers exceed the GUI limit",
+            ));
+        }
+        let mut buffer = [0_u8; 8192];
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            return Err(invalid_http_request(
+                "HTTP request ended before headers completed",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    };
+
+    let header_bytes = &bytes[..header_end];
+    let headers = String::from_utf8_lossy(header_bytes).into_owned();
+    let content_length = content_length(&headers)?;
+    let body_start = header_end + 4;
+    let total_len = body_start
+        .checked_add(content_length)
+        .ok_or_else(|| invalid_http_request("HTTP request body is too large"))?;
+    if total_len > MAX_GUI_HTTP_REQUEST_BYTES {
+        return Err(invalid_http_request(
+            "HTTP request body exceeds the GUI limit",
+        ));
+    }
+
+    while bytes.len() < total_len {
+        let mut buffer = [0_u8; 8192];
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Err(invalid_http_request(
+                "HTTP request ended before body completed",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > MAX_GUI_HTTP_REQUEST_BYTES {
+            return Err(invalid_http_request("HTTP request exceeds the GUI limit"));
+        }
+    }
+
+    let body = String::from_utf8_lossy(&bytes[body_start..total_len]).into_owned();
+    Ok(Some((headers, body)))
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn content_length(headers: &str) -> Result<usize, GuiError> {
+    let Some(value) = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim())
+    }) else {
+        return Ok(0);
+    };
+    value
+        .parse::<usize>()
+        .map_err(|_| invalid_http_request("invalid Content-Length header"))
+}
+
+fn invalid_http_request(message: &str) -> GuiError {
+    GuiError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.to_owned(),
+    ))
 }
 
 fn reject_unsafe_api_request(
@@ -5322,43 +5404,38 @@ fn permission_prompt_label(permission: &str) -> String {
 }
 
 fn json_string_field(body: &str, field: &str) -> Option<String> {
-    let needle = format!(r#""{field}""#);
-    let after_field = body.split_once(&needle)?.1;
-    let after_colon = after_field.split_once(':')?.1.trim_start();
-    let mut value = String::new();
-    let mut escaped = false;
-    for ch in after_colon.strip_prefix('"')?.chars() {
-        if escaped {
-            value.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '"' => '"',
-                '\\' => '\\',
-                other => other,
-            });
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Some(value);
-        } else {
-            value.push(ch);
-        }
-    }
-    None
+    let value = serde_json::from_str::<serde_json::Value>(json_payload(body)).ok()?;
+    json_field_value(&value, field)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn json_bool_field(body: &str, field: &str) -> Option<bool> {
-    let needle = format!(r#""{field}""#);
-    let after_field = body.split_once(&needle)?.1;
-    let after_colon = after_field.split_once(':')?.1.trim_start();
-    if after_colon.starts_with("true") {
-        Some(true)
-    } else if after_colon.starts_with("false") {
-        Some(false)
-    } else {
-        None
+    let value = serde_json::from_str::<serde_json::Value>(json_payload(body)).ok()?;
+    json_field_value(&value, field)?.as_bool()
+}
+
+fn json_payload(body_or_response: &str) -> &str {
+    body_or_response
+        .split_once("\r\n\r\n")
+        .map_or(body_or_response, |(_, body)| body)
+}
+
+fn json_field_value<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(found) = value.get(field) {
+        return Some(found);
+    }
+    match value {
+        serde_json::Value::Object(object) => object
+            .values()
+            .find_map(|nested| json_field_value(nested, field)),
+        serde_json::Value::Array(array) => array
+            .iter()
+            .find_map(|nested| json_field_value(nested, field)),
+        _ => None,
     }
 }
 
@@ -5949,6 +6026,72 @@ mod tests {
             ),
         );
         assert!(response_head(&ok).starts_with("HTTP/1.1 200 OK"));
+    }
+
+    #[test]
+    fn gui_http_reads_request_bodies_larger_than_initial_buffer() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-large-body-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+        let model = format!("model-{}", "x".repeat(12_000));
+        let body = format!(r#"{{"provider":"deepseek","model":"{model}"}}"#);
+
+        let response = put(handle.addr(), "/api/v1/settings/llm", &body);
+        let response = String::from_utf8_lossy(&response);
+
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(response.contains(&escape_json(&model)), "{response}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gui_http_waits_for_split_request_body() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-split-body-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+        let body = r#"{"provider":"deepseek","model":"split-body-model"}"#;
+        let mut stream = TcpStream::connect(handle.addr()).expect("connect to GUI host");
+        write!(
+            stream,
+            "PUT /api/v1/settings/llm HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("headers should write");
+        std::thread::sleep(Duration::from_millis(50));
+        stream
+            .write_all(body.as_bytes())
+            .expect("body should write");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("response should read");
+
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(
+            response.contains("\"model\":\"split-body-model\""),
+            "{response}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
