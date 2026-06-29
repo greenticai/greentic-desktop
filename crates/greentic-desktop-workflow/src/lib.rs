@@ -893,6 +893,13 @@ fn locator_for_query(query: &TargetQuery) -> LocatorTarget {
 }
 
 fn locator_for_resource(resource: &ResourceReference) -> LocatorTarget {
+    if matches!(
+        resource.resource_type,
+        ResourceType::Document | ResourceType::Spreadsheet
+    ) {
+        return locator_for_query(&TargetQuery::active_document());
+    }
+
     LocatorTarget {
         preferred: Some(LocatorStrategy {
             name: Some(resource.path_template.clone()),
@@ -1538,6 +1545,59 @@ mod tests {
         assert_eq!(
             compiled.steps.last().unwrap().required_capability,
             "terminal.extract_field"
+        );
+    }
+
+    #[test]
+    fn compiles_document_resource_text_step_with_active_document_target() {
+        let workflow = PrimitiveWorkflow {
+            id: "word-document".to_owned(),
+            summary: "Create a document".to_owned(),
+            target: WorkflowTarget::native_app(
+                NativePlatform::MacOs,
+                Some("Word".to_owned()),
+                "Word".to_owned(),
+            ),
+            inputs: Vec::new(),
+            primitives: vec![
+                DesktopPrimitive::OpenApp {
+                    app: AppReference {
+                        name: "Word".to_owned(),
+                        bundle_id: None,
+                        executable: None,
+                        window_title: Some("Word".to_owned()),
+                    },
+                },
+                DesktopPrimitive::OpenResource {
+                    resource: ResourceReference {
+                        path_template: "{{inputs.document_path}}".to_owned(),
+                        resource_type: ResourceType::Document,
+                    },
+                    create_if_missing: true,
+                },
+            ],
+            outputs: Vec::new(),
+            assertions: Vec::new(),
+            evidence_policy: WorkflowEvidencePolicy::default(),
+        };
+
+        let compiled =
+            compile_primitive_workflow(&workflow).expect("primitive workflow should compile");
+        let open_resource = compiled
+            .steps
+            .iter()
+            .find(|step| step.id == "primitive-2-open-resource")
+            .expect("open resource step");
+
+        assert_eq!(open_resource.action, "type_text");
+        assert_eq!(open_resource.required_capability, "macos.type_text");
+        assert_eq!(
+            open_resource
+                .target
+                .preferred
+                .as_ref()
+                .and_then(|target| target.role.as_deref()),
+            Some("document")
         );
     }
 

@@ -803,13 +803,7 @@ struct JsonRunnerStep {
 impl From<JsonRunnerStep> for RunnerStep {
     fn from(value: JsonRunnerStep) -> Self {
         let target = if value.target == LocatorTarget::default() {
-            LocatorTarget {
-                preferred: Some(LocatorStrategy {
-                    name: Some(value.id.clone()),
-                    ..LocatorStrategy::default()
-                }),
-                ..LocatorTarget::default()
-            }
+            default_target_for_step(&value)
         } else {
             value.target
         };
@@ -820,6 +814,28 @@ impl From<JsonRunnerStep> for RunnerStep {
             value: value.value,
             required_capability: value.required_capability,
         }
+    }
+}
+
+fn default_target_for_step(step: &JsonRunnerStep) -> LocatorTarget {
+    if step.action == "type_text" || step.required_capability.ends_with(".type_text") {
+        return LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                role: Some("document".to_owned()),
+                name: Some("active document".to_owned()),
+                label: Some("active document".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+    }
+
+    LocatorTarget {
+        preferred: Some(LocatorStrategy {
+            name: Some(step.id.clone()),
+            ..LocatorStrategy::default()
+        }),
+        ..LocatorTarget::default()
     }
 }
 
@@ -1052,6 +1068,38 @@ mod tests {
         .expect("primitive draft should parse");
 
         assert_eq!(draft.steps[0].required_capability, "web.goto");
+    }
+
+    #[test]
+    fn parses_empty_text_step_target_as_active_document() {
+        let draft = parse_runner_draft_json(
+            r#"{
+                "runner_id": "word.document.create",
+                "version": "0.1.10-draft",
+                "summary": "Create a Word document",
+                "risk_level": "medium",
+                "required_capabilities": ["macos.type_text"],
+                "inputs": {"text_content": {"type": "string"}},
+                "outputs": {},
+                "steps": [{
+                    "id": "type-content",
+                    "action": "type_text",
+                    "required_capability": "macos.type_text",
+                    "value": "{{inputs.text_content}}"
+                }],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        )
+        .expect("runner draft should parse");
+
+        let target = draft.steps[0]
+            .target
+            .preferred
+            .as_ref()
+            .expect("default text target");
+        assert_eq!(target.role.as_deref(), Some("document"));
+        assert_eq!(target.name.as_deref(), Some("active document"));
     }
 
     #[test]

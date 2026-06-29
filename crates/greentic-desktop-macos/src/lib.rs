@@ -773,6 +773,22 @@ return ""
 }
 
 fn macos_type_text(app: &str, target: &LocatorTarget, value: &str) -> AdapterResult<()> {
+    if target == &LocatorTarget::default() {
+        let script = format!(
+            r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    keystroke {value}
+  end tell
+end tell
+"#,
+            app = apple_quote(app),
+            value = apple_quote(value)
+        );
+        return run_osascript(&script).map(|_| ());
+    }
+
     let predicate = macos_locator_predicate(target, None)?;
     let script = format!(
         r#"
