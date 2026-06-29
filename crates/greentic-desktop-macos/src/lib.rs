@@ -907,7 +907,67 @@ end tell
         key = apple_quote(&key),
         using = using
     );
+    run_osascript(&script)?;
+    if shortcut_is_new_document(&key, &modifiers) {
+        macos_confirm_default_new_document_if_needed(app)?;
+    }
+    Ok(())
+}
+
+fn shortcut_is_new_document(key: &str, modifiers: &[&str]) -> bool {
+    key.eq_ignore_ascii_case("n") && modifiers.iter().any(|modifier| *modifier == "command down")
+}
+
+fn macos_confirm_default_new_document_if_needed(app: &str) -> AdapterResult<()> {
+    let script = macos_confirm_default_new_document_script(app);
     run_osascript(&script).map(|_| ())
+}
+
+fn macos_confirm_default_new_document_script(app: &str) -> String {
+    format!(
+        r#"
+delay 0.6
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    try
+      set targetWindow to front window
+    on error
+      return "no-window"
+    end try
+
+    set defaultButtonNames to {{"Create", "Choose", "Open", "OK"}}
+    repeat with defaultButtonName in defaultButtonNames
+      try
+        if exists button (defaultButtonName as text) of targetWindow then
+          click button (defaultButtonName as text) of targetWindow
+          return "confirmed"
+        end if
+      end try
+    end repeat
+
+    try
+      repeat with candidate in (entire contents of targetWindow)
+        try
+          set candidateRole to role of candidate as text
+          set candidateName to name of candidate as text
+          if candidateRole is "AXButton" then
+            repeat with defaultButtonName in defaultButtonNames
+              if candidateName is (defaultButtonName as text) then
+                click candidate
+                return "confirmed"
+              end if
+            end repeat
+          end if
+        end try
+      end repeat
+    end try
+  end tell
+end tell
+return "not-needed"
+"#,
+        app = apple_quote(app)
+    )
 }
 
 fn macos_invoke_menu(app: &str, menu_path: &str) -> AdapterResult<()> {
@@ -1474,8 +1534,20 @@ mod tests {
 
         assert_eq!(key, "N");
         assert_eq!(modifiers, vec!["command down", "shift down"]);
+        assert!(shortcut_is_new_document("N", &["command down"]));
+        assert!(!shortcut_is_new_document("S", &["command down"]));
         let err = macos_shortcut_parts("Cmd+Hyper+N").expect_err("unsupported modifier");
         assert!(format!("{err}").contains("unsupported macOS shortcut modifier"));
+    }
+
+    #[test]
+    fn new_document_confirmation_script_clicks_generic_default_buttons() {
+        let script = macos_confirm_default_new_document_script("Microsoft Word");
+
+        assert!(script.contains("\"Create\""), "{script}");
+        assert!(script.contains("\"Choose\""), "{script}");
+        assert!(script.contains("candidateRole is \"AXButton\""), "{script}");
+        assert!(!script.contains("whose role"), "{script}");
     }
 
     #[test]
