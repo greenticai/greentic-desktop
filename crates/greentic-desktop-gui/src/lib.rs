@@ -6286,7 +6286,8 @@ mod tests {
             );
         }
         for required_text in [
-            "MCP stdio",
+            "MCP CLI server",
+            "Disabled",
             "MCP HTTP",
             "Production",
             "Beta",
