@@ -243,11 +243,21 @@ pub fn replay_with_context(
             .unwrap_or_default()
             .contains("{{missing");
         let executable_step = executable_step_for_replay(step);
-        let adapter = selector.select(&executable_step.required_capability);
+        let execution_capability = executable_step.required_capability.clone();
+        let skip_step = should_skip_step_for_replay(&executable_step);
+        let adapter = (!skip_step)
+            .then(|| selector.select(&execution_capability))
+            .flatten();
         let result = if unresolved {
             Err(AdapterError::ExecutionFailed(
                 "unresolved input or secret".to_owned(),
             ))
+        } else if skip_step {
+            Ok(StepResult {
+                step_id: executable_step.id,
+                success: true,
+                message: "active document focus is handled by the following text step".to_owned(),
+            })
         } else if let Some(adapter) = adapter {
             let mut executable = executable_step;
             executable.value = resolved;
@@ -287,7 +297,7 @@ pub fn replay_with_context(
         });
         tool_trace.push(ToolTraceEntry {
             step_id: step.id.clone(),
-            capability: executable_step_for_replay(step).required_capability,
+            capability: execution_capability,
             status: if success {
                 EvidenceStatus::Success
             } else {
@@ -441,10 +451,7 @@ impl ReplayOutcome {
 fn executable_step_for_replay(step: &RunnerStep) -> RunnerStep {
     if step.action == "press_shortcut"
         && step.required_capability.ends_with(".click_element")
-        && step
-            .value
-            .as_deref()
-            .is_some_and(|value| looks_like_shortcut(value))
+        && step.value.as_deref().is_some_and(looks_like_shortcut)
     {
         let mut executable = step.clone();
         if let Some((prefix, _)) = step.required_capability.split_once('.') {
@@ -453,6 +460,32 @@ fn executable_step_for_replay(step: &RunnerStep) -> RunnerStep {
         return executable;
     }
     step.clone()
+}
+
+fn should_skip_step_for_replay(step: &RunnerStep) -> bool {
+    step.action == "focus_document"
+        && step.required_capability == "macos.focus_document"
+        && is_active_document_target(&step.target)
+}
+
+fn is_active_document_target(target: &LocatorTarget) -> bool {
+    [target.preferred.as_ref(), target.fallback.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|strategy| {
+            strategy
+                .name
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("active document"))
+                || strategy
+                    .label
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("active document"))
+                || strategy
+                    .role
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("document"))
+        })
 }
 
 fn looks_like_shortcut(value: &str) -> bool {
@@ -706,7 +739,9 @@ fn evidence_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_desktop_adapter::{AdapterResult, AssertionResult, RecordedEvent};
+    use greentic_desktop_adapter::{
+        AdapterResult, AssertionResult, LocatorStrategy, RecordedEvent,
+    };
     use greentic_desktop_recorder::RecordingMode;
     use greentic_desktop_session::{BootstrapAction, BrowserKind};
     use std::fs;
@@ -1030,6 +1065,27 @@ mod tests {
         assert_eq!(executable.required_capability, "macos.press_shortcut");
         assert_eq!(executable.action, "press_shortcut");
         assert_eq!(executable.value.as_deref(), Some("Cmd+N"));
+    }
+
+    #[test]
+    fn replay_skips_generic_active_document_focus_step() {
+        let step = RunnerStep {
+            id: "primitive-3-focus-target".to_owned(),
+            action: "focus_document".to_owned(),
+            target: LocatorTarget {
+                preferred: Some(LocatorStrategy {
+                    role: Some("document".to_owned()),
+                    name: Some("active document".to_owned()),
+                    label: Some("active document".to_owned()),
+                    ..LocatorStrategy::default()
+                }),
+                ..LocatorTarget::default()
+            },
+            value: None,
+            required_capability: "macos.focus_document".to_owned(),
+        };
+
+        assert!(should_skip_step_for_replay(&step));
     }
 
     #[test]
