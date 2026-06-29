@@ -1329,6 +1329,16 @@ fn compile_common_actions(
                 None,
                 format!("{prefix}.screenshot"),
             ),
+            WorkflowActionKind::Key => {
+                let (action_name, capability) = key_action_for_prefix(prefix)?;
+                compiler.push(
+                    format!("key-{step_id}"),
+                    action_name,
+                    action.target.clone(),
+                    action.value_template.clone(),
+                    capability,
+                );
+            }
             WorkflowActionKind::AdapterCapability(capability) => compiler.push(
                 step_id,
                 capability
@@ -1344,7 +1354,6 @@ fn compile_common_actions(
             | WorkflowActionKind::Observe
             | WorkflowActionKind::Find
             | WorkflowActionKind::Input
-            | WorkflowActionKind::Key
             | WorkflowActionKind::Extract
             | WorkflowActionKind::Assert
             | WorkflowActionKind::Download
@@ -1357,6 +1366,19 @@ fn compile_common_actions(
         }
     }
     Ok(())
+}
+
+fn key_action_for_prefix(prefix: &str) -> WorkflowCompileOutcome<(&'static str, String)> {
+    match prefix {
+        "web" => Ok(("press", "web.press".to_owned())),
+        "macos" | "windows" | "linux" => Ok(("press_shortcut", format!("{prefix}.press_shortcut"))),
+        "terminal" => Ok(("send_keys", "terminal.send_keys".to_owned())),
+        "remote" => Ok(("press_key", "remote.press_key".to_owned())),
+        other => Err(WorkflowCompileError::UnsupportedAction {
+            target: other.to_owned(),
+            action: "Key".to_owned(),
+        }),
+    }
 }
 
 fn compile_outputs(
@@ -1847,6 +1869,40 @@ mod tests {
             compiled.steps[1].value.as_deref(),
             Some("File > Export as PDF...")
         );
+    }
+
+    #[test]
+    fn native_macos_key_actions_compile_to_shortcuts() {
+        let workflow = DesktopWorkflow {
+            id: "recorded-word".to_owned(),
+            summary: "Recorded Word workflow".to_owned(),
+            target: WorkflowTarget::native_app(
+                NativePlatform::MacOs,
+                Some("Microsoft Word".to_owned()),
+                "Microsoft Word".to_owned(),
+            ),
+            inputs: Vec::new(),
+            actions: vec![WorkflowAction {
+                name: "new document".to_owned(),
+                kind: WorkflowActionKind::Key,
+                target: LocatorTarget::default(),
+                value_template: Some("Cmd+N".to_owned()),
+                risk: WorkflowRisk::Low,
+            }],
+            outputs: Vec::new(),
+            assertions: Vec::new(),
+            evidence_policy: WorkflowEvidencePolicy::default(),
+        };
+
+        let compiled = compile_workflow(&workflow).expect("workflow should compile");
+        let shortcut = compiled
+            .steps
+            .iter()
+            .find(|step| step.action == "press_shortcut")
+            .expect("shortcut step");
+
+        assert_eq!(shortcut.required_capability, "macos.press_shortcut");
+        assert_eq!(shortcut.value.as_deref(), Some("Cmd+N"));
     }
 
     #[test]

@@ -1561,7 +1561,14 @@ pub fn normalise_recorded_events_to_primitives(
                 target: target_query_from_event(event, index),
                 value_template: event.value.clone().unwrap_or_default(),
             }),
-            "click" | "click_region" | "press_key" | "send_keys" | "press_shortcut" => {
+            "click" | "click_region" => primitives.push(DesktopPrimitive::InvokeCommand {
+                command: CommandReference {
+                    name: event.action.clone(),
+                    shortcut: None,
+                    menu_path: Vec::new(),
+                },
+            }),
+            "key" | "press_key" | "send_keys" | "press_shortcut" => {
                 primitives.push(DesktopPrimitive::InvokeCommand {
                     command: CommandReference {
                         name: event.action.clone(),
@@ -2737,6 +2744,35 @@ mod tests {
                 package.steps
             );
         }
+    }
+
+    #[test]
+    fn normalise_desktop_key_events_into_macos_shortcuts() {
+        let root = temp_dir("greentic-normalise-desktop-key");
+        let raw = root.join("raw");
+        fs::create_dir_all(&raw).expect("raw dir");
+        fs::write(
+            raw.join("events.jsonl"),
+            concat!(
+                r#"{"schema_version":"recording.event.v1","target_kind":"desktop","event":{"kind":"key","target":{},"value":"Cmd+N","redaction":"none"},"evidence":{}}"#,
+                "\n",
+                r#"{"schema_version":"recording.event.v1","target_kind":"desktop","event":{"kind":"type_text","target":{},"value":"{{inputs.text}}","redaction":"input_candidate"},"evidence":{}}"#,
+                "\n"
+            ),
+        )
+        .expect("events");
+
+        let package = normalise_recording(&raw, &root.join("runner.yaml")).expect("normalise");
+
+        assert!(package.steps.iter().any(|step| {
+            step.action == "press_shortcut"
+                && step.required_capability == "macos.press_shortcut"
+                && step.value.as_deref() == Some("Cmd+N")
+        }));
+        assert!(package
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "macos.type_text"));
     }
 
     #[test]
