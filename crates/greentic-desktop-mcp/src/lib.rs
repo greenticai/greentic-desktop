@@ -17,6 +17,7 @@ pub struct McpTool {
     pub output_schema_ref: String,
     pub input_schema_json: String,
     pub output_schema_json: String,
+    pub availability_diagnostics: Vec<String>,
     pub risk: RiskLevel,
 }
 
@@ -59,6 +60,10 @@ impl PublishedRunnerTool {
             output_schema_ref: "outputs.schema.json".to_owned(),
             input_schema_json: input_schema.to_json_schema(),
             output_schema_json: output_schema.to_json_schema(),
+            availability_diagnostics: adapter_availability_diagnostics(
+                &self.package,
+                &self.adapters,
+            ),
             risk: self.risk,
         }
     }
@@ -194,11 +199,12 @@ impl McpServerState {
             .iter()
             .map(|tool| {
                 format!(
-                    "{{\"name\":\"{}\",\"description\":\"{}\",\"input_schema\":\"{}\",\"output_schema\":\"{}\"}}",
+                    "{{\"name\":\"{}\",\"description\":\"{}\",\"input_schema\":\"{}\",\"output_schema\":\"{}\",\"availability_diagnostics\":{}}}",
                     escape_json(&tool.name),
                     escape_json(&tool.description),
                     escape_json(&tool.input_schema_json),
-                    escape_json(&tool.output_schema_json)
+                    escape_json(&tool.output_schema_json),
+                    string_array_json(&tool.availability_diagnostics)
                 )
             })
             .collect::<Vec<_>>()
@@ -433,6 +439,35 @@ fn inputs_cover_schema(
         && package.secrets.iter().all(|key| secrets.contains_key(key))
 }
 
+fn adapter_availability_diagnostics(
+    package: &RunnerPackage,
+    adapters: &[AdapterCapabilities],
+) -> Vec<String> {
+    let mut missing = package
+        .steps
+        .iter()
+        .map(|step| step.required_capability.clone())
+        .filter(|capability| !adapters.iter().any(|adapter| adapter.supports(capability)))
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
+        .into_iter()
+        .map(|capability| {
+            format!("No healthy adapter currently exposes required capability {capability}.")
+        })
+        .collect()
+}
+
+fn string_array_json(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape_json(value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
 fn failure(code: &str, message: &str, evidence_uri: Option<String>) -> McpCallResult {
     McpCallResult {
         success: false,
@@ -467,10 +502,26 @@ mod tests {
         assert_eq!(tools[0].input_schema_ref, "inputs.schema.json");
         assert!(tools[0].input_schema_json.contains("form_value"));
         assert!(tools[0].output_schema_json.contains("confirmation"));
+        assert!(tools[0].availability_diagnostics.is_empty());
     }
 
     #[test]
-    fn tools_call_executes_runner_and_returns_outputs_with_evidence() {
+    fn tools_list_reports_missing_adapter_diagnostics() {
+        let mut tool = example_runner_tool();
+        tool.adapters.clear();
+        let state = McpServerState::new(vec![tool], ["web.submit_form".to_owned()]);
+
+        let tools = state.list_tools();
+
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0]
+            .availability_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("web.fill")));
+    }
+
+    #[test]
+    fn tools_call_fails_closed_without_real_replay_registry() {
         let mut state = state();
         let result = state.call_tool(McpCallRequest {
             tool_name: "web.submit_form".to_owned(),
@@ -481,11 +532,11 @@ mod tests {
             approvals: 0,
         });
 
-        assert!(result.success);
-        assert_eq!(
-            result.outputs_json,
-            "{\"confirmation\":\"user@example.test\"}"
-        );
+        assert!(!result.success);
+        let failure = result.failure.expect("failure");
+        assert_eq!(failure.code, "runner_failed");
+        assert!(failure.message.contains("real adapter registry"));
+        assert_eq!(result.outputs_json, "{}");
         assert_eq!(
             result.evidence_uri,
             "evidence://run_web.submit_form/bundle.json"

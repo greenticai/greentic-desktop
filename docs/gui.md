@@ -32,6 +32,8 @@ The draft view shows typed inputs, required secrets, output extractors, required
 
 Open **Create**, choose recording, select a target such as Browser task or Desktop app task, and start recording. During review, mark inputs, outputs, secrets, assertions, and notes. Normalise the recording, test it with sample values, then finalise it into the runtime runner folder.
 
+Settings includes an adapter readiness panel that reports installed adapters, sidecar/runtime readiness, executable capabilities, recordable targets, and the exact missing permission or dependency. For the target support matrix, see [Production Readiness Matrix](production-readiness.md).
+
 Recording screens show whether a capture backend is active, blocked, paused, or stopped. For target-specific setup and troubleshooting, see [Recording Runbooks](recording-runbooks.md).
 
 Recording only captures the target context owned or attached by the selected backend. Web recording captures the Greentic-owned browser context, not arbitrary existing tabs. Native desktop recording requires OS accessibility/event sources and screen permissions. If a backend is blocked, the UI should show the concrete missing permission or adapter source instead of a recording placeholder.

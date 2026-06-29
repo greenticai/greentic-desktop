@@ -1,5 +1,6 @@
 import type {
   ActivityDto,
+  AdapterHealthResponseDto,
   ApiResponse,
   ApprovalsDto,
   ApprovalDto,
@@ -101,6 +102,10 @@ async function getWithDevFallback<T>(path: string, fallback: () => T): Promise<T
 
 export const api = {
   health: () => request<{ apiVersion: string; status: string }>("/health"),
+  adapterHealth: () =>
+    getWithDevFallback<AdapterHealthResponseDto>("/adapters/health", () => ({
+      adapters: [],
+    })),
   runtimeInfo: () =>
     getWithDevFallback<RuntimeInfoDto>("/runtime/info", () => ({
       appVersion: "dev",

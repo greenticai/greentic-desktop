@@ -1,7 +1,6 @@
 use greentic_desktop_adapter::{
-    validate_required_capabilities, AdapterCapabilities, AdapterError, AdapterResult, Assertion,
-    AssertionResult, DesktopAdapter, LocatorTarget, Observation, ObserveContext, RecordedEvent,
-    RunnerStep, StepResult,
+    validate_required_capabilities, AdapterCapabilities, AdapterError, Assertion, DesktopAdapter,
+    LocatorTarget, Observation, ObserveContext, RunnerStep, StepResult,
 };
 use greentic_desktop_evidence::{
     EvidenceArtifact, EvidenceArtifactKind, EvidenceBundle, EvidenceRef, EvidenceStatus,
@@ -10,7 +9,8 @@ use greentic_desktop_evidence::{
 use greentic_desktop_recorder::RunnerPackage;
 use greentic_desktop_session::{plan_bootstrap, BootstrapPlan, SessionProfile};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRequest {
@@ -68,14 +68,6 @@ impl AdapterRegistry {
         self.adapters.insert(id, adapter);
     }
 
-    pub fn from_capabilities(capabilities: &[AdapterCapabilities]) -> Self {
-        let mut registry = Self::new();
-        for capability in capabilities {
-            registry.insert(Arc::new(CapabilityOnlyAdapter::new(capability.clone())));
-        }
-        registry
-    }
-
     pub fn capabilities(&self) -> Vec<AdapterCapabilities> {
         self.adapters
             .values()
@@ -90,9 +82,9 @@ pub struct ReplayExecutionContext {
 }
 
 impl ReplayExecutionContext {
-    pub fn from_capabilities(capabilities: &[AdapterCapabilities]) -> Self {
+    pub fn new(registry: AdapterRegistry) -> Self {
         Self {
-            registry: AdapterRegistry::from_capabilities(capabilities),
+            registry,
             on_failure: OnFailure::Stop,
         }
     }
@@ -140,8 +132,36 @@ pub fn validate_package(
 }
 
 pub fn replay(request: ReplayRequest) -> ReplayOutcome {
-    let context = ReplayExecutionContext::from_capabilities(&request.adapters);
-    replay_with_context(request, &context)
+    fail_without_real_registry(request)
+}
+
+fn fail_without_real_registry(request: ReplayRequest) -> ReplayOutcome {
+    let bootstrap = BootstrapPlan {
+        profile_id: request.session_profile.id.clone(),
+        started_process_refs: Vec::new(),
+        opened_targets: Vec::new(),
+    };
+    let evidence = evidence_bundle(
+        &format!("run_{}", request.package.id),
+        &request.package,
+        EvidenceStatus::Failed,
+        &request.inputs,
+        &request.secrets,
+        BTreeMap::new(),
+        Vec::new(),
+    );
+    let evidence_ref = evidence.reference();
+    ReplayOutcome {
+        passed: false,
+        bootstrap,
+        traces: Vec::new(),
+        outputs: BTreeMap::new(),
+        evidence,
+        evidence_ref,
+        failure_reason: Some(
+            "real adapter registry is required; capability-only replay is disabled".to_owned(),
+        ),
+    }
 }
 
 pub fn replay_with_context(
@@ -314,7 +334,36 @@ pub fn replay_with_context(
         };
     }
 
-    let outputs = extract_outputs(&request.package, &observations, &step_results);
+    let outputs = match extract_outputs(&request.package, &observations, &step_results) {
+        Ok(outputs) => outputs,
+        Err(reason) => {
+            tool_trace.push(ToolTraceEntry {
+                step_id: "output-extraction".to_owned(),
+                capability: "outputs.extract".to_owned(),
+                status: EvidenceStatus::Failed,
+                message: Some(reason.clone()),
+            });
+            let evidence = evidence_bundle(
+                &format!("run_{}", request.package.id),
+                &request.package,
+                EvidenceStatus::Failed,
+                &request.inputs,
+                &request.secrets,
+                BTreeMap::new(),
+                tool_trace,
+            );
+            let evidence_ref = evidence.reference();
+            return ReplayOutcome {
+                passed: false,
+                bootstrap,
+                traces,
+                outputs: BTreeMap::new(),
+                evidence,
+                evidence_ref,
+                failure_reason: Some(reason),
+            };
+        }
+    };
 
     let evidence = evidence_bundle(
         &format!("run_{}", request.package.id),
@@ -347,82 +396,6 @@ impl ReplayOutcome {
             .collect::<Vec<_>>()
             .join(",");
         format!("{{{body}}}")
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CapabilityOnlyAdapter {
-    capabilities: AdapterCapabilities,
-    visible_text: Arc<Mutex<Vec<String>>>,
-}
-
-impl CapabilityOnlyAdapter {
-    fn new(capabilities: AdapterCapabilities) -> Self {
-        Self {
-            capabilities,
-            visible_text: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-impl DesktopAdapter for CapabilityOnlyAdapter {
-    fn capabilities(&self) -> AdapterCapabilities {
-        self.capabilities.clone()
-    }
-
-    fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        Ok(Observation {
-            adapter_id: self.capabilities.adapter_id.clone(),
-            summary: format!("capability replay observation for {}", ctx.session_id),
-            visible_text: self
-                .visible_text
-                .lock()
-                .expect("capability adapter mutex poisoned")
-                .clone(),
-        })
-    }
-
-    fn execute(&self, step: RunnerStep) -> AdapterResult<StepResult> {
-        if !self.capabilities.supports(&step.required_capability) {
-            return Err(AdapterError::UnsupportedCapability(
-                step.required_capability,
-            ));
-        }
-        if let Some(value) = &step.value {
-            self.visible_text
-                .lock()
-                .expect("capability adapter mutex poisoned")
-                .push(value.clone());
-        }
-        Ok(StepResult {
-            step_id: step.id,
-            success: true,
-            message: "step executed".to_owned(),
-        })
-    }
-
-    fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult> {
-        let visible = self
-            .visible_text
-            .lock()
-            .expect("capability adapter mutex poisoned");
-        let passed = visible
-            .iter()
-            .any(|line| line.contains(&assertion.expected))
-            || !assertion.expected.to_ascii_lowercase().contains("fail");
-        Ok(AssertionResult {
-            assertion_id: assertion.id,
-            passed,
-            message: if passed {
-                "assertion passed".to_owned()
-            } else {
-                "assertion failed".to_owned()
-            },
-        })
-    }
-
-    fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
-        Ok(None)
     }
 }
 
@@ -483,15 +456,21 @@ fn extract_outputs(
     package: &RunnerPackage,
     observations: &[Observation],
     step_results: &[StepResult],
-) -> BTreeMap<String, String> {
-    package
-        .outputs
-        .iter()
-        .filter_map(|output| {
-            extract_output_value(output, observations, step_results)
-                .map(|value| (output.clone(), value))
-        })
-        .collect()
+) -> Result<BTreeMap<String, String>, String> {
+    let mut outputs = BTreeMap::new();
+    for output in &package.outputs {
+        let value = extract_output_value(output, observations, step_results)
+            .ok_or_else(|| format!("required output {output} was not extracted"))?;
+        if let Some(path) = local_path_output(&value) {
+            if !Path::new(path).exists() {
+                return Err(format!(
+                    "output evidence missing: {output} points to {path} but that path does not exist"
+                ));
+            }
+        }
+        outputs.insert(output.clone(), value);
+    }
+    Ok(outputs)
 }
 
 fn extract_output_value(
@@ -528,6 +507,32 @@ fn extract_output_value(
         .flat_map(|observation| observation.visible_text.iter().rev())
         .find(|line| !line.trim().is_empty())
         .cloned()
+}
+
+fn local_path_output(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if let Some(path) = value.strip_prefix("file://") {
+        return Some(path);
+    }
+    if value.starts_with("evidence://")
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+    {
+        return None;
+    }
+    if value.starts_with('/') || looks_like_windows_absolute_path(value) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn looks_like_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() > 2
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+        && bytes[0].is_ascii_alphabetic()
 }
 
 fn retry_policy(step: &RunnerStep) -> RetryPolicy {
@@ -587,9 +592,12 @@ fn evidence_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use greentic_desktop_adapter::{AdapterResult, AssertionResult, RecordedEvent};
     use greentic_desktop_recorder::RecordingMode;
     use greentic_desktop_session::{BootstrapAction, BrowserKind};
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Debug)]
     struct TestAdapter {
@@ -695,27 +703,37 @@ mod tests {
     }
 
     #[test]
-    fn validates_missing_capabilities_deterministically() {
-        let mut request = request();
-        request.adapters.clear();
-        let outcome = replay(request);
+    fn legacy_replay_without_adapter_registry_fails_closed() {
+        let outcome = replay(request());
 
         assert!(!outcome.passed);
         assert!(outcome
             .failure_reason
             .expect("failure reason")
-            .contains("missing capabilities"));
+            .contains("real adapter registry is required"));
     }
 
     #[test]
     fn replays_runner_with_inputs_and_returns_outputs_json() {
-        let outcome = replay(request());
+        let adapter = Arc::new(TestAdapter::new(
+            &["web.fill"],
+            vec!["customer id: C-100"],
+            true,
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(adapter);
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+        };
+
+        let outcome = replay_with_context(request(), &context);
 
         assert!(outcome.passed);
         assert_eq!(outcome.traces.len(), 1);
         assert_eq!(
             outcome.outputs_json(),
-            "{\"outputs.customer_id\":\"user@example.test\"}"
+            "{\"outputs.customer_id\":\"C-100\"}"
         );
         assert_eq!(
             outcome.evidence_ref.uri,
@@ -780,5 +798,72 @@ mod tests {
 
         assert!(!outcome.passed);
         assert_eq!(outcome.failure_reason, Some("assertion failed".to_owned()));
+    }
+
+    #[test]
+    fn replay_fails_when_path_output_does_not_exist() {
+        let missing =
+            std::env::temp_dir().join(format!("greentic-missing-output-{}", unique_suffix()));
+        let adapter = Arc::new(TestAdapter::new(
+            &["web.fill"],
+            vec![missing.to_string_lossy().as_ref()],
+            true,
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(adapter);
+        let context = ReplayExecutionContext::new(registry);
+        let mut request = request();
+        request.package.outputs = vec!["outputs.saved_status".to_owned()];
+        request.package.assertions.clear();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(!outcome.passed);
+        assert!(outcome
+            .failure_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("output evidence missing"));
+    }
+
+    #[test]
+    fn replay_accepts_existing_file_output_and_records_proof() {
+        let root =
+            std::env::temp_dir().join(format!("greentic-existing-output-{}", unique_suffix()));
+        fs::create_dir_all(&root).expect("temp dir");
+        let file = root.join("result.txt");
+        fs::write(&file, "saved").expect("output file");
+        let adapter = Arc::new(TestAdapter::new(
+            &["web.fill"],
+            vec![file.to_string_lossy().as_ref()],
+            true,
+        ));
+        let mut registry = AdapterRegistry::new();
+        registry.insert(adapter);
+        let context = ReplayExecutionContext::new(registry);
+        let mut request = request();
+        request.package.outputs = vec!["outputs.saved_status".to_owned()];
+        request.package.assertions.clear();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(outcome.passed, "{:?}", outcome.failure_reason);
+        assert_eq!(
+            outcome.outputs.get("outputs.saved_status"),
+            Some(&file.to_string_lossy().to_string())
+        );
+        assert!(outcome
+            .evidence
+            .to_json()
+            .contains(&file.to_string_lossy().to_string()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unique_suffix() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        format!("{}-{nanos}", std::process::id())
     }
 }

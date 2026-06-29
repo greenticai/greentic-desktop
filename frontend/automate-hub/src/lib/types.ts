@@ -45,6 +45,20 @@ export interface SetupFixResultDto {
   message: string;
 }
 
+export interface AdapterHealthDto {
+  id: string;
+  readiness: string;
+  healthy: boolean;
+  message: string;
+  executableCapabilities: string[];
+  recordableTargets: string[];
+  logPath?: string | null;
+}
+
+export interface AdapterHealthResponseDto {
+  adapters: AdapterHealthDto[];
+}
+
 export interface ActivityEventDto {
   id: string;
   kind: string;
@@ -101,6 +115,8 @@ export interface RunnerSummaryDto {
   outputFields?: RunnerOutputFieldDto[];
   published?: boolean;
   evidenceRefs?: string[];
+  available?: boolean;
+  availabilityMessage?: string | null;
 }
 
 export interface RunnersDto {

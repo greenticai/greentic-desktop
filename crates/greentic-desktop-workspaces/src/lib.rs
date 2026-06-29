@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn external_mcp_client_can_call_runner_and_receive_evidence() {
+    fn external_mcp_client_gets_structured_failure_and_evidence_without_real_replay_registry() {
         let mut state = expose_workspace_tools(vec![workspace_validation_tool()]);
         let result = call_forwarded_runner(
             &mut state,
@@ -235,7 +235,11 @@ mod tests {
             BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
         );
 
-        assert!(result.success);
+        assert!(!result.success);
+        assert!(result
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.message.contains("real adapter registry")));
         assert!(result
             .evidence_uri
             .contains("run_workspace.validate_after_patch"));

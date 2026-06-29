@@ -170,6 +170,7 @@ pub enum WorkflowOutputExtractor {
     VisibleText(String),
     Regex(String),
     TerminalField(TerminalField),
+    FileExists(String),
     JsonPath(String),
 }
 
@@ -708,6 +709,7 @@ fn compile_terminal(
                 Some(text.clone()),
                 "terminal.wait_for_screen",
             ),
+            WorkflowOutputExtractor::FileExists(_) => {}
             _ => {
                 return Err(WorkflowCompileError::MissingOutputExtractor(
                     output.name.clone(),
@@ -866,6 +868,7 @@ fn compile_outputs(
 fn output_target(output: &WorkflowOutput) -> WorkflowCompileOutcome<LocatorTarget> {
     match &output.extractor {
         WorkflowOutputExtractor::TargetText(target) => Ok(target.as_ref().clone()),
+        WorkflowOutputExtractor::FileExists(_) => Ok(LocatorTarget::default()),
         _ => Err(WorkflowCompileError::MissingOutputExtractor(
             output.name.clone(),
         )),

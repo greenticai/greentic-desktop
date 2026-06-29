@@ -5,8 +5,8 @@ use greentic_desktop_adapter::{
 };
 use greentic_desktop_platform::{DesktopPlatform, PlatformInfo, PlatformPermission};
 use greentic_desktop_recorder::{
-    RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
-    RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
+    RecordingBackend, RecordingCaptureState, RecordingEventSink, RecordingHandle,
+    RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
 };
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
@@ -14,6 +14,8 @@ use greentic_desktop_workflow::{
     WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 pub const MACOS_ADAPTER_ID: &str = "greentic.desktop.macos.ax";
@@ -94,13 +96,13 @@ impl RecordingBackend for MacOsAccessibilityRecordingBackend {
 
     fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
         let diagnostics = first_run_permission_check(&self.platform);
-        if diagnostics.ready_for_ax() && macos_ax_event_source_configured() {
+        if diagnostics.ready_for_ax() && macos_ax_event_source_available() {
             RecordingPreflight::ready()
         } else {
             let mut messages = diagnostics.messages;
-            if !macos_ax_event_source_configured() {
+            if !macos_ax_event_source_available() {
                 messages.push(
-                    "Install or start the macOS Accessibility event source before desktop recording."
+                    "Swift or GREENTIC_MACOS_AX_EVENT_SOURCE_COMMAND is required for the macOS Accessibility event source."
                         .to_owned(),
                 );
             }
@@ -111,32 +113,170 @@ impl RecordingBackend for MacOsAccessibilityRecordingBackend {
         }
     }
 
-    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
-        let mut focused_app = RecordingEventEnvelope::new(
-            sink.session_id(),
-            MACOS_RECORDER_BACKEND_ID,
-            RecordingTargetKind::Desktop,
-            1,
-            "activate_window",
-        );
-        focused_app.target_json =
-            r#"{"platform":"macos","api":"Accessibility","window":"focused"}"#.to_owned();
-        focused_app.value = Some("focused macOS application".to_owned());
-        focused_app.ui_tree_ref = Some("evidence://ui-tree/macos/focused.json".to_owned());
-        let _ = sink.append_event(focused_app);
-        let _ = sink.update_heartbeat();
+    fn start(&self, request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        if let Ok(command) = std::env::var("GREENTIC_MACOS_AX_EVENT_SOURCE_COMMAND") {
+            // Local operator supplied recorder path is invoked directly without a shell.
+            // foxguard: ignore[rs/no-command-injection]
+            let spawn = Command::new(command)
+                .arg(sink.session_id())
+                .arg(&request.out)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            if spawn.is_ok() {
+                let _ = sink.update_heartbeat();
+                return RecordingHandle {
+                    backend_id: MACOS_RECORDER_BACKEND_ID.to_owned(),
+                    capture_state: RecordingCaptureState::Recording,
+                };
+            }
+        }
 
-        RecordingHandle {
-            backend_id: MACOS_RECORDER_BACKEND_ID.to_owned(),
-            capture_state: RecordingCaptureState::Recording,
+        match start_builtin_macos_event_recorder(&request, &sink) {
+            Ok(()) => {
+                let _ = sink.update_heartbeat();
+                RecordingHandle {
+                    backend_id: MACOS_RECORDER_BACKEND_ID.to_owned(),
+                    capture_state: RecordingCaptureState::Recording,
+                }
+            }
+            Err(err) => {
+                let _ = sink.append_backend_warning(&err);
+                RecordingHandle {
+                    backend_id: MACOS_RECORDER_BACKEND_ID.to_owned(),
+                    capture_state: RecordingCaptureState::Blocked,
+                }
+            }
         }
     }
 }
 
-fn macos_ax_event_source_configured() -> bool {
-    std::env::var("GREENTIC_MACOS_AX_EVENT_SOURCE")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+fn macos_ax_event_source_available() -> bool {
+    std::env::var("GREENTIC_MACOS_AX_EVENT_SOURCE_COMMAND")
+        .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
+        || find_swift_command().is_some()
+}
+
+fn find_swift_command() -> Option<&'static str> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join("swift");
+        candidate.is_file().then_some("swift")
+    })
+}
+
+fn start_builtin_macos_event_recorder(
+    request: &RecordingStartRequest,
+    sink: &RecordingEventSink,
+) -> Result<(), String> {
+    find_swift_command().ok_or_else(|| {
+        "Swift is not available to run the built-in macOS Accessibility event source.".to_owned()
+    })?;
+    std::fs::create_dir_all(request.out.join("logs")).map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(request.out.join("raw")).map_err(|err| err.to_string())?;
+    let script = request.out.join("macos-event-recorder.swift");
+    std::fs::write(&script, macos_event_recorder_swift()).map_err(|err| err.to_string())?;
+    let log_path = request.out.join("logs").join("macos-event-recorder.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|err| err.to_string())?;
+    let err = log.try_clone().map_err(|err| err.to_string())?;
+    Command::new("swift")
+        .arg(&script)
+        .arg(&request.out)
+        .arg(sink.session_id())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err))
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("failed to start macOS event recorder: {err}"))
+}
+
+fn macos_event_recorder_swift() -> &'static str {
+    r#"
+import ApplicationServices
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 3 else {
+  fputs("usage: macos-event-recorder.swift <session-root> <session-id>\n", stderr)
+  exit(2)
+}
+
+let root = URL(fileURLWithPath: args[1])
+let sessionId = args[2]
+let raw = root.appendingPathComponent("raw/events.jsonl")
+try? FileManager.default.createDirectory(at: raw.deletingLastPathComponent(), withIntermediateDirectories: true)
+FileManager.default.createFile(atPath: raw.path, contents: nil)
+let handle = try FileHandle(forWritingTo: raw)
+handle.seekToEndOfFile()
+var sequence: UInt64 = 1
+
+func jsonEscape(_ value: String) -> String {
+  var out = ""
+  for scalar in value.unicodeScalars {
+    switch scalar {
+    case "\"": out += "\\\""
+    case "\\": out += "\\\\"
+    case "\n": out += "\\n"
+    case "\r": out += "\\r"
+    case "\t": out += "\\t"
+    default: out.unicodeScalars.append(scalar)
+    }
+  }
+  return out
+}
+
+func append(kind: String, value: String, x: Int64? = nil, y: Int64? = nil) {
+  let target = x == nil || y == nil
+    ? "{\"platform\":\"macos\",\"api\":\"CGEventTap\"}"
+    : "{\"platform\":\"macos\",\"api\":\"CGEventTap\",\"x\":\(x!),\"y\":\(y!)}"
+  let line = "{\"schema_version\":\"recording.event.v1\",\"session_id\":\"\(jsonEscape(sessionId))\",\"backend\":\"greentic.recording.desktop.macos.ax\",\"target_kind\":\"desktop\",\"timestamp\":\"\(Int(Date().timeIntervalSince1970))\",\"sequence\":\(sequence),\"event\":{\"kind\":\"\(jsonEscape(kind))\",\"target\":\(target),\"value\":\"\(jsonEscape(value))\",\"redaction\":\"none\"},\"evidence\":{\"screenshot_ref\":null,\"dom_snapshot_ref\":null,\"ui_tree_ref\":null,\"terminal_buffer_ref\":null}}\n"
+  sequence += 1
+  if let data = line.data(using: .utf8) {
+    handle.write(data)
+  }
+}
+
+let mask =
+  (1 << CGEventType.leftMouseDown.rawValue) |
+  (1 << CGEventType.rightMouseDown.rawValue) |
+  (1 << CGEventType.keyDown.rawValue)
+
+let callback: CGEventTapCallBack = { _, type, event, _ in
+  if type == .leftMouseDown || type == .rightMouseDown {
+    let point = event.location
+    append(kind: "click", value: type == .leftMouseDown ? "left" : "right", x: Int64(point.x), y: Int64(point.y))
+  } else if type == .keyDown {
+    let code = event.getIntegerValueField(.keyboardEventKeycode)
+    append(kind: "key", value: String(code))
+  }
+  return Unmanaged.passUnretained(event)
+}
+
+guard let tap = CGEvent.tapCreate(
+  tap: .cgSessionEventTap,
+  place: .headInsertEventTap,
+  options: .listenOnly,
+  eventsOfInterest: CGEventMask(mask),
+  callback: callback,
+  userInfo: nil
+) else {
+  fputs("failed to create CGEvent tap; grant Accessibility/Input Monitoring to this launcher\n", stderr)
+  exit(1)
+}
+
+let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+CGEvent.tapEnable(tap: tap, enable: true)
+append(kind: "backend_started", value: "macos CGEvent tap started")
+CFRunLoopRun()
+"#
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,13 +298,16 @@ impl MacOsPermissionDiagnostics {
 }
 
 pub fn first_run_permission_check(info: &PlatformInfo) -> MacOsPermissionDiagnostics {
-    let accessibility_granted = info.has_permission(PlatformPermission::Accessibility);
-    let screen_recording_granted = info.has_permission(PlatformPermission::ScreenRecording)
-        || info.has_permission(PlatformPermission::Screenshot);
-    let input_monitoring_granted = info.has_permission(PlatformPermission::KeyboardInput)
+    let is_macos = info.os == DesktopPlatform::MacOS;
+    let accessibility_granted = is_macos && info.has_permission(PlatformPermission::Accessibility);
+    let screen_recording_granted = is_macos
+        && (info.has_permission(PlatformPermission::ScreenRecording)
+            || info.has_permission(PlatformPermission::Screenshot));
+    let input_monitoring_granted = is_macos
+        && info.has_permission(PlatformPermission::KeyboardInput)
         && info.has_permission(PlatformPermission::MouseInput);
     let mut messages = Vec::new();
-    if info.os != DesktopPlatform::MacOS {
+    if !is_macos {
         messages.push("macOS AX adapter can only run on macOS".to_owned());
     }
     if !accessibility_granted {
@@ -203,9 +346,6 @@ pub struct MacOsAccessibilityAdapter {
 #[derive(Debug, Clone, Default)]
 struct MacOsState {
     active_app: Option<String>,
-    windows: BTreeMap<String, Vec<String>>,
-    elements: BTreeMap<String, String>,
-    screenshots: Vec<String>,
     recorded: Vec<RecordedEvent>,
 }
 
@@ -215,24 +355,6 @@ impl MacOsAccessibilityAdapter {
             platform,
             state: Arc::new(Mutex::new(MacOsState::default())),
         }
-    }
-
-    pub fn seed_element(&self, target: LocatorTarget, value: impl Into<String>) {
-        self.state
-            .lock()
-            .expect("macos adapter mutex poisoned")
-            .elements
-            .insert(target_key(&target), value.into());
-    }
-
-    pub fn seed_window(&self, app: impl Into<String>, title: impl Into<String>) {
-        self.state
-            .lock()
-            .expect("macos adapter mutex poisoned")
-            .windows
-            .entry(app.into())
-            .or_default()
-            .push(title.into());
     }
 
     pub fn replay(&self, steps: &[RunnerStep]) -> AdapterResult<Vec<StepResult>> {
@@ -264,6 +386,127 @@ impl MacOsAccessibilityAdapter {
             ))
         }
     }
+
+    fn active_app_or_frontmost(&self) -> AdapterResult<String> {
+        if let Some(app) = self
+            .state
+            .lock()
+            .expect("macos adapter mutex poisoned")
+            .active_app
+            .clone()
+        {
+            return Ok(app);
+        }
+        run_osascript(frontmost_app_script())
+            .map(|output| output.trim().to_owned())
+            .and_then(|app| {
+                if app.is_empty() {
+                    Err(AdapterError::ExecutionFailed(
+                        "No frontmost macOS application was reported by System Events.".to_owned(),
+                    ))
+                } else {
+                    Ok(app)
+                }
+            })
+    }
+
+    fn execute_real_step(&self, step: &RunnerStep) -> AdapterResult<String> {
+        match step.required_capability.as_str() {
+            "macos.find_app" | "macos.activate_app" => {
+                let app = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macos.activate_app requires an application name in step.value.".to_owned(),
+                    )
+                })?;
+                activate_macos_app(app)?;
+                self.state
+                    .lock()
+                    .expect("macos adapter mutex poisoned")
+                    .active_app = Some(app.trim_end_matches(".app").to_owned());
+                Ok(format!("activated macOS app {app}"))
+            }
+            "macos.find_window" => {
+                let app = self.active_app_or_frontmost()?;
+                let expected = step.value.as_deref().unwrap_or_default();
+                if macos_window_exists(&app, expected)? {
+                    Ok(format!("found macOS window containing {expected}"))
+                } else {
+                    Err(AdapterError::ExecutionFailed(format!(
+                        "No window containing {expected} was visible for {app}."
+                    )))
+                }
+            }
+            "macos.read_window_tree" => {
+                let app = self.active_app_or_frontmost()?;
+                let text = macos_read_process_text(&app)?;
+                Ok(format!(
+                    "read {} macOS accessibility text entries",
+                    text.len()
+                ))
+            }
+            "macos.find_element" | "macos.assert_visible" => {
+                let app = self.active_app_or_frontmost()?;
+                if macos_element_exists(&app, &step.target, step.value.as_deref())? {
+                    Ok("found macOS accessibility element".to_owned())
+                } else {
+                    Err(AdapterError::ExecutionFailed(
+                        "No matching macOS accessibility element was visible.".to_owned(),
+                    ))
+                }
+            }
+            "macos.type_text" => {
+                let app = self.active_app_or_frontmost()?;
+                let value = step.value.as_deref().unwrap_or_default();
+                macos_type_text(&app, &step.target, value)?;
+                Ok("typed text through macOS Accessibility/System Events".to_owned())
+            }
+            "macos.click_element" => {
+                let app = self.active_app_or_frontmost()?;
+                macos_click_element(&app, &step.target)?;
+                Ok("clicked macOS accessibility element".to_owned())
+            }
+            "macos.read_text" => {
+                let app = self.active_app_or_frontmost()?;
+                let text = macos_read_element_text(&app, &step.target)?;
+                Ok(text)
+            }
+            "macos.screenshot" => {
+                let path = step
+                    .value
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(default_screenshot_path);
+                take_macos_screenshot(&path)?;
+                Ok(path.display().to_string())
+            }
+            "macos.close_app" => {
+                let app = step
+                    .value
+                    .clone()
+                    .or_else(|| {
+                        self.state
+                            .lock()
+                            .expect("macos adapter mutex poisoned")
+                            .active_app
+                            .clone()
+                    })
+                    .ok_or_else(|| {
+                        AdapterError::ExecutionFailed(
+                            "macos.close_app requires an app name or active app.".to_owned(),
+                        )
+                    })?;
+                run_osascript(&format!("tell application {} to quit", apple_quote(&app)))?;
+                self.state
+                    .lock()
+                    .expect("macos adapter mutex poisoned")
+                    .active_app = None;
+                Ok(format!("closed macOS app {app}"))
+            }
+            _ => Err(AdapterError::UnsupportedCapability(
+                step.required_capability.clone(),
+            )),
+        }
+    }
 }
 
 impl DesktopAdapter for MacOsAccessibilityAdapter {
@@ -288,18 +531,12 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
         self.require_ax()?;
-        let state = self.state.lock().expect("macos adapter mutex poisoned");
+        let app = self.active_app_or_frontmost()?;
+        let visible_text = macos_read_process_text(&app)?;
         Ok(Observation {
             adapter_id: MACOS_ADAPTER_ID.to_owned(),
-            summary: format!(
-                "macos session {} active_app {}",
-                ctx.session_id,
-                state
-                    .active_app
-                    .clone()
-                    .unwrap_or_else(|| "none".to_owned())
-            ),
-            visible_text: state.elements.values().cloned().collect(),
+            summary: format!("macos session {} active_app {}", ctx.session_id, app),
+            visible_text,
         })
     }
 
@@ -315,52 +552,22 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
             self.require_ax()?;
         }
 
-        let mut state = self.state.lock().expect("macos adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "macos.find_app" | "macos.activate_app" => {
-                state.active_app = step.value.clone();
-            }
-            "macos.find_window" => {
-                if let Some(app) = state.active_app.clone() {
-                    state
-                        .windows
-                        .entry(app)
-                        .or_default()
-                        .push(step.value.clone().unwrap_or_else(|| "Window".to_owned()));
-                }
-            }
-            "macos.read_window_tree" | "macos.find_element" | "macos.assert_visible" => {
-                state.elements.entry(target_key(&step.target)).or_default();
-            }
-            "macos.type_text" => {
-                state.elements.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
-            }
-            "macos.click_element" => {}
-            "macos.read_text" => {}
-            "macos.screenshot" => {
-                state
-                    .screenshots
-                    .push("evidence://macos/screenshot.png".to_owned());
-            }
-            "macos.close_app" => {
-                state.active_app = None;
-            }
-            _ => {}
-        }
+        let message = self.execute_real_step(&step)?;
 
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
+        self.state
+            .lock()
+            .expect("macos adapter mutex poisoned")
+            .recorded
+            .push(RecordedEvent {
+                action: step.action.clone(),
+                target: step.target,
+                value: step.value,
+            });
 
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: "macOS AX step accepted".to_owned(),
+            message,
         })
     }
 
@@ -372,21 +579,15 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
         }
         self.require_ax()?;
 
-        let state = self.state.lock().expect("macos adapter mutex poisoned");
-        let key = target_key(&assertion.target);
         let passed = match assertion.required_capability.as_str() {
             "macos.assert_visible" => {
-                state.elements.contains_key(&key)
-                    || state
-                        .elements
-                        .values()
-                        .any(|value| value == &assertion.expected)
+                let app = self.active_app_or_frontmost()?;
+                macos_element_exists(&app, &assertion.target, Some(&assertion.expected))?
             }
-            "macos.find_window" => state
-                .windows
-                .values()
-                .flatten()
-                .any(|title| title.contains(&assertion.expected)),
+            "macos.find_window" => {
+                let app = self.active_app_or_frontmost()?;
+                macos_window_exists(&app, &assertion.expected)?
+            }
             _ => true,
         };
 
@@ -412,29 +613,262 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
     }
 }
 
-fn target_key(target: &LocatorTarget) -> String {
-    target
-        .preferred
-        .as_ref()
-        .and_then(|strategy| {
-            strategy
-                .automation_id
-                .clone()
-                .or_else(|| strategy.name.clone())
-                .or_else(|| strategy.role.clone())
-                .or_else(|| strategy.text.clone())
-        })
-        .or_else(|| {
-            target.fallback.as_ref().and_then(|strategy| {
-                strategy
-                    .name
-                    .clone()
-                    .or_else(|| strategy.role.clone())
-                    .or_else(|| strategy.text.clone())
-            })
-        })
-        .unwrap_or_else(|| "target".to_owned())
-        .to_lowercase()
+fn activate_macos_app(app: &str) -> AdapterResult<()> {
+    let app_name = app.trim_end_matches(".app");
+    run_command("open", ["-a", app_name])?;
+    run_osascript(&format!(
+        "tell application {} to activate",
+        apple_quote(app_name)
+    ))?;
+    Ok(())
+}
+
+fn macos_window_exists(app: &str, expected: &str) -> AdapterResult<bool> {
+    let script = format!(
+        r#"
+tell application "System Events"
+  if not (exists process {app}) then return "false"
+  tell process {app}
+    repeat with candidate in windows
+      set candidateName to ""
+      try
+        set candidateName to name of candidate as text
+      end try
+      if candidateName contains {expected} then return "true"
+    end repeat
+  end tell
+end tell
+return "false"
+"#,
+        app = apple_quote(app),
+        expected = apple_quote(expected)
+    );
+    Ok(run_osascript(&script)?.trim() == "true")
+}
+
+fn macos_element_exists(
+    app: &str,
+    target: &LocatorTarget,
+    expected_text: Option<&str>,
+) -> AdapterResult<bool> {
+    let predicate = macos_locator_predicate(target, expected_text)?;
+    let script = format!(
+        r#"
+tell application "System Events"
+  if not (exists process {app}) then return "false"
+  tell process {app}
+    try
+      if exists (first UI element of entire contents of front window whose {predicate}) then return "true"
+    end try
+  end tell
+end tell
+return "false"
+"#,
+        app = apple_quote(app),
+        predicate = predicate
+    );
+    Ok(run_osascript(&script)?.trim() == "true")
+}
+
+fn macos_read_process_text(app: &str) -> AdapterResult<Vec<String>> {
+    let script = format!(
+        r#"
+set output to ""
+tell application "System Events"
+  if not (exists process {app}) then return output
+  tell process {app}
+    try
+      repeat with candidate in entire contents of front window
+        try
+          set candidateText to ""
+          try
+            set candidateText to value of candidate as text
+          end try
+          if candidateText is "" then
+            try
+              set candidateText to name of candidate as text
+            end try
+          end if
+          if candidateText is not "" then set output to output & candidateText & linefeed
+        end try
+      end repeat
+    end try
+  end tell
+end tell
+return output
+"#,
+        app = apple_quote(app)
+    );
+    Ok(run_osascript(&script)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn macos_read_element_text(app: &str, target: &LocatorTarget) -> AdapterResult<String> {
+    let predicate = macos_locator_predicate(target, None)?;
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set candidate to first UI element of entire contents of front window whose {predicate}
+    try
+      return value of candidate as text
+    end try
+    try
+      return name of candidate as text
+    end try
+  end tell
+end tell
+return ""
+"#,
+        app = apple_quote(app),
+        predicate = predicate
+    );
+    Ok(run_osascript(&script)?.trim().to_owned())
+}
+
+fn macos_type_text(app: &str, target: &LocatorTarget, value: &str) -> AdapterResult<()> {
+    let predicate = macos_locator_predicate(target, None)?;
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    set candidate to first UI element of entire contents of front window whose {predicate}
+    try
+      set focused of candidate to true
+    end try
+    try
+      click candidate
+    end try
+    keystroke {value}
+  end tell
+end tell
+"#,
+        app = apple_quote(app),
+        predicate = predicate,
+        value = apple_quote(value)
+    );
+    run_osascript(&script).map(|_| ())
+}
+
+fn macos_click_element(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
+    let predicate = macos_locator_predicate(target, None)?;
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    click (first UI element of entire contents of front window whose {predicate})
+  end tell
+end tell
+"#,
+        app = apple_quote(app),
+        predicate = predicate
+    );
+    run_osascript(&script).map(|_| ())
+}
+
+fn take_macos_screenshot(path: &Path) -> AdapterResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AdapterError::ExecutionFailed(format!("failed to create screenshot directory: {err}"))
+        })?;
+    }
+    run_command("screencapture", ["-x", path.to_string_lossy().as_ref()])?;
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "screencapture did not create {}",
+            path.display()
+        )))
+    }
+}
+
+fn default_screenshot_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "greentic-macos-screenshot-{}-{}.png",
+        std::process::id(),
+        epoch_millis()
+    ))
+}
+
+fn run_command<const N: usize>(program: &str, args: [&str; N]) -> AdapterResult<String> {
+    // Program names are fixed by the adapter and arguments are passed directly without a shell.
+    // foxguard: ignore[rs/no-command-injection]
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run {program}: {err}")))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(AdapterError::ExecutionFailed(format!(
+            "{program} failed: {}",
+            stderr.trim()
+        )))
+    }
+}
+
+fn run_osascript(script: &str) -> AdapterResult<String> {
+    run_command("osascript", ["-e", script])
+}
+
+fn macos_locator_predicate(
+    target: &LocatorTarget,
+    expected_text: Option<&str>,
+) -> AdapterResult<String> {
+    let candidates = [target.preferred.as_ref(), target.fallback.as_ref()];
+    let mut predicates = Vec::new();
+    for strategy in candidates.into_iter().flatten() {
+        if let Some(id) = strategy.automation_id.as_deref() {
+            predicates.push(format!("its description is {}", apple_quote(id)));
+        }
+        if let Some(name) = strategy.name.as_deref() {
+            predicates.push(format!("its name contains {}", apple_quote(name)));
+        }
+        if let Some(role) = strategy.role.as_deref() {
+            predicates.push(format!("its role is {}", apple_quote(role)));
+        }
+        if let Some(text) = strategy.text.as_deref() {
+            predicates.push(format!("its value as text contains {}", apple_quote(text)));
+        }
+    }
+    if let Some(text) = expected_text {
+        if !text.trim().is_empty() {
+            predicates.push(format!(
+                "((its value as text contains {text}) or (its name contains {text}))",
+                text = apple_quote(text)
+            ));
+        }
+    }
+    if predicates.is_empty() {
+        return Err(AdapterError::ExecutionFailed(
+            "macOS Accessibility locator requires an automation id, name, role, text, or expected text.".to_owned(),
+        ));
+    }
+    Ok(predicates.join(" or "))
+}
+
+fn frontmost_app_script() -> &'static str {
+    r#"tell application "System Events" to get name of first application process whose frontmost is true"#
+}
+
+fn apple_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn epoch_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -486,11 +920,6 @@ pub fn run_macos_app_workflow(
     let steps = compiled.steps;
 
     let results = adapter.replay(&steps)?;
-    for output in &output_specs {
-        if let Some(expected) = &output.expected {
-            adapter.seed_element(output.target.clone(), expected.clone());
-        }
-    }
     let visible = adapter
         .observe(ObserveContext {
             session_id: format!("macos-app-workflow-{}", workflow_id_component(&app_name)),
@@ -673,44 +1102,23 @@ mod tests {
     }
 
     #[test]
-    fn can_open_activate_and_inspect_accessibility_tree() {
+    fn activation_uses_real_launchservices_and_fails_for_missing_app() {
         let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
-        let target = stable_macos_target(&metadata());
-        let steps = vec![
-            RunnerStep {
+        let error = adapter
+            .execute(RunnerStep {
                 id: "activate".to_owned(),
                 action: "activate_app".to_owned(),
                 target: LocatorTarget::default(),
-                value: Some("CRM.app".to_owned()),
+                value: Some("DefinitelyMissingGreenticFixture.app".to_owned()),
                 required_capability: "macos.activate_app".to_owned(),
-            },
-            RunnerStep {
-                id: "tree".to_owned(),
-                action: "read_window_tree".to_owned(),
-                target: target.clone(),
-                value: None,
-                required_capability: "macos.read_window_tree".to_owned(),
-            },
-        ];
-
-        assert!(adapter
-            .replay(&steps)
-            .expect("macOS replay should pass")
-            .iter()
-            .all(|result| result.success));
-        assert!(adapter
-            .observe(ObserveContext {
-                session_id: "s1".to_owned(),
-                target: Some(target),
             })
-            .expect("observe should use AX")
-            .summary
-            .contains("CRM.app"));
+            .expect_err("missing application should not be accepted");
+
+        assert!(error.to_string().contains("open failed"), "{error}");
     }
 
     #[test]
-    fn can_click_button_type_text_and_assert_visible() {
-        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
+    fn locator_predicate_uses_ax_metadata_without_running_fake_state() {
         let email = stable_macos_target(&metadata());
         let save = stable_macos_target(&MacOsElementMetadata {
             ax_identifier: Some("save".to_owned()),
@@ -721,38 +1129,24 @@ mod tests {
             visual_region: Some("bottom_right".to_owned()),
         });
 
-        adapter
-            .execute(RunnerStep {
-                id: "type".to_owned(),
-                action: "type_text".to_owned(),
-                target: email,
-                value: Some("buyer@example.test".to_owned()),
-                required_capability: "macos.type_text".to_owned(),
-            })
-            .expect("type should pass");
-        adapter
-            .execute(RunnerStep {
-                id: "save".to_owned(),
-                action: "click_element".to_owned(),
-                target: save,
-                value: None,
-                required_capability: "macos.click_element".to_owned(),
-            })
-            .expect("click should pass");
+        let email_predicate =
+            macos_locator_predicate(&email, Some("buyer@example.test")).expect("predicate");
+        let save_predicate = macos_locator_predicate(&save, None).expect("predicate");
 
-        let result = adapter
-            .validate(Assertion {
-                id: "typed".to_owned(),
-                required_capability: "macos.assert_visible".to_owned(),
-                target: stable_macos_target(&metadata()),
-                expected: "buyer@example.test".to_owned(),
-            })
-            .expect("assertion should run");
-        assert!(result.passed);
+        assert!(
+            email_predicate.contains("customerEmail"),
+            "{email_predicate}"
+        );
+        assert!(email_predicate.contains("AXTextField"), "{email_predicate}");
+        assert!(
+            email_predicate.contains("buyer@example.test"),
+            "{email_predicate}"
+        );
+        assert!(save_predicate.contains("AXButton"), "{save_predicate}");
     }
 
     #[test]
-    fn generic_app_workflow_opens_app_enters_inputs_and_reads_outputs() {
+    fn generic_app_workflow_fails_until_real_fixture_app_exists() {
         let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
         let input_target = stable_macos_target(&MacOsElementMetadata {
             ax_identifier: Some("primary-input".to_owned()),
@@ -799,40 +1193,24 @@ mod tests {
                 }],
             },
         )
-        .expect("generic app workflow should pass");
+        .expect_err("missing fixture app should fail through real LaunchServices");
 
-        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
-        assert!(outcome.prompt.contains("Sample.app"));
-        assert!(outcome.steps.iter().all(|step| step.success));
-        assert!(outcome
-            .steps
-            .iter()
-            .any(|step| step.step_id == "read-output-result"));
+        assert!(outcome.to_string().contains("open failed"), "{outcome}");
     }
 
     #[test]
-    fn can_take_evidence_screenshots() {
-        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
+    fn screenshot_path_uses_real_png_file_location() {
+        let path = default_screenshot_path();
 
-        let result = adapter
-            .execute(RunnerStep {
-                id: "shot".to_owned(),
-                action: "screenshot".to_owned(),
-                target: LocatorTarget::default(),
-                value: None,
-                required_capability: "macos.screenshot".to_owned(),
-            })
-            .expect("screenshot should pass");
-
-        assert!(result.success);
         assert_eq!(
-            adapter
-                .record_event()
-                .expect("last event")
-                .expect("event")
-                .action,
-            "screenshot"
+            path.extension().and_then(|value| value.to_str()),
+            Some("png")
         );
+        assert!(path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .starts_with("greentic-macos-screenshot-"));
     }
 
     #[test]

@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_runs_runner_and_returns_evidence() {
+    fn tool_call_fails_closed_without_real_replay_registry_and_returns_evidence() {
         let tool = built(ForwardingMode::Local);
         let mut state = register_tools(vec![tool]);
 
@@ -294,11 +294,11 @@ mod tests {
             BTreeMap::from([("session_token".to_owned(), "secret".to_owned())]),
         );
 
-        assert!(result.success);
-        assert_eq!(
-            result.outputs_json,
-            "{\"confirmation\":\"user@example.test\"}"
-        );
+        assert!(!result.success);
+        assert!(result
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.message.contains("real adapter registry")));
         assert!(result.evidence_uri.contains("run_web.submit_form"));
     }
 }

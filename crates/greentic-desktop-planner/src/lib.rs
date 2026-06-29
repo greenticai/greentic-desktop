@@ -112,6 +112,8 @@ pub fn plan_prompt_with_llm(
         .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
     let mut document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
     resolve_adapter_id_steps(context, &mut document.steps);
+    normalize_native_capabilities(context, &mut document.steps);
+    document.required_capabilities = required_capabilities_from_steps(&document.steps);
     validate_planned_runner(&document, &options.policy)
         .map_err(|err| diagnostic(&err.code, &err.message))?;
 
@@ -519,6 +521,144 @@ fn resolve_adapter_id_steps(context: &PlanningContext, steps: &mut [RunnerStep])
             step.required_capability = capability;
         }
     }
+}
+
+fn normalize_native_capabilities(context: &PlanningContext, steps: &mut [RunnerStep]) {
+    let Some(preferred_prefix) = preferred_native_prefix(context) else {
+        for step in steps {
+            if let Some(capability) =
+                canonical_native_capability(&step.required_capability, None, &step.action)
+            {
+                step.required_capability = capability;
+            }
+        }
+        return;
+    };
+
+    for step in steps {
+        if let Some(capability) = canonical_native_capability(
+            &step.required_capability,
+            Some(preferred_prefix),
+            &step.action,
+        ) {
+            step.required_capability = capability;
+        }
+    }
+}
+
+fn preferred_native_prefix(context: &PlanningContext) -> Option<&'static str> {
+    let observations = context
+        .desktop_observations
+        .iter()
+        .chain(context.application_metadata.iter())
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if observations
+        .iter()
+        .any(|value| value.contains("current desktop platform: macos"))
+    {
+        return Some("macos");
+    }
+    if observations
+        .iter()
+        .any(|value| value.contains("current desktop platform: windows"))
+    {
+        return Some("windows");
+    }
+    if observations
+        .iter()
+        .any(|value| value.contains("current desktop platform: linux"))
+    {
+        return Some("linux");
+    }
+    if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.adapter_id == "greentic.desktop.macos.ax")
+    {
+        return Some("macos");
+    }
+    if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.adapter_id == "greentic.desktop.windows-ui")
+    {
+        return Some("windows");
+    }
+    if context.available_adapters.iter().any(|adapter| {
+        adapter.adapter_id == "greentic.desktop.linux.x11"
+            || adapter.adapter_id == "greentic.desktop.linux.wayland"
+    }) {
+        return Some("linux");
+    }
+    None
+}
+
+fn canonical_native_capability(
+    capability: &str,
+    preferred_prefix: Option<&str>,
+    action: &str,
+) -> Option<String> {
+    let (prefix, suffix) = capability.split_once('.')?;
+    if !matches!(prefix, "windows" | "macos" | "linux") {
+        return None;
+    }
+    let prefix = preferred_prefix.unwrap_or(prefix);
+    let normalized = normalize_capability_token(&format!("{suffix}_{action}"));
+    let canonical_suffix = if normalized.contains("open_app")
+        || normalized.contains("activate_app")
+        || normalized.contains("launch")
+        || normalized.contains("start")
+    {
+        match prefix {
+            "windows" => "open_app",
+            "macos" => "activate_app",
+            "linux" => "find_window",
+            _ => suffix,
+        }
+    } else if normalized.contains("find_window") || normalized.contains("activate_window") {
+        match prefix {
+            "linux" if normalized.contains("activate_window") => "activate_window",
+            "linux" => "find_window",
+            _ => "find_window",
+        }
+    } else if normalized.contains("find") {
+        "find_element"
+    } else if normalized.contains("click")
+        || normalized.contains("press")
+        || normalized.contains("save")
+    {
+        "click_element"
+    } else if normalized.contains("type")
+        || normalized.contains("input")
+        || normalized.contains("fill")
+        || normalized.contains("enter")
+    {
+        "type_text"
+    } else if normalized.contains("read")
+        || normalized.contains("extract")
+        || normalized.contains("return")
+        || normalized.contains("get")
+    {
+        "read_text"
+    } else if normalized.contains("assert") {
+        "assert_visible"
+    } else if normalized.contains("screenshot") {
+        "screenshot"
+    } else {
+        suffix
+    };
+    Some(format!("{prefix}.{canonical_suffix}"))
+}
+
+fn required_capabilities_from_steps(steps: &[RunnerStep]) -> Vec<String> {
+    let mut capabilities = steps
+        .iter()
+        .map(|step| step.required_capability.clone())
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
 }
 
 fn capability_for_action(adapter: &AdapterCapabilities, action: &str) -> Option<String> {
@@ -1309,7 +1449,6 @@ mod tests {
             vec![
                 "greentic.desktop.java-accessibility",
                 "greentic.desktop.macos.ax",
-                "greentic.desktop.playwright",
                 "greentic.desktop.vision"
             ]
         );
@@ -1326,6 +1465,74 @@ mod tests {
                 "macos.activate_app",
                 "java.type_text",
                 "vision.extract_text"
+            ]
+        );
+    }
+
+    #[test]
+    fn llm_windows_native_steps_are_normalized_to_current_macos_platform() {
+        let result = plan_prompt_with_llm(
+            "Create a desktop document",
+            &PlanningContext {
+                available_adapters: vec![AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    [
+                        "macos.activate_app",
+                        "macos.find_element",
+                        "macos.type_text",
+                        "macos.click_element",
+                        "macos.read_text",
+                    ],
+                )],
+                available_mcp_tools: Vec::new(),
+                application_metadata: vec!["current desktop platform: macos".to_owned()],
+                existing_runners: Vec::new(),
+                ltm_examples: Vec::new(),
+                security_policies: Vec::new(),
+                desktop_observations: vec!["current desktop platform: macos".to_owned()],
+            },
+            &PlannerOptions::default(),
+            &StaticLlmClient::ok(
+                r#"{
+                    "runner_id": "document.create",
+                    "version": "0.1.0-draft",
+                    "summary": "Create document",
+                    "risk_level": "medium",
+                    "required_capabilities": ["windows.activate_app", "windows.click", "windows.read_text", "windows.type_text"],
+                    "inputs": {"document_path": {"type": "string"}, "text_content": {"type": "string"}},
+                    "outputs": {"saved_status": {"type": "string"}},
+                    "steps": [
+                        {"id": "open-word", "action": "activate_app", "required_capability": "windows.activate_app", "value": "Word"},
+                        {"id": "type-text", "action": "type_text", "required_capability": "windows.type_text", "value": "{{inputs.text_content}}"},
+                        {"id": "save", "action": "click", "required_capability": "windows.click"},
+                        {"id": "read-state", "action": "read_text", "required_capability": "windows.read_text"}
+                    ],
+                    "assertions": [],
+                    "open_questions": []
+                }"#,
+            ),
+        )
+        .expect("foreign native capabilities should normalize");
+
+        assert_eq!(
+            result.draft.required_adapters,
+            vec!["greentic.desktop.macos.ax"]
+        );
+        let step_capabilities = result
+            .draft
+            .package
+            .steps
+            .iter()
+            .map(|step| step.required_capability.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            step_capabilities,
+            vec![
+                "macos.activate_app",
+                "macos.type_text",
+                "macos.click_element",
+                "macos.read_text"
             ]
         );
     }

@@ -277,22 +277,14 @@ pub trait RecordingBackend: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct FakeRecordingBackend {
+pub struct BlockingRecordingBackend {
     id: &'static str,
     target_kind: RecordingTargetKind,
-    blocked_reason: Option<String>,
+    blocked_reason: String,
 }
 
-impl FakeRecordingBackend {
-    pub fn ready(id: &'static str, target_kind: RecordingTargetKind) -> Self {
-        Self {
-            id,
-            target_kind,
-            blocked_reason: None,
-        }
-    }
-
-    pub fn blocked(
+impl BlockingRecordingBackend {
+    pub fn new(
         id: &'static str,
         target_kind: RecordingTargetKind,
         reason: impl Into<String>,
@@ -300,12 +292,12 @@ impl FakeRecordingBackend {
         Self {
             id,
             target_kind,
-            blocked_reason: Some(reason.into()),
+            blocked_reason: reason.into(),
         }
     }
 }
 
-impl RecordingBackend for FakeRecordingBackend {
+impl RecordingBackend for BlockingRecordingBackend {
     fn id(&self) -> &'static str {
         self.id
     }
@@ -315,16 +307,49 @@ impl RecordingBackend for FakeRecordingBackend {
     }
 
     fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
-        self.blocked_reason
-            .as_ref()
-            .map(|reason| RecordingPreflight::blocked(reason.clone()))
-            .unwrap_or_else(RecordingPreflight::ready)
+        RecordingPreflight::blocked(self.blocked_reason.clone())
+    }
+
+    fn start(&self, _request: RecordingStartRequest, _sink: RecordingEventSink) -> RecordingHandle {
+        RecordingHandle {
+            backend_id: self.id.to_owned(),
+            capture_state: RecordingCaptureState::Blocked,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct FixtureRecordingBackend {
+    id: &'static str,
+    target_kind: RecordingTargetKind,
+}
+
+#[cfg(test)]
+impl FixtureRecordingBackend {
+    pub fn ready(id: &'static str, target_kind: RecordingTargetKind) -> Self {
+        Self { id, target_kind }
+    }
+}
+
+#[cfg(test)]
+impl RecordingBackend for FixtureRecordingBackend {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        self.target_kind
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        RecordingPreflight::ready()
     }
 
     fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
         let mut event =
-            RecordingEventEnvelope::new(sink.session_id(), self.id, self.target_kind, 1, "observe");
-        event.value = Some("fake backend heartbeat".to_owned());
+            RecordingEventEnvelope::new(sink.session_id(), self.id, self.target_kind, 1, "fill");
+        event.value = Some("inputs.fixture_value".to_owned());
         let _ = sink.append_event(event);
         let _ = sink.update_heartbeat();
         RecordingHandle {
@@ -2292,12 +2317,12 @@ mod tests {
     }
 
     #[test]
-    fn fake_backend_writes_event_and_lifecycle_transitions() {
+    fn fixture_backend_writes_semantic_event_and_lifecycle_transitions() {
         let runtime_home = temp_dir("greentic-record-home-active");
         let out = temp_dir("greentic-recording-active");
         let mut registry = RecordingBackendRegistry::new();
-        registry.register(FakeRecordingBackend::ready(
-            "greentic.recording.fake",
+        registry.register(FixtureRecordingBackend::ready(
+            "greentic.recording.fixture",
             RecordingTargetKind::Web,
         ));
         let started = start_recording_session_with_registry(
@@ -2319,10 +2344,11 @@ mod tests {
         assert_eq!(started.capture_state, RecordingCaptureState::Recording);
         assert_eq!(
             started.capture_backend.as_deref(),
-            Some("greentic.recording.fake")
+            Some("greentic.recording.fixture")
         );
         let raw = fs::read_to_string(out.join("raw/events.jsonl")).expect("raw events");
         assert!(raw.contains("\"schema_version\":\"recording.event.v1\""));
+        assert!(raw.contains("inputs.fixture_value"));
 
         let paused =
             pause_recording_session(&runtime_home, &started.session_id).expect("recording pauses");
@@ -2405,6 +2431,27 @@ mod tests {
         assert_eq!(package.steps[1].required_capability, "web.fill");
         assert_eq!(package.steps[2].required_capability, "web.click");
         assert_eq!(package.inputs, vec!["inputs.number_1"]);
+    }
+
+    #[test]
+    fn normalise_rejects_lifecycle_and_backend_warning_only_captures() {
+        let root = temp_dir("greentic-normalise-non-semantic");
+        let raw = root.join("raw");
+        fs::create_dir_all(&raw).expect("raw dir");
+        fs::write(
+            raw.join("events.jsonl"),
+            concat!(
+                r#"{"type":"session_started","timestamp":"1","adapter":"greentic.desktop.playwright","capture_state":"recording"}"#,
+                "\n",
+                r#"{"schema_version":"recording.event.v1","session_id":"rec","backend":"greentic.recording.fixture","target_kind":"web","timestamp":"2","sequence":0,"event":{"kind":"backend_warning","target":{},"value":"source unavailable","redaction":"none"},"evidence":{"screenshot_ref":null,"dom_snapshot_ref":null,"ui_tree_ref":null,"terminal_buffer_ref":null}}"#,
+                "\n"
+            ),
+        )
+        .expect("events should write");
+
+        let err = normalise_recording(&raw, &root.join("runner.yaml"))
+            .expect_err("non-semantic capture should not normalise");
+        assert!(err.to_string().contains("no semantic events"), "{err}");
     }
 
     #[test]

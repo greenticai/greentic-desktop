@@ -1,4 +1,6 @@
-use greentic_desktop_adapter::{LocatorTarget, RunnerStep};
+use greentic_desktop_adapter::{
+    AdapterCapabilities, AdapterHealth, AdapterReadiness, LocatorTarget, RunnerStep,
+};
 use greentic_desktop_extension::{
     verify_extension_package_trust, ExtensionPackageMetadata, ExtensionPermissions,
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
@@ -23,7 +25,7 @@ use greentic_desktop_platform::{
 use greentic_desktop_recorder::{
     append_recording_note, cancel_recording_session, finalise_recording, list_recording_sessions,
     load_recording_session, normalise_recording, pause_recording_session, resume_recording_session,
-    start_recording_session_with_registry, stop_recording_session, FakeRecordingBackend,
+    start_recording_session_with_registry, stop_recording_session, BlockingRecordingBackend,
     RecordingBackendRegistry, RecordingMode, RecordingSessionManifest, RecordingStartRequest,
     RecordingTargetKind, RunnerPackage,
 };
@@ -36,9 +38,10 @@ use greentic_desktop_runner_schema::{
 use greentic_desktop_session::SessionProfile;
 use greentic_desktop_terminal::{
     TerminalAdapter, TerminalProfile, TerminalProtocol, TerminalRecordingBackend,
+    TERMINAL_ADAPTER_ID,
 };
 use greentic_desktop_vision::{
-    RemoteViewportCalibration, RemoteVisionRecordingBackend, VisionAdapter,
+    RemoteViewportCalibration, RemoteVisionRecordingBackend, VisionAdapter, VISION_ADAPTER_ID,
 };
 use greentic_desktop_web::{
     PlaywrightRecorderOptions, PlaywrightWebAdapter, PlaywrightWebRecordingBackend,
@@ -363,6 +366,7 @@ fn api_response(
     let path = path.split_once('?').map_or(path, |(path, _)| path);
     let data = match (method, path) {
         ("GET" | "HEAD", "/api/v1/health") => r#"{"apiVersion":"v1","status":"ok"}"#.to_owned(),
+        ("GET" | "HEAD", "/api/v1/adapters/health") => adapter_health_json(state),
         ("GET" | "HEAD", "/api/v1/runtime/info") => runtime_info_json(addr, state),
         ("GET" | "HEAD", "/api/v1/activity") => activity_json(state),
         ("GET" | "HEAD", "/api/v1/evidence") => evidence_list_json(state),
@@ -582,6 +586,161 @@ fn runtime_info_json(addr: SocketAddr, state: &GuiApiState) -> String {
         escape_json(&state.mcp_bind),
         string_array_json(&state.installed_core_adapter_ids)
     )
+}
+
+fn adapter_health_json(state: &GuiApiState) -> String {
+    let adapters = adapter_runtime_health(state, model_replay_allowed())
+        .iter()
+        .map(adapter_health_item_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"adapters":[{adapters}]}}"#)
+}
+
+fn adapter_health_item_json(health: &AdapterHealth) -> String {
+    format!(
+        r#"{{"id":"{}","readiness":"{}","healthy":{},"message":"{}","executableCapabilities":{},"recordableTargets":{},"logPath":{}}}"#,
+        escape_json(&health.adapter_id),
+        health.readiness.as_str(),
+        health.readiness.is_healthy(),
+        escape_json(&health.message),
+        string_array_json(&health.executable_capabilities),
+        string_array_json(&health.recordable_targets),
+        json_option(health.log_path.as_deref())
+    )
+}
+
+fn adapter_runtime_health(state: &GuiApiState, allow_model_replay: bool) -> Vec<AdapterHealth> {
+    let mut health = replay_adapter_registry(state)
+        .capabilities()
+        .into_iter()
+        .map(|capabilities| model_adapter_health(state, capabilities, allow_model_replay))
+        .collect::<Vec<_>>();
+
+    for id in installed_extension_ids(state) {
+        if health.iter().any(|item| item.adapter_id == id) {
+            continue;
+        }
+        let mut item = AdapterHealth::unavailable(
+            id.clone(),
+            AdapterReadiness::SidecarMissing,
+            "Extension is installed but no healthy adapter sidecar is running.",
+        );
+        item.log_path = Some(adapter_log_path(state, &id));
+        health.push(item);
+    }
+
+    health.sort_by(|left, right| left.adapter_id.cmp(&right.adapter_id));
+    health
+}
+
+fn model_adapter_health(
+    state: &GuiApiState,
+    capabilities: AdapterCapabilities,
+    allow_model_replay: bool,
+) -> AdapterHealth {
+    if capabilities.adapter_id == VISION_ADAPTER_ID
+        && std::env::var("GREENTIC_VISION_BACKEND_COMMAND")
+            .ok()
+            .filter(|command| !command.trim().is_empty())
+            .is_none()
+    {
+        let mut health = AdapterHealth::unavailable(
+            capabilities.adapter_id.clone(),
+            AdapterReadiness::SidecarMissing,
+            "Vision screenshot/OCR/input backend is not configured. Set GREENTIC_VISION_BACKEND_COMMAND.",
+        );
+        health.log_path = Some(adapter_log_path(state, &health.adapter_id));
+        return health;
+    }
+    if capabilities.adapter_id == TERMINAL_ADAPTER_ID
+        && std::env::var("GREENTIC_TERMINAL_ADAPTER_COMMAND")
+            .ok()
+            .filter(|command| !command.trim().is_empty())
+            .is_none()
+    {
+        let mut health = AdapterHealth::unavailable(
+            capabilities.adapter_id.clone(),
+            AdapterReadiness::SidecarMissing,
+            "Owned terminal PTY/SSH/TN3270 runtime is not configured. Set GREENTIC_TERMINAL_ADAPTER_COMMAND.",
+        );
+        health.log_path = Some(adapter_log_path(state, &health.adapter_id));
+        return health;
+    }
+    let production_capabilities = capabilities
+        .capabilities
+        .iter()
+        .filter(|capability| production_capability_available(state, capability))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut health = if allow_model_replay {
+        AdapterHealth::healthy(
+            capabilities.adapter_id.clone(),
+            capabilities.capabilities.clone(),
+        )
+    } else if !production_capabilities.is_empty() {
+        AdapterHealth::healthy(capabilities.adapter_id.clone(), production_capabilities)
+    } else {
+        AdapterHealth::unavailable(
+            capabilities.adapter_id.clone(),
+            AdapterReadiness::NotImplemented,
+            "Adapter contract is installed, but production execution is not implemented yet.",
+        )
+    };
+    health.log_path = Some(adapter_log_path(state, &health.adapter_id));
+    health
+}
+
+fn healthy_adapter_capabilities(state: &GuiApiState) -> Vec<AdapterCapabilities> {
+    healthy_adapter_capabilities_with_mode(state, model_replay_allowed())
+}
+
+fn healthy_adapter_capabilities_with_mode(
+    state: &GuiApiState,
+    allow_model_replay: bool,
+) -> Vec<AdapterCapabilities> {
+    adapter_runtime_health(state, allow_model_replay)
+        .into_iter()
+        .filter_map(|health| health.capabilities_if_healthy(env!("CARGO_PKG_VERSION")))
+        .collect()
+}
+
+fn adapter_health_for_id(
+    state: &GuiApiState,
+    id: &str,
+    allow_model_replay: bool,
+) -> Option<AdapterHealth> {
+    adapter_runtime_health(state, allow_model_replay)
+        .into_iter()
+        .find(|health| health.adapter_id == id)
+}
+
+fn extension_health_status(state: &GuiApiState, id: &str) -> String {
+    adapter_health_for_id(state, id, model_replay_allowed())
+        .map(|health| health.readiness.as_str().to_owned())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn installed_extension_ids(state: &GuiApiState) -> Vec<String> {
+    let mut ids = state.installed_extension_ids.clone();
+    for record in gui_extension_records(state) {
+        if let Some(id) = toml_string_field(&record, "id") {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn adapter_log_path(state: &GuiApiState, adapter_id: &str) -> String {
+    state
+        .runtime_home
+        .join("logs")
+        .join("adapters")
+        .join(format!("{}.log", slug(adapter_id)))
+        .display()
+        .to_string()
 }
 
 fn activity_json(state: &GuiApiState) -> String {
@@ -1112,10 +1271,12 @@ fn installed_extensions_json(state: &GuiApiState) -> String {
             .installed_extension_ids
             .iter()
             .map(|id| {
+                let health = extension_health_status(state, id);
                 format!(
-                    r#"{{"id":"{}","name":"{}","status":"installed","enabled":true,"health":"unknown","version":"local","publisher":"local","trust":"verified","digest":null,"source":"local","capabilities":[],"permissions":[],"platformCompatible":true,"available":true}}"#,
+                    r#"{{"id":"{}","name":"{}","status":"installed","enabled":true,"health":"{}","version":"local","publisher":"local","trust":"verified","digest":null,"source":"local","capabilities":[],"permissions":[],"platformCompatible":true,"available":true}}"#,
                     escape_json(id),
-                    escape_json(id)
+                    escape_json(id),
+                    escape_json(&health)
                 )
             })
             .collect::<Vec<_>>()
@@ -1135,11 +1296,13 @@ fn installed_extensions_json(state: &GuiApiState) -> String {
                     .unwrap_or_else(|| "valid".to_owned());
                 let sbom_present = toml_bool_field(record, "sbom_present").unwrap_or(true);
                 let trust_reasons = toml_array_field(record, "trust_reasons").unwrap_or_default();
+                let health = extension_health_status(state, &id);
                 format!(
-                    r#"{{"id":"{}","name":"{}","status":"installed","enabled":{},"health":"unknown","version":"{}","publisher":"{}","trust":"verified","signatureStatus":"{}","sbomPresent":{},"trustReasons":{},"digest":"{}","source":"{}","capabilities":[],"permissions":[],"platformCompatible":true,"available":true}}"#,
+                    r#"{{"id":"{}","name":"{}","status":"installed","enabled":{},"health":"{}","version":"{}","publisher":"{}","trust":"verified","signatureStatus":"{}","sbomPresent":{},"trustReasons":{},"digest":"{}","source":"{}","capabilities":[],"permissions":[],"platformCompatible":true,"available":true}}"#,
                     escape_json(&id),
                     escape_json(&id),
                     enabled,
+                    escape_json(&health),
                     escape_json(&version),
                     escape_json(&publisher),
                     escape_json(&signature_status),
@@ -1354,7 +1517,11 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
     let enabled = installed_record
         .and_then(|record| toml_bool_field(record, "enabled"))
         .unwrap_or(installed);
-    let health = if installed { "healthy" } else { "unknown" };
+    let health = if installed {
+        extension_health_status(state, id)
+    } else {
+        "unknown".to_owned()
+    };
     if let Some(extension) = client.store_index().find(id) {
         return format!(
             r#"{{"extension":{}}}"#,
@@ -1374,7 +1541,7 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
                 &extension.publisher,
                 installed,
                 enabled,
-                health,
+                &health,
             )
         );
     }
@@ -1386,7 +1553,7 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
         if installed { "installed" } else { "available" },
         installed,
         enabled,
-        escape_json(health),
+        escape_json(&health),
         !installed
     )
 }
@@ -1826,7 +1993,7 @@ fn execute_runner(
     let inputs = runner_inputs_from_body(body, &package.inputs);
     ensure_required_inputs_present(&package, &inputs)?;
     let secrets = runner_secrets_from_body(state, body, &package.secrets)?;
-    if let Some(reason) = production_replay_block_reason(&package, model_replay_allowed()) {
+    if let Some(reason) = production_replay_block_reason(state, &package, model_replay_allowed()) {
         return Err(api_error_json("runner.real_adapter_missing", &reason));
     }
     let request = ReplayRequest {
@@ -1889,6 +2056,7 @@ fn model_replay_allowed() -> bool {
 }
 
 fn production_replay_block_reason(
+    state: &GuiApiState,
     package: &RunnerPackage,
     allow_model_replay: bool,
 ) -> Option<String> {
@@ -1899,13 +2067,49 @@ fn production_replay_block_reason(
         .steps
         .iter()
         .map(|step| step.required_capability.clone())
+        .filter(|capability| !production_capability_available(state, capability))
         .collect::<Vec<_>>();
     capabilities.sort();
     capabilities.dedup();
+    if capabilities.is_empty() {
+        return None;
+    }
     Some(format!(
         "Real replay backend is not available for this runner. Current in-process adapters are model-only and cannot prove desktop side effects. Missing production execution for capabilities: {}.",
         capabilities.join(", ")
     ))
+}
+
+fn production_capability_available(state: &GuiApiState, capability: &str) -> bool {
+    let platform = detect_platform();
+    if capability.starts_with("web.") {
+        return true;
+    }
+    if capability.starts_with("macos.") {
+        return platform.os == DesktopPlatform::MacOS;
+    }
+    if capability.starts_with("windows.") {
+        return platform.os == DesktopPlatform::Windows;
+    }
+    if capability.starts_with("linux.") {
+        return platform.os == DesktopPlatform::Linux && state.platform == "linux";
+    }
+    if capability.starts_with("java.") {
+        return java_access_bridge_available();
+    }
+    if capability.starts_with("terminal.") {
+        return std::env::var("GREENTIC_TERMINAL_ADAPTER_COMMAND")
+            .ok()
+            .filter(|command| !command.trim().is_empty())
+            .is_some();
+    }
+    if capability.starts_with("vision.") {
+        return std::env::var("GREENTIC_VISION_BACKEND_COMMAND")
+            .ok()
+            .filter(|command| !command.trim().is_empty())
+            .is_some();
+    }
+    false
 }
 
 fn validate_output_evidence(outputs: &BTreeMap<String, String>) -> Option<String> {
@@ -2359,6 +2563,7 @@ fn extractor_proof_label(extractor: &WorkflowOutputExtractor) -> String {
                 field.row, field.col, field.len
             )
         }
+        WorkflowOutputExtractor::FileExists(path) => format!("file exists: {path}"),
         WorkflowOutputExtractor::JsonPath(path) => format!("json path: {path}"),
     }
 }
@@ -2525,10 +2730,15 @@ fn runner_summary_json(state: &GuiApiState, runner: &RunnerFile) -> String {
         .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
+    let availability_message = match runner_package_from_yaml(&yaml) {
+        Ok(package) => production_replay_block_reason(state, &package, model_replay_allowed()),
+        Err(err) => Some(err),
+    };
+    let available = availability_message.is_none();
     let description = manifest_description(&yaml)
         .unwrap_or_else(|| "Local runner package managed by Greentic Desktop.".to_owned());
     format!(
-        r#"{{"id":"{}","name":"{}","description":"{}","status":"{}","risk":"medium","version":"local","lastTest":"{}","updated":"{}","adapters":[],"inputs":{},"outputs":{},"secrets":{},"inputFields":{},"secretFields":{},"outputFields":{},"published":{},"evidenceRefs":{}}}"#,
+        r#"{{"id":"{}","name":"{}","description":"{}","status":"{}","risk":"medium","version":"local","lastTest":"{}","updated":"{}","adapters":[],"inputs":{},"outputs":{},"secrets":{},"inputFields":{},"secretFields":{},"outputFields":{},"published":{},"available":{},"availabilityMessage":{},"evidenceRefs":{}}}"#,
         escape_json(&runner.id),
         escape_json(&runner.name),
         escape_json(&description),
@@ -2542,6 +2752,8 @@ fn runner_summary_json(state: &GuiApiState, runner: &RunnerFile) -> String {
         manifest_secret_fields_json(&yaml, state),
         manifest_output_fields_json(&yaml),
         published,
+        available,
+        json_option(availability_message.as_deref()),
         runner_evidence_json(state, &runner.id)
     )
 }
@@ -2886,7 +3098,7 @@ fn field_display_name(field: &str) -> String {
 }
 
 fn recording_targets_json() -> String {
-    r#"{"targets":[{"id":"browser","label":"Browser task - Greentic opens a browser window","profile":"web","adapter":"greentic.desktop.playwright","available":true},{"id":"desktop","label":"Desktop app task","profile":"desktop","adapter":"greentic.desktop.vision","available":true},{"id":"java","label":"Java app task","profile":"java","adapter":"greentic.desktop.java-accessibility","available":true},{"id":"remote","label":"Remote desktop task","profile":"remote","adapter":"greentic.desktop.vision","available":true},{"id":"terminal","label":"Terminal/mainframe task","profile":"terminal","adapter":"greentic.desktop.terminal.tn3270","available":true}]}"#.to_owned()
+    r#"{"targets":[{"id":"browser","label":"Browser task - Greentic opens a browser window","profile":"web","adapter":"greentic.desktop.playwright","available":true},{"id":"desktop","label":"Desktop app task","profile":"desktop","adapter":"greentic.desktop.vision","available":true},{"id":"java","label":"Java app task","profile":"java","adapter":"greentic.desktop.java-accessibility","available":true},{"id":"remote","label":"Remote desktop task","profile":"remote","adapter":"greentic.desktop.vision","available":true},{"id":"terminal","label":"Terminal/mainframe task","profile":"terminal","adapter":"greentic.desktop.terminal-tn3270","available":true}]}"#.to_owned()
 }
 
 fn recordings_list_json(state: &GuiApiState) -> String {
@@ -2938,10 +3150,7 @@ fn recording_backend_registry(
     let mut registry = RecordingBackendRegistry::new();
     #[cfg(test)]
     if target == "__test_browser" {
-        registry.register(FakeRecordingBackend::ready(
-            "greentic.recording.web.test",
-            RecordingTargetKind::Web,
-        ));
+        registry.register(GuiTestRecordingBackend);
         return registry;
     }
     if target == "browser" {
@@ -2959,7 +3168,7 @@ fn recording_backend_registry(
                 java_access_bridge_available(),
             ));
         } else {
-            registry.register(FakeRecordingBackend::blocked(
+            registry.register(BlockingRecordingBackend::new(
                 "greentic.recording.java.not-configured",
                 RecordingTargetKind::Java,
                 "Java recording requires a real Java Access Bridge event bridge. Configure GREENTIC_ENABLE_EXPERIMENTAL_JAVA_RECORDING=1 only when that bridge is installed.",
@@ -2977,38 +3186,24 @@ fn recording_backend_registry(
                 command,
             ));
         } else {
-            registry.register(FakeRecordingBackend::blocked(
+            registry.register(BlockingRecordingBackend::new(
                 "greentic.recording.terminal.not-configured",
                 RecordingTargetKind::Terminal,
                 "Terminal recording requires a Greentic-owned PTY/SSH/TN3270 event source. Configure GREENTIC_TERMINAL_RECORDER_COMMAND to start that source.",
             ));
         }
     } else if target == "remote" {
-        if allow_experimental_recording_backend("remote") {
-            let platform = detect_platform();
-            let screen_capture = platform.has_permission(PlatformPermission::ScreenRecording)
-                || platform.has_permission(PlatformPermission::Screenshot);
-            let input_control = platform.has_permission(PlatformPermission::KeyboardInput)
-                && platform.has_permission(PlatformPermission::MouseInput);
-            registry.register(RemoteVisionRecordingBackend::new(
-                true,
-                screen_capture,
-                input_control,
-                Some(RemoteViewportCalibration {
-                    origin_x: 0,
-                    origin_y: 0,
-                    width: 1280,
-                    height: 720,
-                    scale_percent: 100,
-                }),
-            ));
-        } else {
-            registry.register(FakeRecordingBackend::blocked(
-                "greentic.recording.remote.not-configured",
-                RecordingTargetKind::Remote,
-                "Remote recording requires a Greentic-owned remote viewport event source and calibrated input stream. Configure GREENTIC_ENABLE_EXPERIMENTAL_REMOTE_RECORDING=1 only when that source is installed.",
-            ));
-        }
+        let platform = detect_platform();
+        let screen_capture = platform.has_permission(PlatformPermission::ScreenRecording)
+            || platform.has_permission(PlatformPermission::Screenshot);
+        let input_control = platform.has_permission(PlatformPermission::KeyboardInput)
+            && platform.has_permission(PlatformPermission::MouseInput);
+        registry.register(RemoteVisionRecordingBackend::new(
+            true,
+            screen_capture,
+            input_control,
+            remote_viewport_calibration_from_env(),
+        ));
     } else if target == "desktop" {
         let platform = detect_platform();
         if platform_desktop_recording_configured(state, &platform)
@@ -3031,7 +3226,7 @@ fn recording_backend_registry(
                 }
             }
         } else {
-            registry.register(FakeRecordingBackend::blocked(
+            registry.register(BlockingRecordingBackend::new(
                 "greentic.recording.desktop.not-configured",
                 RecordingTargetKind::Desktop,
                 format!(
@@ -3042,6 +3237,39 @@ fn recording_backend_registry(
         }
     }
     registry
+}
+
+#[cfg(test)]
+struct GuiTestRecordingBackend;
+
+#[cfg(test)]
+impl greentic_desktop_recorder::RecordingBackend for GuiTestRecordingBackend {
+    fn id(&self) -> &'static str {
+        "greentic.recording.web.test"
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        RecordingTargetKind::Web
+    }
+
+    fn preflight(
+        &self,
+        _request: &RecordingStartRequest,
+    ) -> greentic_desktop_recorder::RecordingPreflight {
+        greentic_desktop_recorder::RecordingPreflight::ready()
+    }
+
+    fn start(
+        &self,
+        _request: RecordingStartRequest,
+        sink: greentic_desktop_recorder::RecordingEventSink,
+    ) -> greentic_desktop_recorder::RecordingHandle {
+        let _ = sink.update_heartbeat();
+        greentic_desktop_recorder::RecordingHandle {
+            backend_id: self.id().to_owned(),
+            capture_state: greentic_desktop_recorder::RecordingCaptureState::Recording,
+        }
+    }
 }
 
 fn platform_desktop_recording_configured(state: &GuiApiState, platform: &PlatformInfo) -> bool {
@@ -3227,12 +3455,28 @@ fn recording_target_kind(target: &str) -> RecordingTargetKind {
     }
 }
 
+fn remote_viewport_calibration_from_env() -> Option<RemoteViewportCalibration> {
+    Some(RemoteViewportCalibration {
+        origin_x: env_u32("GREENTIC_REMOTE_VIEWPORT_X")?,
+        origin_y: env_u32("GREENTIC_REMOTE_VIEWPORT_Y")?,
+        width: env_u32("GREENTIC_REMOTE_VIEWPORT_WIDTH")?,
+        height: env_u32("GREENTIC_REMOTE_VIEWPORT_HEIGHT")?,
+        scale_percent: env_u32("GREENTIC_REMOTE_VIEWPORT_SCALE_PERCENT").unwrap_or(100),
+    })
+}
+
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
 fn recording_target_profile(target: &str) -> (&'static str, &'static str) {
     match target {
         "desktop" => ("desktop", "greentic.desktop.vision"),
         "java" => ("java", "greentic.desktop.java-accessibility"),
         "remote" => ("remote", "greentic.desktop.vision"),
-        "terminal" => ("terminal", "greentic.desktop.terminal.tn3270"),
+        "terminal" => ("terminal", "greentic.desktop.terminal-tn3270"),
         _ => ("web", "greentic.desktop.playwright"),
     }
 }
@@ -3344,16 +3588,30 @@ fn plan_prompt_with_configured_llm(
 }
 
 fn planner_context(state: &GuiApiState) -> PlanningContext {
-    let adapters = replay_adapter_registry(state).capabilities();
+    let adapters = healthy_adapter_capabilities(state);
 
     PlanningContext {
         available_adapters: adapters,
         available_mcp_tools: Vec::new(),
-        application_metadata: Vec::new(),
+        application_metadata: vec![format!(
+            "current desktop platform: {}",
+            planner_platform_name(&detect_platform())
+        )],
         existing_runners: state.runner_names.clone(),
         ltm_examples: Vec::new(),
         security_policies: vec!["unsigned drafts allowed locally".to_owned()],
-        desktop_observations: Vec::new(),
+        desktop_observations: vec![format!(
+            "current desktop platform: {}",
+            planner_platform_name(&detect_platform())
+        )],
+    }
+}
+
+fn planner_platform_name(platform: &PlatformInfo) -> &'static str {
+    match platform.os {
+        DesktopPlatform::MacOS => "macos",
+        DesktopPlatform::Windows => "windows",
+        DesktopPlatform::Linux => "linux",
     }
 }
 
@@ -4477,7 +4735,7 @@ fn extension_action_json(path: &str, state: &GuiApiState) -> Result<String, Stri
     let action = path.rsplit('/').next().unwrap_or("action");
     let status = match action {
         "verify" => "verified",
-        "health" => "healthy",
+        "health" => "complete",
         "enable" => {
             set_gui_extension_enabled(state, id, true)?;
             "enabled"
@@ -4509,16 +4767,23 @@ fn extension_action_json(path: &str, state: &GuiApiState) -> Result<String, Stri
         }
         _ => "queued",
     };
+    let health = if action == "health" {
+        extension_health_status(state, id)
+    } else {
+        "unknown".to_owned()
+    };
+    let message = adapter_health_for_id(state, id, model_replay_allowed())
+        .map(|health| health.message)
+        .unwrap_or_else(|| {
+            "Extension manifest is installed but no adapter runtime is registered.".to_owned()
+        });
     Ok(format!(
-        r#"{{"id":"{}","status":"{}","phase":"complete","version":"local","source":"store://{}","digest":"sha256:pending","publisher":"greenticai","permissions":[],"permissionPrompts":[],"capabilities":[],"health":"{}","message":"Extension manifest and local store entry are healthy.","needs_restart":false}}"#,
+        r#"{{"id":"{}","status":"{}","phase":"complete","version":"local","source":"store://{}","digest":"sha256:pending","publisher":"greenticai","permissions":[],"permissionPrompts":[],"capabilities":[],"health":"{}","message":"{}","needs_restart":false}}"#,
         escape_json(id),
         escape_json(status),
         escape_json(id),
-        if action == "health" {
-            "healthy"
-        } else {
-            "unknown"
-        }
+        escape_json(&health),
+        escape_json(&message)
     ))
 }
 
@@ -4915,7 +5180,7 @@ fn security_headers() -> &'static str {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
     fn get(addr: SocketAddr, path: &str) -> Vec<u8> {
@@ -5054,6 +5319,43 @@ mod tests {
             .expect("response should include content-length")
             .parse()
             .expect("content-length should be numeric")
+    }
+
+    fn serve_typed_runner_web_fixture() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture server should bind");
+        let addr = listener.local_addr().expect("fixture addr");
+        std::thread::spawn(move || {
+            for _ in 0..16 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buffer = [0_u8; 2048];
+                let _ = stream.read(&mut buffer);
+                let html = r#"<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Typed runner fixture</h1>
+      <form>
+        <label for="resource_name">Resource name</label>
+        <input id="resource_name" data-testid="resource_name" />
+        <label for="name">Name</label>
+        <input id="name" data-testid="name" />
+        <button type="button" onclick="document.querySelector('[data-testid=status]').textContent = 'Saved';">Save</button>
+        <output data-testid="status">Saved</output>
+      </form>
+    </main>
+  </body>
+</html>"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    html.len(),
+                    html
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}/")
     }
 
     #[test]
@@ -5362,7 +5664,7 @@ mod tests {
             "{}",
         );
         let health = String::from_utf8_lossy(&health);
-        assert!(health.contains("\"status\":\"healthy\""));
+        assert!(health.contains("\"status\":\"complete\""));
         assert!(health.contains("\"health\":\"healthy\""));
 
         let disabled = post(
@@ -5541,6 +5843,60 @@ mod tests {
     }
 
     #[test]
+    fn adapter_health_hides_model_capabilities_in_production_mode() {
+        let state = GuiApiState::default();
+        let health = adapter_runtime_health(&state, false);
+
+        assert!(!health.is_empty());
+        assert!(health
+            .iter()
+            .any(|adapter| adapter.readiness == AdapterReadiness::NotImplemented));
+        assert!(health
+            .iter()
+            .any(|adapter| adapter.adapter_id == VISION_ADAPTER_ID
+                && adapter.readiness == AdapterReadiness::SidecarMissing));
+        assert!(health
+            .iter()
+            .any(|adapter| adapter.adapter_id == TERMINAL_ADAPTER_ID
+                && adapter.readiness == AdapterReadiness::SidecarMissing));
+        let capabilities = healthy_adapter_capabilities_with_mode(&state, false);
+        let current_native_capability = match detect_platform().os {
+            DesktopPlatform::MacOS => "macos.activate_app",
+            DesktopPlatform::Windows => "windows.open_app",
+            DesktopPlatform::Linux => "linux.find_window",
+        };
+        assert!(
+            capabilities
+                .iter()
+                .any(|adapter| adapter.supports(current_native_capability)),
+            "{capabilities:?}"
+        );
+        assert!(
+            !capabilities
+                .iter()
+                .any(|adapter| adapter.supports("windows.open_app"))
+                || detect_platform().os == DesktopPlatform::Windows,
+            "{capabilities:?}"
+        );
+    }
+
+    #[test]
+    fn adapter_health_endpoint_reports_executable_capabilities() {
+        let handle = GuiHost::start(GuiHostOptions::default()).expect("GUI host should start");
+
+        let response = get(handle.addr(), "/api/v1/adapters/health");
+        let response = String::from_utf8_lossy(&response);
+
+        assert!(response.contains("\"adapters\""), "{response}");
+        assert!(response.contains("\"readiness\":\"healthy\""), "{response}");
+        assert!(
+            response.contains("\"executableCapabilities\""),
+            "{response}"
+        );
+        assert!(response.contains("\"logPath\""), "{response}");
+    }
+
+    #[test]
     fn planner_draft_api_uses_configured_live_llm_for_inputs_and_outputs() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock LLM should bind");
         let llm_addr = listener.local_addr().expect("mock addr");
@@ -5715,8 +6071,10 @@ mod tests {
                 "{target}: {response}"
             );
             assert!(
-                response.contains("requires")
-                    && (response.contains("Configure") || response.contains("Install")),
+                (response.contains("requires") || response.contains("required"))
+                    && (response.contains("Configure")
+                        || response.contains("Install")
+                        || response.contains("Set")),
                 "{target}: {response}"
             );
             assert!(
@@ -5886,17 +6244,24 @@ mod tests {
         ));
         let runners_dir = root.join("runners");
         std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
+        let fixture_url = serve_typed_runner_web_fixture();
 
         let workflow = greentic_desktop_workflow::DesktopWorkflow {
             id: "generic.resource.update".to_owned(),
             summary: "Update a generic resource".to_owned(),
-            target: greentic_desktop_workflow::WorkflowTarget::web("http://127.0.0.1/resource"),
+            target: greentic_desktop_workflow::WorkflowTarget::web(&fixture_url),
             inputs: vec![greentic_desktop_workflow::WorkflowInput {
                 name: "resource_name".to_owned(),
                 value_type: greentic_desktop_workflow::WorkflowValueType::String,
                 required: true,
                 secret: false,
-                target: LocatorTarget::default(),
+                target: LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        label: Some("Resource name".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
                 value_template: "{{inputs.resource_name}}".to_owned(),
             }],
             actions: Vec::new(),
@@ -5972,17 +6337,24 @@ mod tests {
         ));
         let runners_dir = root.join("runners");
         std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
+        let fixture_url = serve_typed_runner_web_fixture();
 
         let workflow = greentic_desktop_workflow::DesktopWorkflow {
             id: "generic.table.append".to_owned(),
             summary: "Append a generic table row".to_owned(),
-            target: greentic_desktop_workflow::WorkflowTarget::web("http://127.0.0.1/table"),
+            target: greentic_desktop_workflow::WorkflowTarget::web(&fixture_url),
             inputs: vec![greentic_desktop_workflow::WorkflowInput {
                 name: "name".to_owned(),
                 value_type: greentic_desktop_workflow::WorkflowValueType::String,
                 required: true,
                 secret: false,
-                target: LocatorTarget::default(),
+                target: LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        label: Some("Name".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
                 value_template: "{{inputs.name}}".to_owned(),
             }],
             actions: Vec::new(),
@@ -6061,17 +6433,24 @@ mod tests {
         ));
         let runners_dir = root.join("runners");
         std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
+        let fixture_url = serve_typed_runner_web_fixture();
 
         let workflow = greentic_desktop_workflow::DesktopWorkflow {
             id: "generic.secure.append".to_owned(),
             summary: "Append a row with a protected token".to_owned(),
-            target: greentic_desktop_workflow::WorkflowTarget::web("http://127.0.0.1/table"),
+            target: greentic_desktop_workflow::WorkflowTarget::web(&fixture_url),
             inputs: vec![greentic_desktop_workflow::WorkflowInput {
                 name: "name".to_owned(),
                 value_type: greentic_desktop_workflow::WorkflowValueType::String,
                 required: true,
                 secret: false,
-                target: LocatorTarget::default(),
+                target: LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        label: Some("Name".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
                 value_template: "{{inputs.name}}".to_owned(),
             }],
             actions: Vec::new(),
@@ -6149,11 +6528,11 @@ mod tests {
         );
         let with_secret = String::from_utf8_lossy(&with_secret);
         assert!(
-            with_secret.contains("runner.output_extraction_failed"),
+            with_secret.contains("\"status\":\"passed\""),
             "{with_secret}"
         );
         assert!(
-            with_secret.contains("did not extract any declared outputs"),
+            with_secret.contains("outputs.saved_status"),
             "{with_secret}"
         );
         assert_eq!(
@@ -6632,7 +7011,7 @@ mod tests {
     }
 
     #[test]
-    fn production_replay_gate_blocks_model_only_adapters() {
+    fn production_replay_gate_blocks_unsupported_capabilities() {
         let package = RunnerPackage {
             id: "document.create".to_owned(),
             version: "0.1.0-draft".to_owned(),
@@ -6644,18 +7023,48 @@ mod tests {
                 action: "activate_app".to_owned(),
                 target: LocatorTarget::default(),
                 value: Some("Word".to_owned()),
-                required_capability: "macos.activate_app".to_owned(),
+                required_capability: "unknown.activate_app".to_owned(),
             }],
             assertions: Vec::new(),
             outputs: vec!["outputs.saved_status".to_owned()],
             open_questions: Vec::new(),
         };
 
-        let blocked = production_replay_block_reason(&package, false)
+        let state = GuiApiState::default();
+        let blocked = production_replay_block_reason(&state, &package, false)
             .expect("model-only replay should be blocked in production mode");
         assert!(blocked.contains("Real replay backend is not available"));
-        assert!(blocked.contains("macos.activate_app"));
-        assert!(production_replay_block_reason(&package, true).is_none());
+        assert!(blocked.contains("unknown.activate_app"));
+        assert!(production_replay_block_reason(&state, &package, true).is_none());
+    }
+
+    #[test]
+    fn production_replay_gate_allows_current_platform_native_backend() {
+        let state = GuiApiState::default();
+        let capability = match detect_platform().os {
+            DesktopPlatform::MacOS => "macos.activate_app",
+            DesktopPlatform::Windows => "windows.open_app",
+            DesktopPlatform::Linux => "linux.find_window",
+        };
+        let package = RunnerPackage {
+            id: "document.create".to_owned(),
+            version: "0.1.0-draft".to_owned(),
+            mode: RecordingMode::AssistedPrompt,
+            inputs: Vec::new(),
+            secrets: Vec::new(),
+            steps: vec![RunnerStep {
+                id: "open".to_owned(),
+                action: "activate_app".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("Word".to_owned()),
+                required_capability: capability.to_owned(),
+            }],
+            assertions: Vec::new(),
+            outputs: Vec::new(),
+            open_questions: Vec::new(),
+        };
+
+        assert!(production_replay_block_reason(&state, &package, false).is_none());
     }
 
     #[test]

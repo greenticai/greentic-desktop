@@ -50,6 +50,9 @@ source ci/crate_publish_order.sh
 header "publish crate order"
 validate_publish_crate_order
 
+header "no-mock production check"
+bash ci/no_mock_production_check.sh
+
 header "cargo fmt"
 cargo fmt --all -- --check
 

@@ -82,6 +82,15 @@ If the repository or release assets remain private, normal unauthenticated `carg
 
 ## Release Smoke Checks
 
+Before cutting a release, run:
+
+```bash
+bash ci/no_mock_production_check.sh
+bash ci/local_check.sh
+```
+
+Confirm the support matrix in [Production Readiness Matrix](production-readiness.md) still matches `/api/v1/adapters/health`.
+
 The publish workflow starts the target `greentic-desktop` binary with:
 
 ```bash

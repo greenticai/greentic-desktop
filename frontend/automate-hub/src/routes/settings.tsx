@@ -5,7 +5,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import type { ExtensionDto, LlmSettingsDto, SetupChecklistItemDto } from "@/lib/types";
+import type {
+  AdapterHealthDto,
+  ExtensionDto,
+  LlmSettingsDto,
+  SetupChecklistItemDto,
+} from "@/lib/types";
 import {
   Select,
   SelectContent,
@@ -107,6 +112,10 @@ function SettingsPage() {
 
   const runtime = useQuery({ queryKey: ["runtime-info"], queryFn: api.runtimeInfo });
   const setup = useQuery({ queryKey: ["setup-checklist"], queryFn: api.setupChecklist });
+  const adapterHealth = useQuery({
+    queryKey: ["adapter-health"],
+    queryFn: api.adapterHealth,
+  });
   const recommended = useQuery({
     queryKey: ["extensions-recommended", query],
     queryFn: () =>
@@ -138,6 +147,7 @@ function SettingsPage() {
         queryClient.refetchQueries({ queryKey: ["extensions-recommended"] }),
         queryClient.refetchQueries({ queryKey: ["setup-checklist"] }),
         queryClient.refetchQueries({ queryKey: ["runtime-info"] }),
+        queryClient.refetchQueries({ queryKey: ["adapter-health"] }),
       ]);
       setActionStatus(`${result.id ?? "extension"}: ${result.status}`);
     },
@@ -219,6 +229,30 @@ function SettingsPage() {
                 </Button>
               )}
             </li>
+          ))}
+        </ul>
+      </Card>
+
+      <Card
+        title="Adapter readiness"
+        description="Run and recording availability are based on these live checks."
+      >
+        {adapterHealth.isError && (
+          <div className="text-sm text-destructive">Could not load adapter readiness.</div>
+        )}
+        {adapterHealth.isLoading && (
+          <div className="text-sm text-muted-foreground">Loading adapter readiness...</div>
+        )}
+        {!adapterHealth.isLoading &&
+          !adapterHealth.isError &&
+          (adapterHealth.data?.adapters.length ?? 0) === 0 && (
+            <div className="text-sm text-muted-foreground">
+              No executable adapters are available.
+            </div>
+          )}
+        <ul className="divide-y">
+          {(adapterHealth.data?.adapters ?? []).map((adapter) => (
+            <AdapterHealthRow key={adapter.id} adapter={adapter} />
           ))}
         </ul>
       </Card>
@@ -393,6 +427,38 @@ function SettingsPage() {
         </Card>
       )}
     </div>
+  );
+}
+
+function AdapterHealthRow({ adapter }: { adapter: AdapterHealthDto }) {
+  return (
+    <li className="py-3">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{adapter.id}</div>
+          <div className="mt-1 text-xs text-muted-foreground">{adapter.message}</div>
+        </div>
+        <span
+          className={`shrink-0 text-xs font-medium ${
+            adapter.healthy ? "text-success" : "text-warning"
+          }`}
+        >
+          {adapter.readiness}
+        </span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+        {adapter.executableCapabilities.slice(0, 8).map((capability) => (
+          <span key={capability}>{capability}</span>
+        ))}
+        {adapter.executableCapabilities.length > 8 && (
+          <span>+{adapter.executableCapabilities.length - 8} capabilities</span>
+        )}
+        {adapter.recordableTargets.map((target) => (
+          <span key={target}>records {target}</span>
+        ))}
+        {adapter.logPath && <span>{adapter.logPath}</span>}
+      </div>
+    </li>
   );
 }
 

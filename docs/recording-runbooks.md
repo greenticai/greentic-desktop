@@ -2,6 +2,8 @@
 
 Greentic Desktop records controlled automation sessions. It does not silently record arbitrary tabs, unmanaged terminal windows, or unrelated desktop apps. A recording is either attached to an active backend with a heartbeat, observe-only with an explicit limitation, or blocked with a concrete reason.
 
+For replay readiness, output proof, and the complete target support matrix, see [Production Readiness Matrix](production-readiness.md).
+
 ## Target Matrix
 
 | Target | What is recorded first | Required setup | Fast automated coverage |

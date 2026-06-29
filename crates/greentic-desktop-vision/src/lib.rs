@@ -6,10 +6,13 @@ use greentic_desktop_recorder::{
     RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
     RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
 };
-use std::sync::{Arc, Mutex};
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 pub const VISION_ADAPTER_ID: &str = "greentic.desktop.vision";
 pub const REMOTE_RECORDER_BACKEND_ID: &str = "greentic.recording.remote.vision";
+const VISION_BACKEND_COMMAND_ENV: &str = "GREENTIC_VISION_BACKEND_COMMAND";
+const REMOTE_VIEWPORT_PROVIDER_COMMAND_ENV: &str = "GREENTIC_REMOTE_VIEWPORT_PROVIDER_COMMAND";
 
 pub fn vision_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -66,6 +69,7 @@ pub struct RemoteVisionRecordingBackend {
     screen_capture_available: bool,
     input_control_available: bool,
     calibration: Option<RemoteViewportCalibration>,
+    provider_command: Option<String>,
 }
 
 impl RemoteVisionRecordingBackend {
@@ -80,6 +84,25 @@ impl RemoteVisionRecordingBackend {
             screen_capture_available,
             input_control_available,
             calibration,
+            provider_command: std::env::var(REMOTE_VIEWPORT_PROVIDER_COMMAND_ENV)
+                .ok()
+                .filter(|command| !command.trim().is_empty()),
+        }
+    }
+
+    pub fn with_provider_command(
+        greentic_owned_session: bool,
+        screen_capture_available: bool,
+        input_control_available: bool,
+        calibration: Option<RemoteViewportCalibration>,
+        provider_command: impl Into<String>,
+    ) -> Self {
+        Self {
+            greentic_owned_session,
+            screen_capture_available,
+            input_control_available,
+            calibration,
+            provider_command: Some(provider_command.into()),
         }
     }
 }
@@ -116,6 +139,11 @@ impl RecordingBackend for RemoteVisionRecordingBackend {
                     .to_owned(),
             );
         }
+        if self.provider_command.is_none() {
+            reasons.push(format!(
+                "Remote viewport provider is not configured. Set {REMOTE_VIEWPORT_PROVIDER_COMMAND_ENV}."
+            ));
+        }
 
         if reasons.is_empty() {
             RecordingPreflight::ready()
@@ -127,39 +155,104 @@ impl RecordingBackend for RemoteVisionRecordingBackend {
         }
     }
 
-    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
-        let calibration = self.calibration.unwrap_or(RemoteViewportCalibration {
-            origin_x: 0,
-            origin_y: 0,
-            width: 0,
-            height: 0,
-            scale_percent: 100,
-        });
-        let mut event = RecordingEventEnvelope::new(
-            sink.session_id(),
-            REMOTE_RECORDER_BACKEND_ID,
-            RecordingTargetKind::Remote,
-            1,
-            "focus_session",
-        );
-        event.target_json = format!(
-            r#"{{"viewport":{{"x":{},"y":{},"width":{},"height":{},"scale_percent":{}}},"ownership":"greentic-owned"}}"#,
-            calibration.origin_x,
-            calibration.origin_y,
-            calibration.width,
-            calibration.height,
-            calibration.scale_percent
-        );
-        event.value = Some("remote viewport focused".to_owned());
-        event.screenshot_ref = Some("evidence://remote/initial.png".to_owned());
-        let _ = sink.append_event(event);
-        let _ = sink.update_heartbeat();
+    fn start(&self, request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        if let (Some(command), Some(calibration)) =
+            (self.provider_command.clone(), self.calibration)
+        {
+            run_remote_viewport_provider_command(command, calibration, request, sink.clone());
+        } else {
+            let _ = sink.append_backend_warning(
+                "remote viewport provider or calibration missing; no synthetic remote events were generated",
+            );
+        }
 
         RecordingHandle {
             backend_id: REMOTE_RECORDER_BACKEND_ID.to_owned(),
             capture_state: RecordingCaptureState::Recording,
         }
     }
+}
+
+fn run_remote_viewport_provider_command(
+    command: String,
+    calibration: RemoteViewportCalibration,
+    request: RecordingStartRequest,
+    sink: RecordingEventSink,
+) {
+    let output = shell_command(&command)
+        .env("GREENTIC_RECORDING_SESSION_ID", sink.session_id())
+        .env("GREENTIC_RECORDING_ROOT", request.out.display().to_string())
+        .env(
+            "GREENTIC_REMOTE_VIEWPORT_X",
+            calibration.origin_x.to_string(),
+        )
+        .env(
+            "GREENTIC_REMOTE_VIEWPORT_Y",
+            calibration.origin_y.to_string(),
+        )
+        .env(
+            "GREENTIC_REMOTE_VIEWPORT_WIDTH",
+            calibration.width.to_string(),
+        )
+        .env(
+            "GREENTIC_REMOTE_VIEWPORT_HEIGHT",
+            calibration.height.to_string(),
+        )
+        .env(
+            "GREENTIC_REMOTE_VIEWPORT_SCALE_PERCENT",
+            calibration.scale_percent.to_string(),
+        )
+        .stdin(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        let _ = sink.append_backend_warning("failed to run remote viewport provider command");
+        return;
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = sink.append_backend_warning(&format!(
+            "remote viewport provider exited with status {:?}: {}",
+            output.status.code(),
+            stderr.trim()
+        ));
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for (index, line) in stdout.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = parse_remote_provider_event(sink.session_id(), index as u64 + 1, line);
+        let _ = sink.append_event(event);
+        let _ = sink.update_heartbeat();
+    }
+}
+
+fn parse_remote_provider_event(
+    session_id: &str,
+    sequence: u64,
+    line: &str,
+) -> RecordingEventEnvelope {
+    let parts: Vec<&str> = line.split(',').collect();
+    let kind = parts.first().copied().unwrap_or("viewport_event");
+    let region = if parts.len() >= 5 {
+        Region {
+            x: parts[1].trim().parse().unwrap_or_default(),
+            y: parts[2].trim().parse().unwrap_or_default(),
+            width: parts[3].trim().parse().unwrap_or_default(),
+            height: parts[4].trim().parse().unwrap_or_default(),
+        }
+    } else {
+        Region {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }
+    };
+    let value = parts.get(5).map(|value| value.trim().to_owned());
+    let screenshot_ref = parts.get(6).map(|value| value.trim().to_owned());
+    remote_recording_event(session_id, sequence, kind, region, value, screenshot_ref)
 }
 
 pub fn remote_recording_event(
@@ -191,83 +284,30 @@ pub fn remote_recording_event(
     event
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VisionAdapter {
-    state: Arc<Mutex<VisionState>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct VisionState {
-    screenshot: String,
-    visible_text: Vec<VisionMatch>,
-    evidence: Vec<VisualEvidence>,
-    recorded: Vec<RecordedEvent>,
+    backend_command: Option<String>,
 }
 
 impl VisionAdapter {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            backend_command: std::env::var(VISION_BACKEND_COMMAND_ENV)
+                .ok()
+                .filter(|command| !command.trim().is_empty()),
+        }
     }
 
-    pub fn load_screenshot(&self, screenshot: impl Into<String>) {
-        self.state
-            .lock()
-            .expect("vision adapter mutex poisoned")
-            .screenshot = screenshot.into();
+    pub fn with_backend_command(command: impl Into<String>) -> Self {
+        Self {
+            backend_command: Some(command.into()),
+        }
     }
+}
 
-    pub fn add_text_match(&self, label: impl Into<String>, region: Region, confidence: f32) {
-        self.state
-            .lock()
-            .expect("vision adapter mutex poisoned")
-            .visible_text
-            .push(VisionMatch {
-                label: label.into(),
-                region,
-                confidence,
-            });
-    }
-
-    pub fn find_text(&self, text: &str, min_confidence: f32) -> Option<VisionMatch> {
-        self.state
-            .lock()
-            .expect("vision adapter mutex poisoned")
-            .visible_text
-            .iter()
-            .find(|item| item.label.contains(text) && item.confidence >= min_confidence)
-            .cloned()
-    }
-
-    pub fn compare_baseline(&self, baseline: &str) -> VisualEvidence {
-        let mut state = self.state.lock().expect("vision adapter mutex poisoned");
-        let passed = state.screenshot == baseline;
-        let evidence = VisualEvidence {
-            before_screenshot: baseline.to_owned(),
-            annotated_region: Region {
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
-            },
-            confidence: if passed { 1.0 } else { 0.0 },
-            after_screenshot: state.screenshot.clone(),
-            explanation: if passed {
-                "current screen matches baseline".to_owned()
-            } else {
-                "current screen differs from baseline".to_owned()
-            },
-        };
-        state.evidence.push(evidence.clone());
-        evidence
-    }
-
-    pub fn latest_evidence(&self) -> Option<VisualEvidence> {
-        self.state
-            .lock()
-            .expect("vision adapter mutex poisoned")
-            .evidence
-            .last()
-            .cloned()
+impl Default for VisionAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -277,17 +317,20 @@ impl DesktopAdapter for VisionAdapter {
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        let state = self.state.lock().expect("vision adapter mutex poisoned");
+        let output = self.run_backend(VisionBackendAction::Observe, None, None)?;
         Ok(Observation {
             adapter_id: VISION_ADAPTER_ID.to_owned(),
-            summary: format!(
-                "vision session {} screenshot={}",
-                ctx.session_id, state.screenshot
-            ),
-            visible_text: state
-                .visible_text
+            summary: output.message.unwrap_or_else(|| {
+                format!(
+                    "vision session {} observed through configured backend",
+                    ctx.session_id
+                )
+            }),
+            visible_text: output
+                .matches
                 .iter()
                 .map(|item| item.label.clone())
+                .chain(output.visible_text)
                 .collect(),
         })
     }
@@ -299,45 +342,15 @@ impl DesktopAdapter for VisionAdapter {
             ));
         }
 
-        let mut state = self.state.lock().expect("vision adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "vision.screenshot" => {
-                state.screenshot = step.value.clone().unwrap_or_else(|| "screen".to_owned());
-            }
-            "vision.click_region" => {
-                let region = Region {
-                    x: 10,
-                    y: 10,
-                    width: 40,
-                    height: 20,
-                };
-                let evidence = VisualEvidence {
-                    before_screenshot: state.screenshot.clone(),
-                    annotated_region: region,
-                    confidence: 0.95,
-                    after_screenshot: state.screenshot.clone(),
-                    explanation: "clicked visually identified region".to_owned(),
-                };
-                state.evidence.push(evidence);
-            }
-            "vision.find_text"
-            | "vision.find_button"
-            | "vision.compare_baseline"
-            | "vision.assert_visual"
-            | "vision.extract_text" => {}
-            _ => {}
-        }
-
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
+        let output = self.run_backend(VisionBackendAction::Execute, Some(&step), None)?;
 
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: "vision step accepted".to_owned(),
+            message: output
+                .message
+                .or_else(|| output.evidence.map(|evidence| evidence.explanation))
+                .unwrap_or_else(|| "vision step completed by configured backend".to_owned()),
         })
     }
 
@@ -348,22 +361,25 @@ impl DesktopAdapter for VisionAdapter {
             ));
         }
 
-        let passed = match assertion.required_capability.as_str() {
-            "vision.find_text" | "vision.find_button" | "vision.extract_text" => {
-                self.find_text(&assertion.expected, 0.70).is_some()
-            }
-            "vision.compare_baseline" | "vision.assert_visual" => {
-                self.compare_baseline(&assertion.expected).confidence >= 0.99
-            }
-            _ => true,
-        };
+        let output = self.run_backend(VisionBackendAction::Validate, None, Some(&assertion))?;
+        let passed = output.passed.unwrap_or_else(|| {
+            output
+                .matches
+                .iter()
+                .any(|item| item.label.contains(&assertion.expected) && item.confidence >= 0.70)
+                || output
+                    .visible_text
+                    .iter()
+                    .any(|text| text.contains(&assertion.expected))
+        });
 
         Ok(AssertionResult {
             assertion_id: assertion.id,
             passed,
-            message: self
-                .latest_evidence()
+            message: output
+                .evidence
                 .map(|evidence| evidence.explanation)
+                .or(output.message)
                 .unwrap_or_else(|| {
                     if passed {
                         "vision assertion passed".to_owned()
@@ -375,20 +391,222 @@ impl DesktopAdapter for VisionAdapter {
     }
 
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
-        Ok(self
-            .state
-            .lock()
-            .expect("vision adapter mutex poisoned")
-            .recorded
-            .last()
-            .cloned())
+        Ok(None)
     }
+}
+
+impl VisionAdapter {
+    fn run_backend(
+        &self,
+        action: VisionBackendAction,
+        step: Option<&RunnerStep>,
+        assertion: Option<&Assertion>,
+    ) -> AdapterResult<VisionBackendOutput> {
+        let Some(command) = &self.backend_command else {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "No vision backend is configured. Set {VISION_BACKEND_COMMAND_ENV} to a screenshot/OCR/input backend command."
+            )));
+        };
+        run_vision_backend_command(command, action, step, assertion)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VisionBackendAction {
+    Execute,
+    Observe,
+    Validate,
+}
+
+impl VisionBackendAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            VisionBackendAction::Execute => "execute",
+            VisionBackendAction::Observe => "observe",
+            VisionBackendAction::Validate => "validate",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct VisionBackendOutput {
+    visible_text: Vec<String>,
+    matches: Vec<VisionMatch>,
+    evidence: Option<VisualEvidence>,
+    message: Option<String>,
+    passed: Option<bool>,
+}
+
+fn run_vision_backend_command(
+    backend_command: &str,
+    action: VisionBackendAction,
+    step: Option<&RunnerStep>,
+    assertion: Option<&Assertion>,
+) -> AdapterResult<VisionBackendOutput> {
+    let mut command = shell_command(backend_command);
+    command
+        .env("GREENTIC_VISION_ACTION", action.as_str())
+        .env("GREENTIC_VISION_ADAPTER_ID", VISION_ADAPTER_ID)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(step) = step {
+        command
+            .env("GREENTIC_VISION_STEP_ID", &step.id)
+            .env("GREENTIC_VISION_CAPABILITY", &step.required_capability)
+            .env("GREENTIC_VISION_STEP_ACTION", &step.action)
+            .env("GREENTIC_VISION_VALUE", step.value.as_deref().unwrap_or(""));
+    }
+    if let Some(assertion) = assertion {
+        command
+            .env("GREENTIC_VISION_ASSERTION_ID", &assertion.id)
+            .env("GREENTIC_VISION_CAPABILITY", &assertion.required_capability)
+            .env("GREENTIC_VISION_EXPECTED", &assertion.expected);
+    }
+    let mut child = command.spawn().map_err(|err| {
+        AdapterError::ExecutionFailed(format!("vision backend failed to start: {err}"))
+    })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        let payload = vision_backend_payload(step, assertion);
+        stdin.write_all(payload.as_bytes()).map_err(|err| {
+            AdapterError::ExecutionFailed(format!("vision backend stdin failed: {err}"))
+        })?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("vision backend failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AdapterError::ExecutionFailed(format!(
+            "vision backend action {} failed with status {:?}: {}",
+            action.as_str(),
+            output.status.code(),
+            stderr.trim()
+        )));
+    }
+    parse_vision_backend_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn shell_command(command: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    } else {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-lc").arg(command);
+        cmd
+    }
+}
+
+fn vision_backend_payload(step: Option<&RunnerStep>, assertion: Option<&Assertion>) -> String {
+    if let Some(step) = step {
+        return format!(
+            "kind=step\nid={}\ncapability={}\naction={}\nvalue={}\n",
+            step.id,
+            step.required_capability,
+            step.action,
+            step.value.as_deref().unwrap_or("")
+        );
+    }
+    if let Some(assertion) = assertion {
+        return format!(
+            "kind=assertion\nid={}\ncapability={}\nexpected={}\n",
+            assertion.id, assertion.required_capability, assertion.expected
+        );
+    }
+    "kind=observe\n".to_owned()
+}
+
+fn parse_vision_backend_output(stdout: &str) -> AdapterResult<VisionBackendOutput> {
+    let mut output = VisionBackendOutput::default();
+    for line in stdout.lines() {
+        if let Some(value) = line.strip_prefix("message:") {
+            output.message = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("text:") {
+            output.visible_text.push(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("match:") {
+            output.matches.push(parse_vision_match(value)?);
+        } else if let Some(value) = line.strip_prefix("evidence:") {
+            output.evidence = Some(parse_visual_evidence(value)?);
+        } else if let Some(value) = line.strip_prefix("passed:") {
+            output.passed = Some(value.trim().eq_ignore_ascii_case("true"));
+        } else if !line.trim().is_empty() {
+            output.visible_text.push(line.to_owned());
+        }
+    }
+    Ok(output)
+}
+
+fn parse_vision_match(value: &str) -> AdapterResult<VisionMatch> {
+    let parts: Vec<&str> = delimited_parts(value);
+    if parts.len() != 6 {
+        return Err(AdapterError::ExecutionFailed(format!(
+            "vision backend emitted invalid match record: {value}"
+        )));
+    }
+    Ok(VisionMatch {
+        label: parts[0].to_owned(),
+        region: Region {
+            x: parse_u32(parts[1], "match x")?,
+            y: parse_u32(parts[2], "match y")?,
+            width: parse_u32(parts[3], "match width")?,
+            height: parse_u32(parts[4], "match height")?,
+        },
+        confidence: parse_f32(parts[5], "match confidence")?,
+    })
+}
+
+fn parse_visual_evidence(value: &str) -> AdapterResult<VisualEvidence> {
+    let parts: Vec<&str> = delimited_parts(value);
+    if parts.len() != 8 {
+        return Err(AdapterError::ExecutionFailed(format!(
+            "vision backend emitted invalid evidence record: {value}"
+        )));
+    }
+    Ok(VisualEvidence {
+        before_screenshot: parts[0].to_owned(),
+        annotated_region: Region {
+            x: parse_u32(parts[1], "evidence x")?,
+            y: parse_u32(parts[2], "evidence y")?,
+            width: parse_u32(parts[3], "evidence width")?,
+            height: parse_u32(parts[4], "evidence height")?,
+        },
+        confidence: parse_f32(parts[5], "evidence confidence")?,
+        after_screenshot: parts[6].to_owned(),
+        explanation: parts[7].to_owned(),
+    })
+}
+
+fn delimited_parts(value: &str) -> Vec<&str> {
+    if value.contains('|') {
+        value.split('|').collect()
+    } else {
+        value.split(',').collect()
+    }
+}
+
+fn parse_u32(value: &str, label: &str) -> AdapterResult<u32> {
+    value.trim().parse::<u32>().map_err(|err| {
+        AdapterError::ExecutionFailed(format!("vision backend emitted invalid {label}: {err}"))
+    })
+}
+
+fn parse_f32(value: &str, label: &str) -> AdapterResult<f32> {
+    value.trim().parse::<f32>().map_err(|err| {
+        AdapterError::ExecutionFailed(format!("vision backend emitted invalid {label}: {err}"))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use greentic_desktop_adapter::LocatorTarget;
+    use greentic_desktop_recorder::{
+        start_recording_session_with_registry, RecordingBackendRegistry,
+    };
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn exposes_vision_capabilities() {
@@ -400,30 +618,24 @@ mod tests {
     }
 
     #[test]
-    fn locates_visible_text_on_screen() {
-        let adapter = VisionAdapter::new();
-        adapter.add_text_match(
-            "Submit",
-            Region {
-                x: 20,
-                y: 30,
-                width: 80,
-                height: 24,
-            },
-            0.91,
-        );
+    fn parses_ocr_text_and_visual_matches_from_backend() {
+        let output = parse_vision_backend_output(
+            "message:captured\ntext:Submit\nmatch:Submit,20,30,80,24,0.91\npassed:true\n",
+        )
+        .expect("backend output should parse");
 
-        let found = adapter
-            .find_text("Submit", 0.80)
-            .expect("text should match");
-        assert_eq!(found.region.x, 20);
+        assert_eq!(output.visible_text, vec!["Submit"]);
+        assert_eq!(output.matches[0].region.x, 20);
+        assert_eq!(output.matches[0].confidence, 0.91);
+        assert_eq!(output.passed, Some(true));
     }
 
     #[test]
-    fn clicks_button_and_records_visual_evidence() {
-        let adapter = VisionAdapter::new();
-        adapter.load_screenshot("before");
-        adapter
+    fn click_region_requires_configured_backend_and_returns_evidence() {
+        let adapter = VisionAdapter::with_backend_command(
+            "echo message:clicked && echo evidence:before.png,20,30,80,24,0.94,after.png,clicked visually identified region",
+        );
+        let result = adapter
             .execute(RunnerStep {
                 id: "click".to_owned(),
                 action: "click_region".to_owned(),
@@ -431,18 +643,35 @@ mod tests {
                 value: None,
                 required_capability: "vision.click_region".to_owned(),
             })
-            .expect("click should be accepted");
+            .expect("click should use configured backend");
 
-        let evidence = adapter.latest_evidence().expect("evidence should exist");
-        assert_eq!(evidence.before_screenshot, "before");
-        assert!(evidence.confidence >= 0.9);
+        assert_eq!(result.message, "clicked");
     }
 
     #[test]
-    fn explains_visual_assertion_result() {
+    fn vision_step_fails_without_backend() {
         let adapter = VisionAdapter::new();
-        adapter.load_screenshot("current");
+        let err = adapter
+            .execute(RunnerStep {
+                id: "click".to_owned(),
+                action: "click_region".to_owned(),
+                target: LocatorTarget::default(),
+                value: None,
+                required_capability: "vision.click_region".to_owned(),
+            })
+            .expect_err("vision should fail without backend");
 
+        assert!(
+            err.to_string().contains("No vision backend is configured"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn explains_visual_assertion_result_from_backend() {
+        let adapter = VisionAdapter::with_backend_command(
+            "echo passed:false && echo evidence:baseline.png,0,0,100,100,0.20,current.png,current screen differs from baseline",
+        );
         let result = adapter
             .validate(Assertion {
                 id: "baseline".to_owned(),
@@ -450,7 +679,7 @@ mod tests {
                 target: LocatorTarget::default(),
                 expected: "baseline".to_owned(),
             })
-            .expect("visual assertion should run");
+            .expect("visual assertion should use configured backend");
 
         assert!(!result.passed);
         assert!(result.message.contains("differs"));
@@ -479,6 +708,59 @@ mod tests {
             .blocked_reasons
             .iter()
             .any(|reason| reason.contains("viewport calibration")));
+        assert!(preflight
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("Remote viewport provider")));
+    }
+
+    #[test]
+    fn remote_recording_uses_provider_events_instead_of_synthetic_focus() {
+        let root = temp_dir("greentic-remote-provider-recording");
+        let runtime_home = temp_dir("greentic-remote-provider-home");
+        let mut registry = RecordingBackendRegistry::new();
+        registry.register(RemoteVisionRecordingBackend::with_provider_command(
+            true,
+            true,
+            true,
+            Some(RemoteViewportCalibration {
+                origin_x: 5,
+                origin_y: 10,
+                width: 800,
+                height: 600,
+                scale_percent: 100,
+            }),
+            "echo click_region,12,20,80,24,Submit,evidence://remote/click.png",
+        ));
+
+        let manifest = start_recording_session_with_registry(
+            RecordingStartRequest {
+                name: "remote.real".to_owned(),
+                profile: "remote".to_owned(),
+                adapter: VISION_ADAPTER_ID.to_owned(),
+                target_kind: RecordingTargetKind::Remote,
+                out: root.clone(),
+                runtime_home,
+                redact: Vec::new(),
+                secret_fields: Vec::new(),
+            },
+            &registry,
+        )
+        .expect("remote recording should start");
+
+        assert_eq!(manifest.capture_state, RecordingCaptureState::Recording);
+        let raw_path = root.join("raw/events.jsonl");
+        let mut raw = String::new();
+        for _ in 0..20 {
+            raw = fs::read_to_string(&raw_path).unwrap_or_default();
+            if raw.contains("click_region") && raw.contains("evidence://remote/click.png") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        assert!(raw.contains(r#""kind":"click_region""#), "{raw}");
+        assert!(!raw.contains("focus_session"), "{raw}");
     }
 
     #[test]
@@ -501,5 +783,17 @@ mod tests {
         assert!(json.contains("\"target_kind\":\"remote\""));
         assert!(json.contains("\"x\":12"));
         assert!(json.contains("after-click.png"));
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("old temp dir should remove");
+        }
+        root
     }
 }

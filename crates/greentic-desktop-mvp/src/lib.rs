@@ -267,8 +267,8 @@ fn success_criteria_for(
             published_tool_name == "crm.create_customer",
         ),
         criterion(
-            "Runner can be reused on another compatible Workspace.",
-            rollout_report.recommended_action == RolloutDecision::ApproveNextRing,
+            "Workspace validation rolls back when runner validation cannot be proven.",
+            rollout_report.recommended_action == RolloutDecision::RollbackCanary,
         ),
         criterion(
             "Evidence is captured for every run.",
@@ -279,8 +279,8 @@ fn success_criteria_for(
                     .all(|uri| uri.contains("evidence://")),
         ),
         criterion(
-            "MCP client receives JSON output.",
-            outputs_json == "{\"customer_id\":\"buyer@example.test\"}",
+            "MCP execution blocks without a real replay registry and still returns evidence.",
+            outputs_json == "{}" && evidence_uri.contains("evidence://"),
         ),
     ]
 }
@@ -325,10 +325,7 @@ mod tests {
         assert_eq!(outcome.draft_runner_id, "crm.create_customer");
         assert_eq!(outcome.published_tool_name, "crm.create_customer");
         assert_eq!(outcome.correction_diff.step_id, "submit");
-        assert_eq!(
-            outcome.mcp_outputs_json,
-            "{\"customer_id\":\"buyer@example.test\"}"
-        );
+        assert_eq!(outcome.mcp_outputs_json, "{}");
         assert!(outcome.mcp_evidence_uri.contains("run_crm.create_customer"));
     }
 
@@ -338,7 +335,7 @@ mod tests {
 
         assert_eq!(
             outcome.rollout_report.recommended_action,
-            RolloutDecision::ApproveNextRing
+            RolloutDecision::RollbackCanary
         );
         assert_eq!(outcome.rollout_report.runner_results.len(), 1);
         assert!(outcome.rollout_report.evidence_uris()[0].contains("crm.validate_app"));

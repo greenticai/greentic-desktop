@@ -1,6 +1,5 @@
 use greentic_desktop_adapter::{
     select_best_adapter, validate_required_capabilities, AdapterCapabilities, CapabilityValidation,
-    DesktopAdapter, StaticAdapter,
 };
 use greentic_desktop_config::RuntimeConfig;
 use greentic_desktop_core::{
@@ -83,7 +82,7 @@ impl DesktopRuntime {
         Self {
             config,
             telemetry: TelemetryLog::default(),
-            adapters: vec![StaticAdapter::new(AdapterCapabilities::new(
+            adapters: vec![AdapterCapabilities::new(
                 "greentic.desktop.core",
                 env!("CARGO_PKG_VERSION"),
                 [
@@ -92,8 +91,7 @@ impl DesktopRuntime {
                     "desktop.mcp.serve",
                     "evidence.log",
                 ],
-            ))
-            .capabilities()],
+            )],
         }
     }
 

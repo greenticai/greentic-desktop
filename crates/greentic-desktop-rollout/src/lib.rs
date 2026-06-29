@@ -171,7 +171,8 @@ mod tests {
         );
 
         assert_eq!(report.runner_results.len(), 2);
-        assert_eq!(report.recommended_action, RolloutDecision::ApproveNextRing);
+        assert_eq!(report.failure_count(), 2);
+        assert_eq!(report.recommended_action, RolloutDecision::RollbackCanary);
     }
 
     #[test]

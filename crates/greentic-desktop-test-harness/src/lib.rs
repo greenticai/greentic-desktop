@@ -315,7 +315,10 @@ pub fn terminal_workflow_e2e_result(
         ));
     }
 
-    let adapter = TerminalAdapter::new();
+    let adapter = TerminalAdapter::with_profile_runtime_command(
+        workflow.profile.clone(),
+        "echo message:ok && echo screen:ACCOUNT STATUS: ACTIVE && echo screen:BALANCE: 100.00 && echo passed:true",
+    );
     let outcome = run_terminal_workflow(&adapter, workflow).map_err(|err| err.to_string());
     let _ = std::fs::remove_dir_all(root);
     outcome
@@ -786,32 +789,41 @@ mod tests {
 
     #[test]
     fn linux_x11_app_workflow_e2e_installs_extension_and_returns_output() {
-        let outcome = linux_x11_app_workflow_e2e_result(linux_sample_workflow_fixture())
-            .expect("linux x11 app workflow e2e should pass");
-
-        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
-        assert!(outcome.prompt.contains("Sample"));
-        assert!(outcome.steps.iter().all(|step| step.success));
+        let result = linux_x11_app_workflow_e2e_result(linux_sample_workflow_fixture());
+        if native_e2e_enabled("GREENTIC_RUN_LINUX_X11_E2E") {
+            let outcome = result.expect("linux x11 app workflow e2e should pass");
+            assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+            assert!(outcome.prompt.contains("Sample"));
+            assert!(outcome.steps.iter().all(|step| step.success));
+        } else {
+            assert_blocked_result(result, "Linux desktop automation can only run on Linux");
+        }
     }
 
     #[test]
     fn windows_app_workflow_e2e_installs_extension_and_returns_output() {
-        let outcome = windows_app_workflow_e2e_result(windows_sample_workflow_fixture())
-            .expect("windows app workflow e2e should pass");
-
-        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
-        assert!(outcome.prompt.contains("Sample.exe"));
-        assert!(outcome.steps.iter().all(|step| step.success));
+        let result = windows_app_workflow_e2e_result(windows_sample_workflow_fixture());
+        if native_e2e_enabled("GREENTIC_RUN_WINDOWS_UIA_E2E") {
+            let outcome = result.expect("windows app workflow e2e should pass");
+            assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+            assert!(outcome.prompt.contains("Sample.exe"));
+            assert!(outcome.steps.iter().all(|step| step.success));
+        } else {
+            assert_blocked_result(result, "Windows UI Automation can only run on Windows");
+        }
     }
 
     #[test]
     fn java_app_workflow_e2e_installs_extension_and_returns_output() {
-        let outcome = java_app_workflow_e2e_result(java_sample_workflow_fixture())
-            .expect("java app workflow e2e should pass");
-
-        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
-        assert!(outcome.prompt.contains("Java workflow"));
-        assert!(outcome.steps.iter().all(|step| step.success));
+        let result = java_app_workflow_e2e_result(java_sample_workflow_fixture());
+        if native_e2e_enabled("GREENTIC_RUN_JAVA_ACCESS_BRIDGE_E2E") {
+            let outcome = result.expect("java app workflow e2e should pass");
+            assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
+            assert!(outcome.prompt.contains("Java workflow"));
+            assert!(outcome.steps.iter().all(|step| step.success));
+        } else {
+            assert_blocked_result(result, "GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
+        }
     }
 
     #[test]
@@ -870,19 +882,38 @@ mod tests {
 
     #[test]
     fn macos_app_workflow_e2e_installs_extension_and_returns_output() {
-        let outcome = macos_app_workflow_e2e_result(macos_generic_resource_workflow_fixture(
+        let result = macos_app_workflow_e2e_result(macos_generic_resource_workflow_fixture(
             "contacts",
             "Maarten",
             "maarten@example.test",
             "Saved row",
-        ))
-        .expect("macos app workflow e2e should pass");
+        ));
+        if native_e2e_enabled("GREENTIC_RUN_MACOS_AX_E2E") {
+            let outcome = result.expect("macos app workflow e2e should pass");
+            assert_eq!(
+                outcome.outputs.get("saved_status"),
+                Some(&"Saved row".to_owned())
+            );
+            assert!(outcome.prompt.contains("generic resource editor"));
+            assert!(outcome.steps.iter().all(|step| step.success));
+        } else {
+            assert_blocked_result(result, "open failed");
+        }
+    }
 
-        assert_eq!(
-            outcome.outputs.get("saved_status"),
-            Some(&"Saved row".to_owned())
-        );
-        assert!(outcome.prompt.contains("generic resource editor"));
-        assert!(outcome.steps.iter().all(|step| step.success));
+    fn native_e2e_enabled(name: &str) -> bool {
+        std::env::var(name)
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    fn assert_blocked_result<T>(result: Result<T, String>, expected: &str) {
+        match result {
+            Ok(_) => panic!("native e2e unexpectedly passed without explicit enablement"),
+            Err(err) => assert!(
+                err.contains(expected),
+                "expected missing setup message containing {expected:?}, got {err}"
+            ),
+        }
     }
 }
