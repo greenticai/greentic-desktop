@@ -102,11 +102,7 @@ Use vision locators carefully:
 
 ## Use As An MCP Tool
 
-Start MCP after the runner is approved:
-
-```bash
-greentic-desktop mcp serve
-```
+Start the managed MCP endpoint from Automate Hub **My Runners** after the runner is approved.
 
 Example MCP call:
 

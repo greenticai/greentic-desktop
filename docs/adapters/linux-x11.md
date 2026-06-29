@@ -97,11 +97,7 @@ Use `linux.read_window_tree` during review to inspect the available UI tree.
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 

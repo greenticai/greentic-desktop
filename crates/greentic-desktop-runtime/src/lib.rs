@@ -1,4 +1,3 @@
-use axum::{routing::get, Json, Router};
 use greentic_desktop_adapter::{
     select_best_adapter, validate_required_capabilities, AdapterCapabilities, CapabilityValidation,
 };
@@ -23,9 +22,6 @@ use rmcp::{
         ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
-    transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-    },
     ServerHandler,
 };
 use std::collections::BTreeMap;
@@ -389,11 +385,9 @@ impl DesktopRuntime {
 
     pub fn serve_mcp(&self, bind: &str) -> Result<(), RuntimeError> {
         self.telemetry.record("tool_call", "desktop.mcp.serve");
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| RuntimeError::Pack(format!("failed to start MCP runtime: {err}")))?
-            .block_on(serve_runtime_mcp(bind.to_owned()))
+        Err(RuntimeError::Pack(format!(
+            "standalone CLI MCP server is disabled because it cannot load and execute installed runner packs yet. Start the managed MCP server from the Automate Hub GUI instead. Requested bind: {bind}"
+        )))
     }
 
     fn find_runner_manifest(&self, runner_id: &str) -> Result<PathBuf, RuntimeError> {
@@ -581,27 +575,6 @@ impl ServerHandler for RuntimeMcpServer {
         let result = state.call_tool_with_arguments(request.name.into_owned(), arguments);
         Ok(rmcp_call_tool_result(&result))
     }
-}
-
-async fn serve_runtime_mcp(bind: String) -> Result<(), RuntimeError> {
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    let config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(false)
-        .with_json_response(true)
-        .with_allowed_hosts(["localhost", "127.0.0.1", "::1"]);
-    let server = RuntimeMcpServer::new(McpServerState::new(Vec::new(), Vec::<String>::new()));
-    let mcp_service: StreamableHttpService<RuntimeMcpServer, LocalSessionManager> =
-        StreamableHttpService::new(move || Ok(server.clone()), Default::default(), config);
-    let router = Router::new()
-        .route(
-            "/health",
-            get(|| async { Json(serde_json::json!({"status": "ok"})) }),
-        )
-        .nest_service("/mcp", mcp_service);
-
-    axum::serve(listener, router)
-        .await
-        .map_err(|err| RuntimeError::Pack(format!("MCP HTTP server failed: {err}")))
 }
 
 fn mcp_arguments_to_strings(arguments: JsonObject) -> BTreeMap<String, String> {

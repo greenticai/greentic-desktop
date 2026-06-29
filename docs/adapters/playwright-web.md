@@ -125,11 +125,7 @@ Avoid raw coordinates for browser workflows. They are fragile across screen size
 
 ## Use As An MCP Tool
 
-After review, package/sign/publish the runner and expose it as an MCP tool. Start the endpoint:
-
-```bash
-greentic-desktop mcp serve
-```
+After review, package/sign/publish the runner and expose it as an MCP tool. Start the managed endpoint from Automate Hub **My Runners**.
 
 Then call it from an MCP client using `tools/call`:
 

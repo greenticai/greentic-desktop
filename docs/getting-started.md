@@ -148,13 +148,9 @@ The repository models both local and forwarded MCP execution for runners that ne
 
 ## 8. Serve And Use MCP Tools
 
-Greentic Desktop can serve approved runners as MCP tools:
+Greentic Desktop can serve approved runners as MCP tools from the Automate Hub **My Runners** screen. Start the managed MCP server there after saving a runner.
 
-```bash
-greentic-desktop mcp serve
-```
-
-The default bind address is:
+The default managed bind address is:
 
 ```text
 127.0.0.1:8799

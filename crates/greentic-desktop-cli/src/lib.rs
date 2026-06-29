@@ -1024,7 +1024,7 @@ exit 2
     }
 
     #[test]
-    fn unknown_extension_and_invalid_mcp_bind_return_errors() {
+    fn unknown_extension_and_standalone_mcp_serve_return_errors() {
         with_temp_home(|_| {
             let mut output = Vec::new();
             let err = run_with_writer(
@@ -1049,8 +1049,12 @@ exit 2
                 false,
                 &mut output,
             )
-            .expect_err("invalid bind should fail");
-            assert!(!err.to_string().is_empty());
+            .expect_err("standalone mcp serve should fail");
+            assert!(
+                err.to_string()
+                    .contains("standalone CLI MCP server is disabled"),
+                "{err}"
+            );
         });
     }
 

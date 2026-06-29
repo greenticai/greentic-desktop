@@ -211,16 +211,12 @@ greentic-desktop record finalise \
 
 ## MCP Server
 
-Start the MCP endpoint on the default address:
+The production MCP server is managed by Automate Hub from **My Runners**. Each saved ready runner is exposed as an MCP tool, and MCP calls use the same execution path as the Run button.
+
+The standalone CLI command is intentionally disabled until the runtime can load and execute installed `.gtpack` runner packages without the GUI runner store:
 
 ```bash
 greentic-desktop mcp serve
-```
-
-Start it on a specific address:
-
-```bash
-greentic-desktop mcp serve --bind 127.0.0.1:8799
 ```
 
 ## `gtc desktop` Form

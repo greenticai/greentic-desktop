@@ -90,7 +90,7 @@ double-click `greentic-desktop.exe` to open Automate Hub. Public
 release assets; private GitHub releases need an authenticated distribution path.
 See [Release And Installation](docs/release.md).
 
-From this repository, `greentic-desktop` with no arguments starts the local Automate Hub GUI, opens the default browser, and serves the embedded frontend from a loopback address. The current CLI can also show runtime information, initialize local storage, manage built-in extensions, plan draft runners, manage recording sessions, list local runner packages, and serve a small MCP endpoint.
+From this repository, `greentic-desktop` with no arguments starts the local Automate Hub GUI, opens the default browser, and serves the embedded frontend from a loopback address. The current CLI can also show runtime information, initialize local storage, manage built-in extensions, plan draft runners, manage recording sessions, and list local runner packages. Start, stop, or restart the usable MCP server from Automate Hub's **My Runners** screen.
 
 ```bash
 greentic-desktop
@@ -102,7 +102,6 @@ greentic-desktop extension list
 greentic-desktop runner list
 greentic-desktop runner plan --prompt "Open a resource table, ask for resource_name, name, and email, append a row, save, and return saved_status" --dry-run
 greentic-desktop record start --name generic.resource_append --profile local-web --adapter greentic.desktop.playwright --out ./recordings/generic.resource_append
-greentic-desktop mcp serve
 ```
 
 The same commands are also available through the `gtc desktop` form:

@@ -98,11 +98,7 @@ Use `windows.read_window_tree` during review to inspect available metadata and h
 
 ## Use As An MCP Tool
 
-Expose the approved runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+Expose the approved runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 

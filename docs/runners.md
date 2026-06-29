@@ -95,11 +95,7 @@ The `runner pack` command generates a temporary `answers.json` and delegates to 
 
 ## Use A Runner
 
-After a runner is approved and exposed as an MCP tool, start the MCP endpoint:
-
-```bash
-greentic-desktop mcp serve
-```
+After a runner is approved and exposed as an MCP tool, start the managed MCP endpoint from Automate Hub **My Runners**.
 
 For local desktop agents, stdio is the preferred MCP transport. When the GUI starts an HTTP MCP listener, requests must include the local session bearer token and must come from a localhost origin. Do not expose the HTTP MCP listener on an untrusted interface.
 

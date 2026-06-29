@@ -102,11 +102,7 @@ Use `java.capture_tree` during review to confirm the component tree exposes stab
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 

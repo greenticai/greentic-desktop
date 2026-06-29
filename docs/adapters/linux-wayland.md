@@ -92,11 +92,7 @@ Do not design Wayland runners around global coordinates, arbitrary pointer click
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 

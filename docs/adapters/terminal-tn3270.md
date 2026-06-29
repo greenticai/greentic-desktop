@@ -107,11 +107,7 @@ Avoid timing-only waits. Prefer `terminal.wait_for_screen` with expected text.
 
 ## Use As An MCP Tool
 
-After review and approval, expose the runner through MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After review and approval, expose the runner through the managed MCP endpoint in Automate Hub **My Runners**.
 
 An MCP client can call a terminal runner with business inputs:
 
