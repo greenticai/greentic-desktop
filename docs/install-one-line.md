@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/in
 Install a specific release tag:
 
 ```bash
-GREENTIC_DESKTOP_VERSION=v0.1.7 curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
+GREENTIC_DESKTOP_VERSION=v0.1.9 curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
 ```
 
 Skip first-time initialization:
@@ -57,7 +57,7 @@ irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.p
 Install a specific release tag:
 
 ```powershell
-$env:GREENTIC_DESKTOP_VERSION="v0.1.7"; irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
+$env:GREENTIC_DESKTOP_VERSION="v0.1.9"; irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
 ```
 
 Skip first-time initialization:

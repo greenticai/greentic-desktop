@@ -32,7 +32,7 @@ The draft view shows typed inputs, required secrets, output extractors, required
 
 Open **Create**, choose recording, select a target such as Browser task or Desktop app task, and start recording. During review, mark inputs, outputs, secrets, assertions, and notes. Normalise the recording, test it with sample values, then finalise it into the runtime runner folder.
 
-Settings includes an adapter readiness panel that reports installed adapters, sidecar/runtime readiness, executable capabilities, recordable targets, and the exact missing permission or dependency. For the target support matrix, see [Production Readiness Matrix](production-readiness.md).
+Settings includes an adapter readiness panel that reports installed adapters, sidecar/runtime readiness, maturity status, executable capabilities, recordable targets, and the exact missing permission or dependency. For the target support matrix, see [Capability Matrix](capability-matrix.md).
 
 Recording screens show whether a capture backend is active, blocked, paused, or stopped. For target-specific setup and troubleshooting, see [Recording Runbooks](recording-runbooks.md).
 

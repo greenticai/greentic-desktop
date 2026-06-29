@@ -144,24 +144,27 @@ pub fn run_crm_customer_mvp_demo() -> MvpDemoOutcome {
         apply_correction(&mut draft.package, correction).expect("demo correction must apply");
 
     let signing_key = SigningKey::new("mvp-root", "demo-material");
-    let signed = sign_manifest(
-        RunnerManifest {
-            runner_id: draft.package.id.clone(),
-            version: draft.package.version.clone(),
-            lifecycle: RunnerLifecycle::Published,
-            stage: RegistryStage::Prod,
-            scope: TenantScope {
-                tenant_id: "tenant_a".to_owned(),
-                team_id: "sales_ops".to_owned(),
-                private: true,
+    let signed =
+        sign_manifest(
+            RunnerManifest {
+                runner_id: draft.package.id.clone(),
+                version: draft.package.version.clone(),
+                lifecycle: RunnerLifecycle::Published,
+                stage: RegistryStage::Prod,
+                scope: TenantScope {
+                    tenant_id: "tenant_a".to_owned(),
+                    team_id: "sales_ops".to_owned(),
+                    private: true,
+                },
+                required_adapters: draft.required_adapters.clone(),
+                compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
+                package_checksum:
+                    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        .to_owned(),
             },
-            required_adapters: draft.required_adapters.clone(),
-            compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-            package_checksum: "sha256:mvp-demo".to_owned(),
-        },
-        &signing_key,
-    )
-    .expect("demo manifest signs");
+            &signing_key,
+        )
+        .expect("demo manifest signs");
 
     let built_tool = build_forwarded_tool(
         &signed,

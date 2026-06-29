@@ -6,16 +6,24 @@ use greentic_desktop_extension::{
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
 };
 use greentic_desktop_gui_assets::{asset, spa_asset, GuiAsset};
-use greentic_desktop_java::{JavaAccessBridgeRecordingBackend, JavaDesktopAdapter};
+use greentic_desktop_java::{
+    JavaAccessBridgeRecordingBackend, JavaDesktopAdapter, JAVA_ADAPTER_ID,
+};
 use greentic_desktop_linux::{
     detect_wayland_support, LinuxWaylandAdapter, LinuxWaylandRecordingBackend, LinuxX11Adapter,
-    LinuxX11RecordingBackend, WaylandCompositor,
+    LinuxX11RecordingBackend, WaylandCompositor, LINUX_WAYLAND_ADAPTER_ID, LINUX_X11_ADAPTER_ID,
 };
 use greentic_desktop_llm::{
     is_openai_compatible_provider, known_providers, provider_by_id, HeuristicLlmClient,
     LlmProvider, OpenAiCompatibleLlmClient,
 };
-use greentic_desktop_macos::{MacOsAccessibilityAdapter, MacOsAccessibilityRecordingBackend};
+use greentic_desktop_macos::{
+    MacOsAccessibilityAdapter, MacOsAccessibilityRecordingBackend, MACOS_ADAPTER_ID,
+};
+use greentic_desktop_mcp::{
+    mcp_tool_descriptor_for_package, parse_jsonrpc_request, render_initialize_response,
+    render_jsonrpc_error, render_tool_call_response, render_tools_list_response, McpCallResult,
+};
 use greentic_desktop_planner::{
     plan_prompt_with_llm, PlannerOptions, PlanningContext, RunnerDraft,
 };
@@ -30,11 +38,13 @@ use greentic_desktop_recorder::{
     RecordingTargetKind, RunnerPackage,
 };
 use greentic_desktop_replay::{
-    replay_with_context, AdapterRegistry, OnFailure, ReplayExecutionContext, ReplayRequest,
+    replay_with_context, AdapterRegistry, OnFailure, ReplayExecutionContext, ReplayOutcome,
+    ReplayRequest,
 };
 use greentic_desktop_runner_schema::{
     OutputFailureBehavior, RedactionPolicy, RunnerDefinition, RunnerInput, RunnerOutput,
 };
+use greentic_desktop_security::{redact_known_secret_values, redact_sensitive_text_with_values};
 use greentic_desktop_session::SessionProfile;
 use greentic_desktop_terminal::{
     TerminalAdapter, TerminalProfile, TerminalProtocol, TerminalRecordingBackend,
@@ -47,7 +57,7 @@ use greentic_desktop_web::{
     PlaywrightRecorderOptions, PlaywrightWebAdapter, PlaywrightWebRecordingBackend,
     PLAYWRIGHT_ADAPTER_ID,
 };
-use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend};
+use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend, WINDOWS_ADAPTER_ID};
 use greentic_desktop_workflow::{WorkflowOutputExtractor, WorkflowValueType};
 use greentic_distributor_client::GreenticDistributorClient;
 use std::collections::{BTreeMap, HashMap};
@@ -56,10 +66,14 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+const MCP_MAX_CONNECTION_WORKERS: usize = 32;
+const MCP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiHostOptions {
@@ -568,10 +582,19 @@ fn api_ok_json(data: &str) -> String {
 }
 
 fn api_error_json(code: &str, message: &str) -> String {
+    api_error_json_with_details(code, message, "{}")
+}
+
+fn api_error_json_with_details(code: &str, message: &str, details: &str) -> String {
     format!(
-        r#"{{"ok":false,"error":{{"code":"{}","message":"{}","details":{{}}}}}}"#,
+        r#"{{"ok":false,"error":{{"code":"{}","message":"{}","details":{}}}}}"#,
         escape_json(code),
-        escape_json(message)
+        escape_json(message),
+        if details.trim().is_empty() {
+            "{}"
+        } else {
+            details
+        }
     )
 }
 
@@ -599,15 +622,41 @@ fn adapter_health_json(state: &GuiApiState) -> String {
 
 fn adapter_health_item_json(health: &AdapterHealth) -> String {
     format!(
-        r#"{{"id":"{}","readiness":"{}","healthy":{},"message":"{}","executableCapabilities":{},"recordableTargets":{},"logPath":{}}}"#,
+        r#"{{"id":"{}","readiness":"{}","healthy":{},"status":"{}","statusLabel":"{}","message":"{}","executableCapabilities":{},"recordableTargets":{},"logPath":{}}}"#,
         escape_json(&health.adapter_id),
         health.readiness.as_str(),
         health.readiness.is_healthy(),
+        adapter_maturity_status(&health.adapter_id),
+        escape_json(adapter_maturity_label(&health.adapter_id)),
         escape_json(&health.message),
         string_array_json(&health.executable_capabilities),
         string_array_json(&health.recordable_targets),
         json_option(health.log_path.as_deref())
     )
+}
+
+fn adapter_maturity_status(adapter_id: &str) -> &'static str {
+    match adapter_id {
+        PLAYWRIGHT_ADAPTER_ID => "beta",
+        MACOS_ADAPTER_ID
+        | WINDOWS_ADAPTER_ID
+        | LINUX_X11_ADAPTER_ID
+        | LINUX_WAYLAND_ADAPTER_ID
+        | JAVA_ADAPTER_ID
+        | TERMINAL_ADAPTER_ID
+        | VISION_ADAPTER_ID => "experimental",
+        _ => "model-only",
+    }
+}
+
+fn adapter_maturity_label(adapter_id: &str) -> &'static str {
+    match adapter_maturity_status(adapter_id) {
+        "beta" => "Beta: real execution path has fixture coverage.",
+        "experimental" => {
+            "Experimental: requires real backend setup and is not production-proven yet."
+        }
+        _ => "Model-only: contract exists but production execution is not proven.",
+    }
 }
 
 fn adapter_runtime_health(state: &GuiApiState, allow_model_replay: bool) -> Vec<AdapterHealth> {
@@ -878,55 +927,67 @@ fn evidence_bundle_files(state: &GuiApiState) -> Vec<PathBuf> {
 
 fn persist_replay_evidence_bundle(
     state: &GuiApiState,
-    runner: &RunnerFile,
-    action: &str,
-    outputs_json: &str,
+    outcome: &ReplayOutcome,
     failure: Option<&str>,
+    redaction_values: &[String],
 ) -> Result<String, String> {
-    let status = if failure.is_some() {
-        "failed"
-    } else {
-        "success"
-    };
-    persist_evidence_bundle_with_outputs(state, runner, action, status, outputs_json, failure)
-}
-
-fn persist_evidence_bundle_with_outputs(
-    state: &GuiApiState,
-    runner: &RunnerFile,
-    action: &str,
-    status: &str,
-    outputs_json: &str,
-    failure: Option<&str>,
-) -> Result<String, String> {
-    let bundle_id = format!("{}-{}", runner.id, action);
+    let bundle_id = outcome.evidence.run_id.clone();
     let dir = evidence_bundle_dir(state, &bundle_id);
     std::fs::create_dir_all(&dir).map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
-    let artifact_id = "trace.txt";
-    std::fs::write(
-        dir.join(artifact_id),
-        failure.unwrap_or("All local validation checks passed."),
-    )
-    .map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
+    let outputs_json = redact_known_secret_values(&outcome.outputs_json(), redaction_values);
+    std::fs::write(dir.join("outputs.json"), &outputs_json)
+        .map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
+    let trace_json =
+        redact_known_secret_values(&replay_steps_json(&outcome.traces), redaction_values);
+    std::fs::write(dir.join("trace.json"), &trace_json)
+        .map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
+
+    let mut artifacts = outcome
+        .evidence
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            let id = artifact
+                .uri
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&artifact.name);
+            format!(
+                r#"{{"id":"{}","kind":"{}","name":"{}","url":"/api/v1/evidence/{}/artifacts/{}","redacted":{}}}"#,
+                escape_json(id),
+                artifact.kind.as_str(),
+                escape_json(&artifact.name),
+                escape_json(&bundle_id),
+                escape_json(id),
+                artifact.redacted
+            )
+        })
+        .collect::<Vec<_>>();
+    artifacts.push(format!(
+        r#"{{"id":"trace.json","kind":"tool_trace","name":"Replay trace","url":"/api/v1/evidence/{}/artifacts/trace.json","redacted":true}}"#,
+        escape_json(&bundle_id)
+    ));
     let json = format!(
-        r#"{{"bundleId":"{}","runId":"{}","runnerId":"{}","status":"{}","startedAt":"local","completedAt":"local","inputsHash":"redacted","outputs":{},"failureReason":{},"artifacts":[{{"id":"{}","kind":"tool_trace","name":"Trace","url":"/api/v1/evidence/{}/artifacts/{}","redacted":true}}],"steps":[{{"summary":"{} runner","status":"{}"}}]}}"#,
+        r#"{{"bundleId":"{}","runId":"{}","runnerId":"{}","status":"{}","startedAt":"{}","completedAt":"{}","inputsHash":"{}","outputs":{},"failureReason":{},"artifacts":[{}],"steps":{}}}"#,
         escape_json(&bundle_id),
-        escape_json(&bundle_id),
-        escape_json(&runner.id),
-        escape_json(status),
-        if outputs_json.trim().starts_with('{') {
-            outputs_json.to_owned()
-        } else {
-            "{}".to_owned()
-        },
+        escape_json(&outcome.evidence.run_id),
+        escape_json(&outcome.evidence.runner_id),
+        outcome.evidence.status.as_str(),
+        escape_json(&outcome.evidence.started_at),
+        escape_json(&outcome.evidence.completed_at),
+        escape_json(&outcome.evidence.inputs_hash),
+        outputs_json,
         failure
-            .map(|value| format!(r#""{}""#, escape_json(value)))
+            .map(|value| {
+                format!(
+                    r#""{}""#,
+                    escape_json(&redact_sensitive_text_with_values(value, redaction_values))
+                )
+            })
             .unwrap_or_else(|| "null".to_owned()),
-        artifact_id,
-        escape_json(&bundle_id),
-        artifact_id,
-        escape_json(action),
-        escape_json(status)
+        artifacts.join(","),
+        trace_json
     );
     std::fs::write(dir.join("bundle.json"), &json)
         .map_err(|err| api_error_json("runtime.io", &err.to_string()))?;
@@ -1705,14 +1766,35 @@ fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
         .map(|addr| addr.to_string())
         .unwrap_or_else(|_| state.mcp_bind.clone());
     let api_state = state.clone();
+    let active_workers = Arc::new(AtomicUsize::new(0));
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
     let join = thread::spawn(move || loop {
         if shutdown_rx.try_recv().is_ok() {
             break;
         }
         match listener.accept() {
-            Ok((stream, _)) => {
-                let _ = handle_mcp_connection(stream, &api_state);
+            Ok((mut stream, _)) => {
+                let current = active_workers.fetch_add(1, Ordering::SeqCst);
+                if current >= MCP_MAX_CONNECTION_WORKERS {
+                    active_workers.fetch_sub(1, Ordering::SeqCst);
+                    let response = http_response(
+                        503,
+                        "Service Unavailable",
+                        "application/json; charset=utf-8",
+                        br#"{"error":"mcp.server_busy"}"#,
+                        false,
+                    );
+                    let _ = stream.write_all(&response);
+                    continue;
+                }
+                let state = api_state.clone();
+                let active_workers = active_workers.clone();
+                thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(MCP_CONNECTION_TIMEOUT));
+                    let _ = stream.set_write_timeout(Some(MCP_CONNECTION_TIMEOUT));
+                    let _ = handle_mcp_connection(stream, &state);
+                    active_workers.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(25));
@@ -1762,20 +1844,23 @@ fn mcp_lifecycle_json(status: &str, bind: &str, state: &GuiApiState) -> String {
 }
 
 fn handle_mcp_connection(mut stream: TcpStream, state: &GuiApiState) -> Result<(), GuiError> {
-    let mut buffer = [0; 8192];
-    let read = stream.read(&mut buffer)?;
-    if read == 0 {
+    let request = read_http_request(&mut stream)?;
+    if request.body.is_empty() {
         return Ok(());
     }
-    let request = String::from_utf8_lossy(&buffer[..read]);
-    let body = request.split_once("\r\n\r\n").map_or("", |(_, body)| body);
-    let data = if body.contains("\"tools/list\"") || body.contains("tools/list") {
-        mcp_protocol_tools_list_json(state)
-    } else if body.contains("\"tools/call\"") || body.contains("tools/call") {
-        mcp_protocol_tool_call_json(body, state)
-    } else {
-        r#"{"jsonrpc":"2.0","result":{"status":"ok"},"id":1}"#.to_owned()
-    };
+    if !mcp_http_request_is_authorized(&request, state) {
+        let data = render_jsonrpc_error(None, -32001, "MCP HTTP authentication required");
+        let response = http_response(
+            401,
+            "Unauthorized",
+            "application/json; charset=utf-8",
+            data.as_bytes(),
+            false,
+        );
+        stream.write_all(&response)?;
+        return Ok(());
+    }
+    let data = mcp_protocol_json(&request.body, state);
     let response = http_response(
         200,
         "OK",
@@ -1787,47 +1872,189 @@ fn handle_mcp_connection(mut stream: TcpStream, state: &GuiApiState) -> Result<(
     Ok(())
 }
 
-fn mcp_protocol_tools_list_json(state: &GuiApiState) -> String {
-    let tools = enabled_mcp_tools(state)
-        .iter()
-        .map(|tool| {
-            format!(
-                r#"{{"name":"{}","description":"{}","inputSchema":{{"type":"object"}}}}"#,
-                escape_json(&tool_name(&tool.id)),
-                escape_json(&format!("Published MCP wrapper for {}", tool.name))
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"jsonrpc":"2.0","result":{{"tools":[{tools}]}},"id":1}}"#)
+#[derive(Debug, Clone, Default)]
+struct McpHttpRequest {
+    body: String,
+    authorization: Option<String>,
+    origin: Option<String>,
 }
 
-fn mcp_protocol_tool_call_json(body: &str, state: &GuiApiState) -> String {
-    let name = json_string_field(body, "name").unwrap_or_default();
+fn read_http_request(stream: &mut TcpStream) -> Result<McpHttpRequest, GuiError> {
+    let mut request = Vec::new();
+    let mut chunk = [0; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break find_header_end(&request).unwrap_or(request.len());
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = find_header_end(&request) {
+            break header_end;
+        }
+    };
+    let header = String::from_utf8_lossy(&request[..header_end]);
+    let authorization = http_header(&header, "authorization");
+    let origin = http_header(&header, "origin");
+    let content_length = header
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while request.len().saturating_sub(body_start) < content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    let available = request.len().saturating_sub(body_start);
+    let body_len = available.min(content_length);
+    Ok(McpHttpRequest {
+        body: String::from_utf8_lossy(&request[body_start..body_start + body_len]).to_string(),
+        authorization,
+        origin,
+    })
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn http_header(header: &str, name: &str) -> Option<String> {
+    header.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn mcp_http_request_is_authorized(request: &McpHttpRequest, state: &GuiApiState) -> bool {
+    if state.gui_token.is_empty() {
+        return true;
+    }
+    if let Some(origin) = &request.origin {
+        if !origin.starts_with("http://127.0.0.1:")
+            && !origin.starts_with("http://localhost:")
+            && !origin.starts_with("https://127.0.0.1:")
+            && !origin.starts_with("https://localhost:")
+        {
+            return false;
+        }
+    }
+    request
+        .authorization
+        .as_deref()
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), state.gui_token.as_bytes()))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (left, right) in left.iter().zip(right) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+fn mcp_protocol_json(body: &str, state: &GuiApiState) -> String {
+    match parse_jsonrpc_request(body) {
+        Ok(request) => match request.method.as_str() {
+            "initialize" => render_initialize_response(request.id.as_ref()),
+            "tools/list" => mcp_protocol_tools_list_json(request.id.as_ref(), state),
+            "tools/call" => {
+                let Some(name) = request.tool_name else {
+                    return render_jsonrpc_error(
+                        request.id.as_ref(),
+                        -32602,
+                        "tools/call params.name is required",
+                    );
+                };
+                mcp_protocol_tool_call_json(request.id.as_ref(), &name, request.arguments, state)
+            }
+            _ => render_jsonrpc_error(request.id.as_ref(), -32601, "method not found"),
+        },
+        Err(error) => render_jsonrpc_error(None, error.code, &error.message),
+    }
+}
+
+fn mcp_protocol_tools_list_json(id: Option<&serde_json::Value>, state: &GuiApiState) -> String {
+    let adapters = replay_adapter_registry(state).capabilities();
+    let tools = enabled_mcp_tools(state)
+        .iter()
+        .filter_map(|runner| {
+            let package = runner_package_for_mcp_descriptor(&runner_yaml(runner))?;
+            Some(mcp_tool_descriptor_for_package(
+                &package,
+                &adapters,
+                greentic_desktop_core::RiskLevel::Medium,
+                tool_name(&runner.id),
+                format!("Run Greentic desktop runner {}", runner.name),
+            ))
+        })
+        .collect::<Vec<_>>();
+    render_tools_list_response(id, &tools)
+}
+
+fn runner_package_for_mcp_descriptor(yaml: &str) -> Option<RunnerPackage> {
+    runner_package_from_yaml(yaml).ok().or_else(|| {
+        Some(RunnerPackage {
+            id: yaml_scalar(yaml, "id")?,
+            version: yaml_scalar(yaml, "version").unwrap_or_else(|| "0.1.0-draft".to_owned()),
+            mode: RecordingMode::AssistedPrompt,
+            inputs: yaml_list(yaml, "inputs"),
+            secrets: yaml_list(yaml, "secrets"),
+            steps: Vec::new(),
+            assertions: yaml_list(yaml, "assertions"),
+            outputs: yaml_list(yaml, "outputs"),
+            open_questions: yaml_list(yaml, "open_questions"),
+        })
+    })
+}
+
+fn mcp_protocol_tool_call_json(
+    id: Option<&serde_json::Value>,
+    name: &str,
+    arguments: BTreeMap<String, String>,
+    state: &GuiApiState,
+) -> String {
     let runner_id = name.trim_start_matches("runner.").replace('.', "_");
     let matched = enabled_mcp_tools(state)
         .into_iter()
         .find(|tool| tool_name(&tool.id) == name || tool.id == runner_id);
     match matched {
-        Some(tool) => match execute_runner(state, &tool, "mcp-call", body) {
-            Ok(result) => format!(
-                r#"{{"jsonrpc":"2.0","result":{{"content":[{{"type":"text","text":"{} {}"}}],"structuredContent":{{"runnerId":"{}","status":"{}","evidenceRef":"{}","outputs":{}}}}},"id":1}}"#,
-                escape_json(&tool.name),
-                escape_json(&result.status),
-                escape_json(&tool.id),
-                escape_json(&result.status),
-                escape_json(&result.evidence_ref),
-                result.outputs_json,
+        Some(tool) => match execute_runner(
+            state,
+            &tool,
+            "mcp-call",
+            &serde_json::Value::Object(
+                arguments
+                    .into_iter()
+                    .map(|(key, value)| (key, serde_json::Value::String(value)))
+                    .collect(),
+            )
+            .to_string(),
+        ) {
+            Ok(result) => render_tool_call_response(
+                id,
+                &McpCallResult {
+                    success: result.status == "passed",
+                    outputs_json: result.outputs_json,
+                    failure: None,
+                    evidence_uri: result.evidence_ref,
+                },
             ),
-            Err(error) => format!(
-                r#"{{"jsonrpc":"2.0","error":{{"code":-32005,"message":"{}"}},"id":1}}"#,
-                escape_json(&error)
-            ),
+            Err(error) => render_jsonrpc_error(id, -32005, &error),
         },
-        None => {
-            r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"Tool is not enabled"},"id":1}"#
-                .to_owned()
-        }
+        None => render_jsonrpc_error(id, -32004, "Tool is not enabled"),
     }
 }
 
@@ -1993,8 +2220,12 @@ fn execute_runner(
     let inputs = runner_inputs_from_body(body, &package.inputs);
     ensure_required_inputs_present(&package, &inputs)?;
     let secrets = runner_secrets_from_body(state, body, &package.secrets)?;
+    let redaction_values = execution_redaction_values(&inputs, &secrets);
     if let Some(reason) = production_replay_block_reason(state, &package, model_replay_allowed()) {
-        return Err(api_error_json("runner.real_adapter_missing", &reason));
+        return Err(api_error_json(
+            "runner.real_adapter_missing",
+            &redact_sensitive_text_with_values(&reason, &redaction_values),
+        ));
     }
     let request = ReplayRequest {
         package,
@@ -2010,6 +2241,7 @@ fn execute_runner(
     let context = ReplayExecutionContext {
         registry: replay_adapter_registry(state),
         on_failure: OnFailure::Stop,
+        step_timeout: Some(Duration::from_secs(60)),
     };
     let outcome = replay_with_context(request, &context);
     let output_failure = if outcome.passed {
@@ -2021,17 +2253,22 @@ fn execute_runner(
     let status = if passed { "passed" } else { "failed" }.to_owned();
     let failure = outcome.failure_reason.clone().or(output_failure);
     let evidence_ref = outcome.evidence_ref.uri.clone();
-    persist_replay_evidence_bundle(
-        state,
-        runner,
-        action,
-        &outcome.outputs_json(),
-        failure.as_deref(),
-    )?;
+    persist_replay_evidence_bundle(state, &outcome, failure.as_deref(), &redaction_values)?;
     if !passed {
-        return Err(api_error_json(
+        let details = format!(
+            r#"{{"evidenceRef":"{}","steps":{}}}"#,
+            escape_json(&evidence_ref),
+            replay_steps_json(&outcome.traces)
+        );
+        let safe_failure = failure
+            .as_deref()
+            .map(|value| redact_sensitive_text_with_values(value, &redaction_values))
+            .unwrap_or_else(|| "Runner execution failed.".to_owned());
+        let safe_details = redact_known_secret_values(&details, &redaction_values);
+        return Err(api_error_json_with_details(
             "runner.execution_failed",
-            failure.as_deref().unwrap_or("Runner execution failed."),
+            &safe_failure,
+            &safe_details,
         ));
     }
     if !runner_declared_fields(runner, "outputs").is_empty() && outcome.outputs.is_empty() {
@@ -2046,6 +2283,19 @@ fn execute_runner(
         outputs_json: outcome.outputs_json(),
         steps_json: replay_steps_json(&outcome.traces),
     })
+}
+
+fn execution_redaction_values(
+    inputs: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, String>,
+) -> Vec<String> {
+    inputs
+        .values()
+        .chain(secrets.values())
+        .map(|value| value.trim())
+        .filter(|value| value.len() >= 4)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn model_replay_allowed() -> bool {
@@ -2666,9 +2916,11 @@ fn replay_steps_json(traces: &[greentic_desktop_replay::StepTrace]) -> String {
             .iter()
             .map(|trace| {
                 format!(
-                    r#"{{"summary":"{}","status":"{}"}}"#,
+                    r#"{{"summary":"{}","status":"{}","reason":{},"evidenceRef":{}}}"#,
                     escape_json(&trace.step_id),
-                    if trace.success { "passed" } else { "failed" }
+                    if trace.success { "passed" } else { "failed" },
+                    json_option(trace.reason.as_deref()),
+                    json_option(trace.evidence_ref.as_deref())
                 )
             })
             .collect::<Vec<_>>()
@@ -3098,7 +3350,7 @@ fn field_display_name(field: &str) -> String {
 }
 
 fn recording_targets_json() -> String {
-    r#"{"targets":[{"id":"browser","label":"Browser task - Greentic opens a browser window","profile":"web","adapter":"greentic.desktop.playwright","available":true},{"id":"desktop","label":"Desktop app task","profile":"desktop","adapter":"greentic.desktop.vision","available":true},{"id":"java","label":"Java app task","profile":"java","adapter":"greentic.desktop.java-accessibility","available":true},{"id":"remote","label":"Remote desktop task","profile":"remote","adapter":"greentic.desktop.vision","available":true},{"id":"terminal","label":"Terminal/mainframe task","profile":"terminal","adapter":"greentic.desktop.terminal-tn3270","available":true}]}"#.to_owned()
+    r#"{"targets":[{"id":"browser","label":"Browser task - Greentic opens a browser window","profile":"web","adapter":"greentic.desktop.playwright","available":true,"status":"beta","statusLabel":"Beta: records the Greentic-owned browser context."},{"id":"desktop","label":"Desktop app task","profile":"desktop","adapter":"greentic.desktop.macos.ax","available":true,"status":"experimental","statusLabel":"Experimental: requires native OS event capture and permissions."},{"id":"java","label":"Java app task","profile":"java","adapter":"greentic.desktop.java-accessibility","available":true,"status":"experimental","statusLabel":"Experimental: Java Access Bridge or equivalent event source required."},{"id":"remote","label":"Remote desktop task","profile":"remote","adapter":"greentic.desktop.vision","available":true,"status":"experimental","statusLabel":"Experimental: requires a Greentic-owned calibrated viewport."},{"id":"terminal","label":"Terminal/mainframe task","profile":"terminal","adapter":"greentic.desktop.terminal-tn3270","available":true,"status":"experimental","statusLabel":"Experimental: requires a Greentic-owned terminal runtime."}]}"#.to_owned()
 }
 
 fn recordings_list_json(state: &GuiApiState) -> String {
@@ -5244,11 +5496,20 @@ mod tests {
     }
 
     fn post_json(addr: SocketAddr, path: &str, body: &str) -> Vec<u8> {
+        post_json_with_headers(addr, path, body, "")
+    }
+
+    fn post_json_with_headers(
+        addr: SocketAddr,
+        path: &str,
+        body: &str,
+        extra_headers: &str,
+    ) -> Vec<u8> {
         for _ in 0..10 {
             let mut stream = TcpStream::connect(addr).expect("connect to HTTP server");
             if write!(
                 stream,
-                "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\n{extra_headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
@@ -5344,6 +5605,43 @@ mod tests {
         <button type="button" onclick="document.querySelector('[data-testid=status]').textContent = 'Saved';">Save</button>
         <output data-testid="status">Saved</output>
       </form>
+    </main>
+  </body>
+</html>"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    html.len(),
+                    html
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    fn serve_mcp_web_e2e_fixture() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture server should bind");
+        let addr = listener.local_addr().expect("fixture addr");
+        std::thread::spawn(move || {
+            for _ in 0..16 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buffer = [0_u8; 2048];
+                let _ = stream.read(&mut buffer);
+                let html = r#"<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Generic web automation fixture</h1>
+      <form onsubmit="event.preventDefault(); document.querySelector('[data-testid=result]').textContent = 'result: Saved row for ' + document.querySelector('#name').value + ' <' + document.querySelector('#email').value + '>'; ">
+        <label for="name">Name</label>
+        <input id="name" data-testid="name" />
+        <label for="email">Email</label>
+        <input id="email" data-testid="email" />
+        <button type="submit">Save row</button>
+      </form>
+      <output data-testid="result"></output>
     </main>
   </body>
 </html>"#;
@@ -5456,6 +5754,71 @@ mod tests {
         assert!(response.contains("\"status\":\"created\""));
         assert!(state.runtime_home.is_dir());
         assert!(state.evidence_store.is_dir());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_replay_evidence_redacts_supplied_secret_values() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-redaction-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let state = GuiApiState {
+            runtime_home: root.clone(),
+            evidence_store: root.join("evidence"),
+            ..GuiApiState::default()
+        };
+        let secret = "sk-test-super-secret".to_owned();
+        let outcome = ReplayOutcome {
+            passed: false,
+            bootstrap: greentic_desktop_session::BootstrapPlan {
+                profile_id: "test".to_owned(),
+                started_process_refs: Vec::new(),
+                opened_targets: Vec::new(),
+            },
+            traces: vec![greentic_desktop_replay::StepTrace {
+                step_id: "type-secret".to_owned(),
+                attempts: 1,
+                success: false,
+                reason: Some(format!("adapter echoed {secret}")),
+                evidence_ref: None,
+            }],
+            outputs: BTreeMap::from([("status".to_owned(), format!("failed with {secret}"))]),
+            evidence: greentic_desktop_evidence::EvidenceBundle::new(
+                "run_secret",
+                "secret.runner",
+                "1",
+                greentic_desktop_evidence::EvidenceStatus::Failed,
+                &BTreeMap::from([("api_token".to_owned(), secret.clone())]),
+                &["api_token".to_owned()],
+                BTreeMap::from([("status".to_owned(), format!("failed with {secret}"))]),
+                Vec::new(),
+                Vec::new(),
+                "start",
+                "end",
+            ),
+            evidence_ref: greentic_desktop_evidence::EvidenceRef {
+                run_id: "run_secret".to_owned(),
+                uri: "evidence://run_secret/bundle.json".to_owned(),
+            },
+            failure_reason: Some(format!("failed with {secret}")),
+        };
+
+        persist_replay_evidence_bundle(
+            &state,
+            &outcome,
+            outcome.failure_reason.as_deref(),
+            std::slice::from_ref(&secret),
+        )
+        .expect("evidence should persist");
+
+        for artifact in ["bundle.json", "outputs.json", "trace.json"] {
+            let contents = std::fs::read_to_string(root.join("evidence/run_secret").join(artifact))
+                .expect("artifact should exist");
+            assert!(!contents.contains(&secret), "{artifact}: {contents}");
+            assert!(contents.contains("[REDACTED]"), "{artifact}: {contents}");
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5893,7 +6256,43 @@ mod tests {
             response.contains("\"executableCapabilities\""),
             "{response}"
         );
+        assert!(response.contains("\"status\":\"beta\""), "{response}");
+        assert!(response.contains("\"statusLabel\""), "{response}");
         assert!(response.contains("\"logPath\""), "{response}");
+    }
+
+    #[test]
+    fn capability_matrix_documents_built_in_adapter_maturity() {
+        let doc = include_str!("../../../docs/capability-matrix.md");
+        for adapter_id in [
+            PLAYWRIGHT_ADAPTER_ID,
+            MACOS_ADAPTER_ID,
+            WINDOWS_ADAPTER_ID,
+            LINUX_X11_ADAPTER_ID,
+            LINUX_WAYLAND_ADAPTER_ID,
+            JAVA_ADAPTER_ID,
+            TERMINAL_ADAPTER_ID,
+            VISION_ADAPTER_ID,
+        ] {
+            assert!(
+                doc.contains(adapter_id),
+                "capability matrix must document {adapter_id}"
+            );
+        }
+        for required_text in [
+            "MCP stdio",
+            "MCP HTTP",
+            "Production",
+            "Beta",
+            "Experimental",
+            "Model-only",
+            "Native desktop adapters are experimental",
+        ] {
+            assert!(
+                doc.contains(required_text),
+                "capability matrix missing {required_text}"
+            );
+        }
     }
 
     #[test]
@@ -5910,7 +6309,24 @@ mod tests {
             assert!(request.contains("authorization: Bearer test-key"));
             let content = r#"{"runner_id":"llm.invoice.portal","version":"0.1.0-draft","summary":"LLM-generated invoice runner","risk_level":"low","required_capabilities":["web.goto","web.fill","web.extract_text"],"inputs":{"invoice_reference":{"type":"string"},"approval_code":{"type":"string"}},"outputs":{"payment_status":{"type":"string"}},"steps":[{"id":"open-portal","action":"goto","required_capability":"web.goto"},{"id":"fill-reference","action":"fill","required_capability":"web.fill","value":"{{inputs.invoice_reference}}"},{"id":"read-status","action":"extract_text","required_capability":"web.extract_text"}],"assertions":["payment status is visible"],"open_questions":[]}"#;
             let body = serde_json::json!({
-                "choices": [{"message": {"content": content}}]
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "mock-model",
+                "system_fingerprint": null,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "total_tokens": 2
+                }
             })
             .to_string();
             let response = format!(
@@ -6926,6 +7342,282 @@ mod tests {
         let stop = post(handle.addr(), "/api/v1/mcp/stop", "{}");
         assert!(String::from_utf8_lossy(&stop).contains("\"status\":\"stopped\""));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn managed_mcp_service_serves_second_client_while_first_request_is_incomplete() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-mcp-concurrency-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        std::fs::create_dir_all(root.join("runners")).expect("runner dir should create");
+
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                mcp_bind: "127.0.0.1:0".to_owned(),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+
+        let start = post(handle.addr(), "/api/v1/mcp/start", "{}");
+        let start = String::from_utf8_lossy(&start);
+        let bind = json_string_field(&start, "bind")
+            .expect("mcp bind should be returned")
+            .parse::<SocketAddr>()
+            .expect("mcp bind should parse");
+
+        let mut held = TcpStream::connect(bind).expect("connect held MCP request");
+        held.write_all(
+            b"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: 4096\r\nconnection: close\r\n\r\n",
+        )
+        .expect("held request headers should write");
+
+        let list = post_json(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        );
+        let list = String::from_utf8_lossy(&list);
+        assert!(list.contains("\"tools\""), "{list}");
+
+        drop(held);
+        let stop = post(handle.addr(), "/api/v1/mcp/stop", "{}");
+        assert!(String::from_utf8_lossy(&stop).contains("\"status\":\"stopped\""));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn managed_mcp_service_requires_bearer_token_when_gui_token_is_configured() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-mcp-auth-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        std::fs::create_dir_all(root.join("runners")).expect("runner dir should create");
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                mcp_bind: "127.0.0.1:0".to_owned(),
+                gui_token: "mcp-test-token".to_owned(),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+
+        let start = post_with_headers(
+            handle.addr(),
+            "/api/v1/mcp/start",
+            "{}",
+            "x-greentic-gui-token: mcp-test-token\r\n",
+        );
+        let start = String::from_utf8_lossy(&start);
+        let bind = json_string_field(&start, "bind")
+            .expect("mcp bind should be returned")
+            .parse::<SocketAddr>()
+            .expect("mcp bind should parse");
+
+        let missing = post_json(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":"init","method":"initialize"}"#,
+        );
+        assert!(
+            response_head(&missing).starts_with("HTTP/1.1 401"),
+            "{:?}",
+            response_head(&missing)
+        );
+        assert!(String::from_utf8_lossy(response_body(&missing))
+            .contains("MCP HTTP authentication required"));
+
+        let wrong_origin = post_json_with_headers(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":"init","method":"initialize"}"#,
+            "authorization: Bearer mcp-test-token\r\norigin: https://evil.example\r\n",
+        );
+        assert!(
+            response_head(&wrong_origin).starts_with("HTTP/1.1 401"),
+            "{:?}",
+            response_head(&wrong_origin)
+        );
+
+        let authorized = post_json_with_headers(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":"init","method":"initialize"}"#,
+            "authorization: Bearer mcp-test-token\r\norigin: http://127.0.0.1:12345\r\n",
+        );
+        let body = String::from_utf8_lossy(response_body(&authorized));
+        assert!(
+            response_head(&authorized).starts_with("HTTP/1.1 200"),
+            "{body}"
+        );
+        assert!(body.contains("\"protocolVersion\""), "{body}");
+        assert!(!body.contains("mcp-test-token"), "{body}");
+
+        let _ = post_with_headers(
+            handle.addr(),
+            "/api/v1/mcp/stop",
+            "{}",
+            "x-greentic-gui-token: mcp-test-token\r\n",
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn web_runner_executes_real_playwright_fixture_through_mcp() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-web-mcp-e2e-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let runners_dir = root.join("runners");
+        std::fs::create_dir_all(&runners_dir).expect("runner dir should create");
+        let fixture_url = serve_mcp_web_e2e_fixture();
+        let field_target = |label: &str| LocatorTarget {
+            preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                label: Some(label.to_owned()),
+                ..greentic_desktop_adapter::LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+        let workflow = greentic_desktop_workflow::DesktopWorkflow {
+            id: "generic.web.append_row".to_owned(),
+            summary: "Append a generic web row".to_owned(),
+            target: greentic_desktop_workflow::WorkflowTarget::web(&fixture_url),
+            inputs: vec![
+                greentic_desktop_workflow::WorkflowInput {
+                    name: "name".to_owned(),
+                    value_type: WorkflowValueType::String,
+                    required: true,
+                    secret: false,
+                    target: field_target("Name"),
+                    value_template: "{{inputs.name}}".to_owned(),
+                },
+                greentic_desktop_workflow::WorkflowInput {
+                    name: "email".to_owned(),
+                    value_type: WorkflowValueType::String,
+                    required: true,
+                    secret: false,
+                    target: field_target("Email"),
+                    value_template: "{{inputs.email}}".to_owned(),
+                },
+            ],
+            actions: vec![greentic_desktop_workflow::WorkflowAction {
+                name: "save row".to_owned(),
+                kind: greentic_desktop_workflow::WorkflowActionKind::Click,
+                target: LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        role: Some("button".to_owned()),
+                        name: Some("Save row".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
+                value_template: None,
+                risk: greentic_desktop_workflow::WorkflowRisk::Low,
+            }],
+            outputs: vec![greentic_desktop_workflow::WorkflowOutput {
+                name: "result".to_owned(),
+                value_type: WorkflowValueType::String,
+                extractor: WorkflowOutputExtractor::TargetText(Box::new(LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        data_testid: Some("result".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                })),
+                required: true,
+                expected: Some("Saved row".to_owned()),
+            }],
+            assertions: Vec::new(),
+            evidence_policy: greentic_desktop_workflow::WorkflowEvidencePolicy::default(),
+        };
+        let definition = RunnerDefinition::from_workflow(
+            "generic.web.append_row",
+            "0.1.0-draft",
+            "Append a generic web row",
+            "Open a generic web app, provide row fields, submit, and return the visible result.",
+            greentic_desktop_runner_schema::RunnerRisk::Low,
+            vec![greentic_desktop_runner_schema::TargetTechnology::Web],
+            workflow,
+        )
+        .expect("web runner definition should compile");
+        std::fs::write(
+            runners_dir.join("generic.web.append_row.runner.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "greentic.runner.v1",
+                "runner_definition": definition,
+            }))
+            .expect("manifest should render"),
+        )
+        .expect("typed manifest should write");
+
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                mcp_bind: "127.0.0.1:0".to_owned(),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+
+        let start = post(handle.addr(), "/api/v1/mcp/start", "{}");
+        let start = String::from_utf8_lossy(&start);
+        let bind = json_string_field(&start, "bind")
+            .expect("mcp bind should be returned")
+            .parse::<SocketAddr>()
+            .expect("mcp bind should parse");
+
+        let list = post_json(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":"list","method":"tools/list"}"#,
+        );
+        let list_body = String::from_utf8_lossy(response_body(&list));
+        assert!(
+            list_body.contains("runner.generic.web.append_row"),
+            "{list_body}"
+        );
+        assert!(list_body.contains("\"inputSchema\""), "{list_body}");
+
+        let call = post_json(
+            bind,
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"runner.generic.web.append_row","arguments":{"name":"Ada Lovelace","email":"ada@example.test"}}}"#,
+        );
+        let call_body = String::from_utf8_lossy(response_body(&call));
+        assert!(call_body.contains("\"status\":\"passed\""), "{call_body}");
+        assert!(
+            call_body
+                .contains("\"outputs.result\":\"Saved row for Ada Lovelace <ada@example.test>\""),
+            "{call_body}"
+        );
+        assert!(
+            call_body.contains("evidence://run_generic.web.append_row/bundle.json"),
+            "{call_body}"
+        );
+        let evidence_dir = root.join("evidence").join("run_generic.web.append_row");
+        let bundle = std::fs::read_to_string(evidence_dir.join("bundle.json"))
+            .expect("evidence bundle should be persisted");
+        assert!(
+            bundle.contains("\"runnerId\":\"generic.web.append_row\""),
+            "{bundle}"
+        );
+        assert!(bundle.contains("\"id\":\"outputs.json\""), "{bundle}");
+        assert!(bundle.contains("\"id\":\"trace.json\""), "{bundle}");
+        assert!(evidence_dir.join("outputs.json").is_file());
+        assert!(evidence_dir.join("trace.json").is_file());
+        assert!(!bundle.contains("secret"), "{bundle}");
+
+        let _ = post(handle.addr(), "/api/v1/mcp/stop", "{}");
         let _ = std::fs::remove_dir_all(root);
     }
 

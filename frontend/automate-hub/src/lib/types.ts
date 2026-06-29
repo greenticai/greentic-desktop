@@ -49,6 +49,8 @@ export interface AdapterHealthDto {
   id: string;
   readiness: string;
   healthy: boolean;
+  status?: string;
+  statusLabel?: string;
   message: string;
   executableCapabilities: string[];
   recordableTargets: string[];
@@ -313,6 +315,8 @@ export interface RecordingTargetDto {
   profile: string;
   adapter: string;
   available: boolean;
+  status?: string;
+  statusLabel?: string;
 }
 
 export interface RecordingTargetsDto {

@@ -245,6 +245,40 @@ fn run(
         [command, subcommand, rest @ ..] if command == "runner" && subcommand == "plan" => {
             handle_runner_plan(rest, &runtime, &config, writer)?;
         }
+        [command, subcommand, runner_id, flag, out]
+            if command == "runner" && subcommand == "pack" && flag == "--out" =>
+        {
+            let result = runtime.pack_runner(runner_id, &PathBuf::from(out))?;
+            writeln!(
+                writer,
+                "packed: {runner_id} -> {out} using greentic-pack --answers {}",
+                result
+                    .answers_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_owned())
+            )?;
+            if !result.stdout.trim().is_empty() {
+                writer.write_all(result.stdout.as_bytes())?;
+            }
+            if !result.stderr.trim().is_empty() {
+                writer.write_all(result.stderr.as_bytes())?;
+            }
+        }
+        [command, subcommand, path] if command == "runner" && subcommand == "verify-pack" => {
+            let result = runtime.verify_runner_pack(&PathBuf::from(path))?;
+            writeln!(writer, "verified: {path}")?;
+            if !result.stdout.trim().is_empty() {
+                writer.write_all(result.stdout.as_bytes())?;
+            }
+            if !result.stderr.trim().is_empty() {
+                writer.write_all(result.stderr.as_bytes())?;
+            }
+        }
+        [command, subcommand, path] if command == "runner" && subcommand == "install-pack" => {
+            let installed = runtime.install_runner_pack(&PathBuf::from(path))?;
+            writeln!(writer, "installed runner pack: {}", installed.display())?;
+        }
         [command, rest @ ..] if command == "record" => {
             handle_record(rest, &config, writer)?;
         }
@@ -275,7 +309,7 @@ fn usage(require_desktop_prefix: bool) -> String {
     };
 
     format!(
-        "usage: {prefix} <{gui_command}info|init|config show|extension search QUERY|extension install ID|extension list|extension info ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
+        "usage: {prefix} <{gui_command}info|init|config show|extension search QUERY|extension install ID|extension list|extension info ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|runner pack ID --out PATH|runner verify-pack PATH|runner install-pack PATH|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
     )
 }
 
@@ -730,6 +764,53 @@ mod tests {
         }
     }
 
+    fn install_fake_greentic_pack(home: &std::path::Path) -> (PathBuf, Option<OsString>) {
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).expect("fake bin dir");
+        let fake = bin.join("greentic-pack");
+        fs::write(
+            &fake,
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "$GREENTIC_FAKE_PACK_ARGS"
+if [ "$1" = "--answers" ]; then
+  cp "$2" "$GREENTIC_FAKE_PACK_ANSWERS"
+  exit 0
+fi
+if [ "$1" = "verify" ]; then
+  exit 0
+fi
+echo "unexpected greentic-pack invocation: $*" >&2
+exit 2
+"#,
+        )
+        .expect("fake greentic-pack should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
+                .expect("fake greentic-pack should be executable");
+        }
+        let old_path = std::env::var_os("PATH");
+        let next_path = match &old_path {
+            Some(path) => {
+                let mut paths = std::env::split_paths(path).collect::<Vec<_>>();
+                paths.insert(0, bin);
+                std::env::join_paths(paths).expect("PATH should join")
+            }
+            None => OsString::from(bin),
+        };
+        std::env::set_var("PATH", next_path);
+        (fake, old_path)
+    }
+
+    fn restore_path(old_path: Option<OsString>) {
+        if let Some(value) = old_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
     #[test]
     fn desktop_info_prints_required_fields() {
         with_temp_home(|_| {
@@ -1013,6 +1094,104 @@ mod tests {
             assert!(String::from_utf8(output)
                 .expect("output utf8")
                 .contains("written:"));
+        });
+    }
+
+    #[test]
+    fn runner_pack_invokes_greentic_pack_with_answers_json() {
+        with_temp_home(|home| {
+            let (_fake, old_path) = install_fake_greentic_pack(&home);
+            let args_file = home.join("pack.args");
+            let answers_copy = home.join("answers.copy.json");
+            std::env::set_var("GREENTIC_FAKE_PACK_ARGS", &args_file);
+            std::env::set_var("GREENTIC_FAKE_PACK_ANSWERS", &answers_copy);
+            let runners = home.join("runners");
+            fs::create_dir_all(&runners).expect("runners dir");
+            fs::write(
+                runners.join("generic.web.append_row.runner.json"),
+                r#"{"schema_version":"greentic.runner.v1","runner_definition":{"runner_id":"generic.web.append_row"}}"#,
+            )
+            .expect("runner manifest");
+
+            let out = home.join("generic.web.append_row.gtpack");
+            let mut output = Vec::new();
+            run_with_writer(
+                [
+                    "runner".to_owned(),
+                    "pack".to_owned(),
+                    "generic.web.append_row".to_owned(),
+                    "--out".to_owned(),
+                    out.display().to_string(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("runner pack should delegate to greentic-pack");
+
+            let rendered = String::from_utf8(output).expect("output should be utf8");
+            assert!(
+                rendered.contains("using greentic-pack --answers"),
+                "{rendered}"
+            );
+            let args = fs::read_to_string(args_file).expect("fake args");
+            assert!(args.starts_with("--answers "), "{args}");
+            let answers = fs::read_to_string(answers_copy).expect("answers copy");
+            assert!(answers.contains(r#""schema_version": "greentic.pack.answers.v1""#));
+            assert!(answers.contains(r#""runner_id": "generic.web.append_row""#));
+            assert!(answers.contains("generic.web.append_row.runner.json"));
+            assert!(answers.contains(&out.display().to_string()));
+
+            restore_path(old_path);
+            std::env::remove_var("GREENTIC_FAKE_PACK_ARGS");
+            std::env::remove_var("GREENTIC_FAKE_PACK_ANSWERS");
+        });
+    }
+
+    #[test]
+    fn runner_verify_and_install_pack_delegate_to_greentic_pack() {
+        with_temp_home(|home| {
+            let (_fake, old_path) = install_fake_greentic_pack(&home);
+            let args_file = home.join("pack.args");
+            let answers_copy = home.join("answers.copy.json");
+            std::env::set_var("GREENTIC_FAKE_PACK_ARGS", &args_file);
+            std::env::set_var("GREENTIC_FAKE_PACK_ANSWERS", &answers_copy);
+            let pack = home.join("example.gtpack");
+            fs::write(&pack, "pack").expect("pack file");
+
+            let mut output = Vec::new();
+            run_with_writer(
+                [
+                    "runner".to_owned(),
+                    "verify-pack".to_owned(),
+                    pack.display().to_string(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("verify-pack should delegate to greentic-pack");
+            assert!(String::from_utf8(output.clone())
+                .expect("output")
+                .contains("verified:"));
+            assert!(fs::read_to_string(&args_file)
+                .expect("args")
+                .starts_with("verify "));
+
+            output.clear();
+            run_with_writer(
+                [
+                    "runner".to_owned(),
+                    "install-pack".to_owned(),
+                    pack.display().to_string(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("install-pack should verify and copy");
+            assert!(home.join("runners").join("example.gtpack").exists());
+
+            restore_path(old_path);
+            std::env::remove_var("GREENTIC_FAKE_PACK_ARGS");
+            std::env::remove_var("GREENTIC_FAKE_PACK_ANSWERS");
         });
     }
 

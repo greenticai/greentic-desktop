@@ -10,7 +10,10 @@ use greentic_desktop_recorder::RunnerPackage;
 use greentic_desktop_session::{plan_bootstrap, BootstrapPlan, SessionProfile};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRequest {
@@ -79,6 +82,7 @@ impl AdapterRegistry {
 pub struct ReplayExecutionContext {
     pub registry: AdapterRegistry,
     pub on_failure: OnFailure,
+    pub step_timeout: Option<Duration>,
 }
 
 impl ReplayExecutionContext {
@@ -86,6 +90,7 @@ impl ReplayExecutionContext {
         Self {
             registry,
             on_failure: OnFailure::Stop,
+            step_timeout: None,
         }
     }
 }
@@ -245,13 +250,16 @@ pub fn replay_with_context(
         } else if let Some(adapter) = adapter {
             let mut executable = step.clone();
             executable.value = resolved;
-            adapter.execute(executable).and_then(|result| {
-                let observation = adapter.observe(ObserveContext {
-                    session_id: format!("replay-{}", request.package.id),
-                    target: Some(step.target.clone()),
-                })?;
+            execute_step_with_timeout(
+                adapter,
+                executable,
+                format!("replay-{}", request.package.id),
+                Some(step.target.clone()),
+                context.step_timeout,
+            )
+            .map(|(result, observation)| {
                 observations.push(observation);
-                Ok(result)
+                result
             })
         } else {
             Err(AdapterError::UnsupportedCapability(
@@ -290,6 +298,7 @@ pub fn replay_with_context(
             if context.on_failure == OnFailure::Continue {
                 continue;
             }
+            let failure_reason = format_step_failure(step, reason.as_deref());
             let evidence = evidence_bundle(
                 &format!("run_{}", request.package.id),
                 &request.package,
@@ -307,7 +316,7 @@ pub fn replay_with_context(
                 outputs: BTreeMap::new(),
                 evidence,
                 evidence_ref,
-                failure_reason: Some("step failed".to_owned()),
+                failure_reason: Some(failure_reason),
             };
         }
     }
@@ -387,6 +396,35 @@ pub fn replay_with_context(
     }
 }
 
+fn execute_step_with_timeout(
+    adapter: Arc<dyn DesktopAdapter>,
+    executable: RunnerStep,
+    session_id: String,
+    target: Option<LocatorTarget>,
+    timeout: Option<Duration>,
+) -> Result<(StepResult, Observation), AdapterError> {
+    let execute = move || {
+        adapter.execute(executable).and_then(|result| {
+            let observation = adapter.observe(ObserveContext { session_id, target })?;
+            Ok((result, observation))
+        })
+    };
+    if let Some(timeout) = timeout {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(execute());
+        });
+        rx.recv_timeout(timeout).map_err(|_| {
+            AdapterError::ExecutionFailed(format!(
+                "replay step timed out after {} ms",
+                timeout.as_millis()
+            ))
+        })?
+    } else {
+        execute()
+    }
+}
+
 impl ReplayOutcome {
     pub fn outputs_json(&self) -> String {
         let body = self
@@ -397,6 +435,22 @@ impl ReplayOutcome {
             .join(",");
         format!("{{{body}}}")
     }
+}
+
+fn format_step_failure(step: &RunnerStep, reason: Option<&str>) -> String {
+    let detail = reason
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("adapter did not provide a failure reason");
+    let value = step
+        .value
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" value={value:?}"))
+        .unwrap_or_default();
+    format!(
+        "Step '{}' failed: action={} capability={}{}: {}",
+        step.id, step.action, step.required_capability, value, detail
+    )
 }
 
 fn run_assertions(
@@ -661,6 +715,85 @@ mod tests {
         }
     }
 
+    struct FailingAdapter {
+        capabilities: AdapterCapabilities,
+        message: String,
+    }
+
+    impl DesktopAdapter for FailingAdapter {
+        fn capabilities(&self) -> AdapterCapabilities {
+            self.capabilities.clone()
+        }
+
+        fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
+            Ok(Observation {
+                adapter_id: self.capabilities.adapter_id.clone(),
+                summary: ctx.session_id,
+                visible_text: Vec::new(),
+            })
+        }
+
+        fn execute(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+            Ok(StepResult {
+                step_id: step.id,
+                success: false,
+                message: self.message.clone(),
+            })
+        }
+
+        fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult> {
+            Ok(AssertionResult {
+                assertion_id: assertion.id,
+                passed: true,
+                message: "assertion passed".to_owned(),
+            })
+        }
+
+        fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
+            Ok(None)
+        }
+    }
+
+    struct SlowAdapter {
+        capabilities: AdapterCapabilities,
+        delay: Duration,
+    }
+
+    impl DesktopAdapter for SlowAdapter {
+        fn capabilities(&self) -> AdapterCapabilities {
+            self.capabilities.clone()
+        }
+
+        fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
+            Ok(Observation {
+                adapter_id: self.capabilities.adapter_id.clone(),
+                summary: ctx.session_id,
+                visible_text: Vec::new(),
+            })
+        }
+
+        fn execute(&self, step: RunnerStep) -> AdapterResult<StepResult> {
+            std::thread::sleep(self.delay);
+            Ok(StepResult {
+                step_id: step.id,
+                success: true,
+                message: "slow step eventually completed".to_owned(),
+            })
+        }
+
+        fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult> {
+            Ok(AssertionResult {
+                assertion_id: assertion.id,
+                passed: true,
+                message: "assertion passed".to_owned(),
+            })
+        }
+
+        fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
+            Ok(None)
+        }
+    }
+
     fn package() -> RunnerPackage {
         RunnerPackage {
             id: "customer_create".to_owned(),
@@ -725,6 +858,7 @@ mod tests {
         let context = ReplayExecutionContext {
             registry,
             on_failure: OnFailure::Stop,
+            step_timeout: None,
         };
 
         let outcome = replay_with_context(request(), &context);
@@ -757,6 +891,7 @@ mod tests {
         let context = ReplayExecutionContext {
             registry,
             on_failure: OnFailure::Stop,
+            step_timeout: None,
         };
         let mut request = request();
         request.package.assertions = vec!["customer id".to_owned()];
@@ -778,6 +913,77 @@ mod tests {
     }
 
     #[test]
+    fn replay_failure_reason_identifies_failed_step_and_adapter_message() {
+        let mut registry = AdapterRegistry::new();
+        registry.insert(Arc::new(FailingAdapter {
+            capabilities: AdapterCapabilities::new(
+                "greentic.desktop.test",
+                "1.0.0",
+                ["macos.activate_app"],
+            ),
+            message: "application 'Microsoft Word' is not installed or could not be launched"
+                .to_owned(),
+        }));
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+            step_timeout: None,
+        };
+        let mut request = request();
+        request.package.steps = vec![RunnerStep {
+            id: "primitive-1-open-app".to_owned(),
+            action: "activate_app".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some("Microsoft Word".to_owned()),
+            required_capability: "macos.activate_app".to_owned(),
+        }];
+        request.package.assertions = Vec::new();
+        request.package.outputs = Vec::new();
+
+        let outcome = replay_with_context(request, &context);
+
+        assert!(!outcome.passed);
+        let reason = outcome.failure_reason.expect("failure reason");
+        assert!(reason.contains("primitive-1-open-app"), "{reason}");
+        assert!(reason.contains("activate_app"), "{reason}");
+        assert!(reason.contains("macos.activate_app"), "{reason}");
+        assert!(reason.contains("Microsoft Word"), "{reason}");
+        assert!(reason.contains("not installed"), "{reason}");
+        assert_eq!(
+            outcome.traces[0].reason.as_deref(),
+            Some("application 'Microsoft Word' is not installed or could not be launched")
+        );
+    }
+
+    #[test]
+    fn replay_step_timeout_returns_failed_step_diagnostics() {
+        let mut registry = AdapterRegistry::new();
+        registry.insert(Arc::new(SlowAdapter {
+            capabilities: AdapterCapabilities::new("greentic.desktop.test", "1.0.0", ["web.fill"]),
+            delay: Duration::from_millis(100),
+        }));
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+            step_timeout: Some(Duration::from_millis(5)),
+        };
+
+        let outcome = replay_with_context(request(), &context);
+
+        assert!(!outcome.passed);
+        let reason = outcome.failure_reason.expect("failure reason");
+        assert!(reason.contains("fill_email"), "{reason}");
+        assert!(reason.contains("timed out"), "{reason}");
+        assert_eq!(outcome.traces.len(), 1);
+        assert!(outcome.traces[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("timed out"));
+        assert_eq!(outcome.evidence.status, EvidenceStatus::Failed);
+    }
+
+    #[test]
     fn replay_fails_when_registered_adapter_assertion_fails() {
         let adapter = Arc::new(TestAdapter::new(
             &["web.fill", "web.assert_visible"],
@@ -789,6 +995,7 @@ mod tests {
         let context = ReplayExecutionContext {
             registry,
             on_failure: OnFailure::Stop,
+            step_timeout: None,
         };
         let mut request = request();
         request.package.assertions = vec!["customer id".to_owned()];

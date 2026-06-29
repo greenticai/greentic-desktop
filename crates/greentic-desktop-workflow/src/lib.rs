@@ -1,4 +1,4 @@
-use greentic_desktop_adapter::{AdapterCapabilities, LocatorTarget, RunnerStep};
+use greentic_desktop_adapter::{AdapterCapabilities, LocatorStrategy, LocatorTarget, RunnerStep};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -18,6 +18,154 @@ pub struct DesktopWorkflow {
 pub struct WorkflowTarget {
     pub kind: WorkflowTargetKind,
     pub open: Option<WorkflowOpenTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrimitiveWorkflow {
+    pub id: String,
+    pub summary: String,
+    pub target: WorkflowTarget,
+    pub inputs: Vec<WorkflowInput>,
+    pub primitives: Vec<DesktopPrimitive>,
+    pub outputs: Vec<WorkflowOutput>,
+    pub assertions: Vec<WorkflowAssertion>,
+    pub evidence_policy: WorkflowEvidencePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DesktopPrimitive {
+    OpenApp {
+        app: AppReference,
+    },
+    OpenResource {
+        resource: ResourceReference,
+        create_if_missing: bool,
+    },
+    Focus {
+        target: TargetQuery,
+    },
+    EnterText {
+        target: TargetQuery,
+        value_template: String,
+    },
+    InvokeCommand {
+        command: CommandReference,
+    },
+    SaveResource {
+        path_template: Option<String>,
+        policy: SavePolicy,
+    },
+    ObserveOutput {
+        name: String,
+        extractor: OutputExtractorReference,
+    },
+    AssertState {
+        condition: WorkflowCondition,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppReference {
+    #[serde(default, alias = "app_name", alias = "title")]
+    pub name: String,
+    #[serde(default, alias = "bundle")]
+    pub bundle_id: Option<String>,
+    #[serde(default, alias = "command", alias = "path")]
+    pub executable: Option<String>,
+    #[serde(default, alias = "window")]
+    pub window_title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReference {
+    #[serde(default, alias = "path", alias = "name", alias = "url")]
+    pub path_template: String,
+    #[serde(default)]
+    pub resource_type: ResourceType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ResourceType {
+    Document,
+    Spreadsheet,
+    BrowserPage,
+    TerminalSession,
+    RemoteDesktop,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TargetQuery {
+    #[serde(default, alias = "name")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default, alias = "id")]
+    pub automation_id: Option<String>,
+    #[serde(default)]
+    pub shortcut: Option<String>,
+}
+
+impl TargetQuery {
+    pub fn by_label(label: impl Into<String>) -> Self {
+        Self {
+            label: Some(label.into()),
+            role: None,
+            text: None,
+            automation_id: None,
+            shortcut: None,
+        }
+    }
+
+    pub fn active_document() -> Self {
+        Self {
+            label: Some("active document".to_owned()),
+            role: Some("document".to_owned()),
+            text: None,
+            automation_id: None,
+            shortcut: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandReference {
+    #[serde(default, alias = "action")]
+    pub name: String,
+    #[serde(default)]
+    pub shortcut: Option<String>,
+    #[serde(default)]
+    pub menu_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SavePolicy {
+    #[serde(alias = "Create", alias = "Update", alias = "Overwrite")]
+    #[default]
+    CreateOrUpdate,
+    #[serde(alias = "CreateOnly")]
+    MustCreate,
+    #[serde(alias = "Existing", alias = "OpenExisting")]
+    MustExist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputExtractorReference {
+    #[serde(default)]
+    pub target: TargetQuery,
+    #[serde(default)]
+    pub pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowCondition {
+    ResourceExists { path_template: String },
+    OutputPresent { name: String },
+    VisibleText { text_template: String },
 }
 
 impl WorkflowTarget {
@@ -207,6 +355,7 @@ impl Default for WorkflowEvidencePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkflowCompileContext {
     pub adapter_id: Option<String>,
+    pub available_adapters: Vec<AdapterCapabilities>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +419,7 @@ pub enum SemanticCapability {
     OpenResource,
     CreateResourceIfMissing,
     Attach,
+    Focus,
     Find,
     Input,
     Command,
@@ -285,6 +435,7 @@ impl SemanticCapability {
             Self::OpenResource => "open.resource",
             Self::CreateResourceIfMissing => "resource.create_if_missing",
             Self::Attach => "app.attach",
+            Self::Focus => "ui.focus",
             Self::Find => "ui.find",
             Self::Input => "ui.input",
             Self::Command => "ui.command",
@@ -363,6 +514,13 @@ fn semantic_capability_candidates(semantic: SemanticCapability) -> &'static [&'s
             "linux.find_window",
             "java.find_window",
         ],
+        SemanticCapability::Focus => &[
+            "windows.focus_window",
+            "macos.focus_document",
+            "linux.focus_window",
+            "java.focus_component",
+            "vision.find_text",
+        ],
         SemanticCapability::Find => &[
             "web.wait_for",
             "windows.find_element",
@@ -380,7 +538,25 @@ fn semantic_capability_candidates(semantic: SemanticCapability) -> &'static [&'s
             "java.type_text",
             "terminal.send_text",
         ],
-        SemanticCapability::Command | SemanticCapability::Save => &[
+        SemanticCapability::Command => &[
+            "web.press",
+            "windows.press_shortcut",
+            "macos.press_shortcut",
+            "linux.press_shortcut",
+            "java.invoke_action",
+            "terminal.send_keys",
+            "web.click",
+            "windows.click_element",
+            "macos.invoke_menu",
+            "macos.click_element",
+            "linux.click_element",
+            "terminal.send_text",
+        ],
+        SemanticCapability::Save => &[
+            "web.press",
+            "windows.save_as",
+            "macos.save_as",
+            "linux.save_as",
             "web.click",
             "web.press",
             "windows.click_element",
@@ -409,6 +585,333 @@ fn semantic_capability_candidates(semantic: SemanticCapability) -> &'static [&'s
             "terminal.wait_for_screen",
             "vision.assert_visible",
         ],
+    }
+}
+
+pub fn compile_primitive_workflow(
+    workflow: &PrimitiveWorkflow,
+) -> WorkflowCompileOutcome<WorkflowCompileResult> {
+    compile_primitive_workflow_with_context(workflow, &WorkflowCompileContext::default())
+}
+
+pub fn compile_primitive_workflow_with_context(
+    workflow: &PrimitiveWorkflow,
+    context: &WorkflowCompileContext,
+) -> WorkflowCompileOutcome<WorkflowCompileResult> {
+    let mut compiler = StepCompiler::default();
+    let mut outputs = workflow
+        .outputs
+        .iter()
+        .map(|output| CompiledWorkflowOutput {
+            name: output.name.clone(),
+            extractor: output.extractor.clone(),
+            required: output.required,
+            expected: output.expected.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    for (index, primitive) in workflow.primitives.iter().enumerate() {
+        compile_primitive_step(
+            workflow,
+            context,
+            primitive,
+            index,
+            &mut compiler,
+            &mut outputs,
+        )?;
+    }
+
+    Ok(WorkflowCompileResult {
+        workflow_id: workflow.id.clone(),
+        steps: compiler.steps,
+        outputs,
+    })
+}
+
+fn compile_primitive_step(
+    workflow: &PrimitiveWorkflow,
+    context: &WorkflowCompileContext,
+    primitive: &DesktopPrimitive,
+    index: usize,
+    compiler: &mut StepCompiler,
+    outputs: &mut Vec<CompiledWorkflowOutput>,
+) -> WorkflowCompileOutcome<()> {
+    let step_id = |suffix: &str| format!("primitive-{}-{suffix}", index + 1);
+    match primitive {
+        DesktopPrimitive::OpenApp { app } => {
+            let capability =
+                concrete_capability(workflow, context, SemanticCapability::OpenTarget)?;
+            compiler.push(
+                step_id("open-app"),
+                action_for_capability(&capability, "open_app"),
+                LocatorTarget::default(),
+                Some(app.executable.clone().unwrap_or_else(|| app.name.clone())),
+                capability,
+            );
+        }
+        DesktopPrimitive::OpenResource {
+            resource,
+            create_if_missing,
+        } => {
+            let capability = concrete_capability(
+                workflow,
+                context,
+                if *create_if_missing {
+                    SemanticCapability::CreateResourceIfMissing
+                } else {
+                    SemanticCapability::OpenResource
+                },
+            )?;
+            compiler.push(
+                step_id("open-resource"),
+                action_for_capability(&capability, "open_resource"),
+                locator_for_resource(resource),
+                Some(resource.path_template.clone()),
+                capability,
+            );
+        }
+        DesktopPrimitive::Focus { target } => {
+            let capability = concrete_capability(workflow, context, SemanticCapability::Focus)?;
+            compiler.push(
+                step_id("focus"),
+                action_for_capability(&capability, "focus"),
+                locator_for_query(target),
+                None,
+                capability,
+            );
+        }
+        DesktopPrimitive::EnterText {
+            target,
+            value_template,
+        } => {
+            let find_capability = concrete_capability(workflow, context, SemanticCapability::Find)?;
+            compiler.push(
+                step_id("find-target"),
+                action_for_capability(&find_capability, "find"),
+                locator_for_query(target),
+                None,
+                find_capability,
+            );
+            let input_capability =
+                concrete_capability(workflow, context, SemanticCapability::Input)?;
+            compiler.push(
+                step_id("enter-text"),
+                action_for_capability(&input_capability, "type_text"),
+                locator_for_query(target),
+                Some(value_template.clone()),
+                input_capability,
+            );
+        }
+        DesktopPrimitive::InvokeCommand { command } => {
+            let capability = if target_is_macos(workflow) {
+                if command.shortcut.is_some() {
+                    "macos.press_shortcut".to_owned()
+                } else if !command.menu_path.is_empty() {
+                    "macos.invoke_menu".to_owned()
+                } else {
+                    concrete_capability(workflow, context, SemanticCapability::Command)?
+                }
+            } else {
+                concrete_capability(workflow, context, SemanticCapability::Command)?
+            };
+            compiler.push(
+                step_id("invoke-command"),
+                action_for_capability(&capability, "invoke_command"),
+                locator_for_command(command),
+                command
+                    .shortcut
+                    .clone()
+                    .or_else(|| {
+                        (!command.menu_path.is_empty()).then(|| command.menu_path.join(" > "))
+                    })
+                    .or_else(|| Some(command.name.clone())),
+                capability,
+            );
+        }
+        DesktopPrimitive::SaveResource {
+            path_template,
+            policy: _,
+        } => {
+            let capability = if target_is_macos(workflow) {
+                "macos.save_as".to_owned()
+            } else {
+                concrete_capability(workflow, context, SemanticCapability::Save)?
+            };
+            compiler.push(
+                step_id("save-resource"),
+                action_for_capability(&capability, "save"),
+                LocatorTarget::default(),
+                path_template.clone(),
+                capability,
+            );
+        }
+        DesktopPrimitive::ObserveOutput { name, extractor } => {
+            let capability = concrete_capability(workflow, context, SemanticCapability::Extract)?;
+            compiler.push(
+                step_id("observe-output"),
+                action_for_capability(&capability, "read_text"),
+                locator_for_query(&extractor.target),
+                extractor.pattern.clone(),
+                capability,
+            );
+            outputs.push(CompiledWorkflowOutput {
+                name: name.clone(),
+                extractor: WorkflowOutputExtractor::TargetText(Box::new(locator_for_query(
+                    &extractor.target,
+                ))),
+                required: true,
+                expected: extractor.pattern.clone(),
+            });
+        }
+        DesktopPrimitive::AssertState { condition } => match condition {
+            WorkflowCondition::ResourceExists { path_template } => {
+                outputs.push(CompiledWorkflowOutput {
+                    name: "resource_exists".to_owned(),
+                    extractor: WorkflowOutputExtractor::FileExists(path_template.clone()),
+                    required: true,
+                    expected: Some(path_template.clone()),
+                });
+            }
+            WorkflowCondition::OutputPresent { name } => {
+                let capability =
+                    concrete_capability(workflow, context, SemanticCapability::Assert)?;
+                compiler.push(
+                    step_id("assert-output"),
+                    action_for_capability(&capability, "assert_visible"),
+                    LocatorTarget::default(),
+                    Some(format!("{{{{outputs.{name}}}}}")),
+                    capability,
+                );
+            }
+            WorkflowCondition::VisibleText { text_template } => {
+                let capability =
+                    concrete_capability(workflow, context, SemanticCapability::Assert)?;
+                compiler.push(
+                    step_id("assert-visible-text"),
+                    action_for_capability(&capability, "assert_visible"),
+                    LocatorTarget {
+                        preferred: Some(LocatorStrategy {
+                            text: Some(text_template.clone()),
+                            ..LocatorStrategy::default()
+                        }),
+                        ..LocatorTarget::default()
+                    },
+                    Some(text_template.clone()),
+                    capability,
+                );
+            }
+        },
+    }
+    Ok(())
+}
+
+fn target_is_macos(workflow: &PrimitiveWorkflow) -> bool {
+    matches!(
+        workflow.target.kind,
+        WorkflowTargetKind::NativeApp(NativePlatform::MacOs)
+    )
+}
+
+fn concrete_capability(
+    workflow: &PrimitiveWorkflow,
+    context: &WorkflowCompileContext,
+    semantic: SemanticCapability,
+) -> WorkflowCompileOutcome<String> {
+    if !context.available_adapters.is_empty() {
+        if let Some(capability) =
+            target_kind_capability(&workflow.target.kind, semantic, &context.available_adapters)
+        {
+            return Ok(capability);
+        }
+        return route_semantic_capability(semantic, &context.available_adapters)
+            .map(|route| route.concrete_capability);
+    }
+    Ok(default_capability_for_target(&workflow.target.kind, semantic)?.to_owned())
+}
+
+fn target_kind_capability(
+    kind: &WorkflowTargetKind,
+    semantic: SemanticCapability,
+    adapters: &[AdapterCapabilities],
+) -> Option<String> {
+    let default = default_capability_for_target(kind, semantic).ok()?;
+    adapters
+        .iter()
+        .find(|adapter| adapter.supports(default))
+        .map(|_| default.to_owned())
+}
+
+fn default_capability_for_target(
+    kind: &WorkflowTargetKind,
+    semantic: SemanticCapability,
+) -> WorkflowCompileOutcome<&'static str> {
+    let prefix = match kind {
+        WorkflowTargetKind::Web => "web",
+        WorkflowTargetKind::NativeApp(NativePlatform::MacOs) => "macos",
+        WorkflowTargetKind::NativeApp(NativePlatform::LinuxX11) => "linux",
+        WorkflowTargetKind::NativeApp(NativePlatform::Windows) => "windows",
+        WorkflowTargetKind::JavaApp => "java",
+        WorkflowTargetKind::Terminal => "terminal",
+        WorkflowTargetKind::Vision => "vision",
+        WorkflowTargetKind::Workspace => {
+            return Err(WorkflowCompileError::UnsupportedTargetKind(
+                "workspace".to_owned(),
+            ))
+        }
+    };
+    semantic_capability_candidates(semantic)
+        .iter()
+        .copied()
+        .find(|capability| capability.starts_with(prefix))
+        .ok_or_else(|| {
+            WorkflowCompileError::MissingSemanticCapability(semantic.as_str().to_owned())
+        })
+}
+
+fn action_for_capability(capability: &str, fallback: &str) -> String {
+    capability
+        .rsplit('.')
+        .next()
+        .filter(|suffix| !suffix.is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
+fn locator_for_query(query: &TargetQuery) -> LocatorTarget {
+    LocatorTarget {
+        preferred: Some(LocatorStrategy {
+            role: query.role.clone(),
+            name: query.label.clone(),
+            automation_id: query.automation_id.clone(),
+            text: query.text.clone(),
+            label: query.label.clone(),
+            keyboard_shortcut: query.shortcut.clone(),
+            ..LocatorStrategy::default()
+        }),
+        ..LocatorTarget::default()
+    }
+}
+
+fn locator_for_resource(resource: &ResourceReference) -> LocatorTarget {
+    LocatorTarget {
+        preferred: Some(LocatorStrategy {
+            name: Some(resource.path_template.clone()),
+            control_type: Some(format!("{:?}", resource.resource_type).to_ascii_lowercase()),
+            ..LocatorStrategy::default()
+        }),
+        ..LocatorTarget::default()
+    }
+}
+
+fn locator_for_command(command: &CommandReference) -> LocatorTarget {
+    LocatorTarget {
+        preferred: Some(LocatorStrategy {
+            name: Some(command.name.clone()),
+            keyboard_shortcut: command.shortcut.clone(),
+            text: (!command.menu_path.is_empty()).then(|| command.menu_path.join(" > ")),
+            ..LocatorStrategy::default()
+        }),
+        ..LocatorTarget::default()
     }
 }
 
@@ -1126,5 +1629,177 @@ mod tests {
             WorkflowCompileError::MissingSemanticCapability(capability)
                 if capability == "ui.save"
         ));
+    }
+
+    #[test]
+    fn compiles_primitive_document_workflow_to_installed_native_adapter() {
+        let workflow = PrimitiveWorkflow {
+            id: "word.document.create".to_owned(),
+            summary: "Create a document".to_owned(),
+            target: WorkflowTarget::native_app(
+                NativePlatform::MacOs,
+                Some("Microsoft Word".to_owned()),
+                "Microsoft Word".to_owned(),
+            ),
+            inputs: Vec::new(),
+            primitives: vec![
+                DesktopPrimitive::OpenApp {
+                    app: AppReference {
+                        name: "Microsoft Word".to_owned(),
+                        bundle_id: None,
+                        executable: None,
+                        window_title: Some("Microsoft Word".to_owned()),
+                    },
+                },
+                DesktopPrimitive::EnterText {
+                    target: TargetQuery::active_document(),
+                    value_template: "{{inputs.text_content}}".to_owned(),
+                },
+                DesktopPrimitive::SaveResource {
+                    path_template: Some(
+                        "{{inputs.save_location}}/{{inputs.document_name}}".to_owned(),
+                    ),
+                    policy: SavePolicy::CreateOrUpdate,
+                },
+                DesktopPrimitive::AssertState {
+                    condition: WorkflowCondition::ResourceExists {
+                        path_template: "{{inputs.save_location}}/{{inputs.document_name}}"
+                            .to_owned(),
+                    },
+                },
+            ],
+            outputs: Vec::new(),
+            assertions: Vec::new(),
+            evidence_policy: WorkflowEvidencePolicy::default(),
+        };
+        let context = WorkflowCompileContext {
+            adapter_id: Some("greentic.desktop.macos.ax".to_owned()),
+            available_adapters: vec![AdapterCapabilities::new(
+                "greentic.desktop.macos.ax",
+                "1.0.0",
+                [
+                    "macos.activate_app",
+                    "macos.find_element",
+                    "macos.type_text",
+                    "macos.click_element",
+                    "macos.save_as",
+                    "macos.read_text",
+                ],
+            )],
+        };
+
+        let compiled = compile_primitive_workflow_with_context(&workflow, &context)
+            .expect("primitive workflow should compile");
+        let capabilities = compiled
+            .steps
+            .iter()
+            .map(|step| step.required_capability.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            capabilities,
+            vec![
+                "macos.activate_app",
+                "macos.find_element",
+                "macos.type_text",
+                "macos.save_as",
+            ]
+        );
+        assert!(matches!(
+            compiled.outputs[0].extractor,
+            WorkflowOutputExtractor::FileExists(_)
+        ));
+    }
+
+    #[test]
+    fn primitive_macos_commands_compile_to_shortcut_and_menu_actions() {
+        let workflow = PrimitiveWorkflow {
+            id: "native.commands".to_owned(),
+            summary: "Use generic macOS commands".to_owned(),
+            target: WorkflowTarget::native_app(
+                NativePlatform::MacOs,
+                Some("TextEdit".to_owned()),
+                "TextEdit".to_owned(),
+            ),
+            inputs: Vec::new(),
+            primitives: vec![
+                DesktopPrimitive::InvokeCommand {
+                    command: CommandReference {
+                        name: "New".to_owned(),
+                        shortcut: Some("Cmd+N".to_owned()),
+                        menu_path: Vec::new(),
+                    },
+                },
+                DesktopPrimitive::InvokeCommand {
+                    command: CommandReference {
+                        name: "Export".to_owned(),
+                        shortcut: None,
+                        menu_path: vec!["File".to_owned(), "Export as PDF...".to_owned()],
+                    },
+                },
+            ],
+            outputs: Vec::new(),
+            assertions: Vec::new(),
+            evidence_policy: WorkflowEvidencePolicy::default(),
+        };
+
+        let compiled = compile_primitive_workflow(&workflow).expect("workflow should compile");
+        assert_eq!(
+            compiled.steps[0].required_capability,
+            "macos.press_shortcut"
+        );
+        assert_eq!(compiled.steps[0].action, "press_shortcut");
+        assert_eq!(compiled.steps[0].value.as_deref(), Some("Cmd+N"));
+        assert_eq!(compiled.steps[1].required_capability, "macos.invoke_menu");
+        assert_eq!(compiled.steps[1].action, "invoke_menu");
+        assert_eq!(
+            compiled.steps[1].value.as_deref(),
+            Some("File > Export as PDF...")
+        );
+    }
+
+    #[test]
+    fn primitive_compiler_does_not_select_java_for_native_document_when_native_is_available() {
+        let workflow = PrimitiveWorkflow {
+            id: "native.document".to_owned(),
+            summary: "Create a native document".to_owned(),
+            target: WorkflowTarget::native_app(
+                NativePlatform::MacOs,
+                Some("Word".to_owned()),
+                "Word".to_owned(),
+            ),
+            inputs: Vec::new(),
+            primitives: vec![DesktopPrimitive::OpenApp {
+                app: AppReference {
+                    name: "Word".to_owned(),
+                    bundle_id: None,
+                    executable: None,
+                    window_title: Some("Word".to_owned()),
+                },
+            }],
+            outputs: Vec::new(),
+            assertions: Vec::new(),
+            evidence_policy: WorkflowEvidencePolicy::default(),
+        };
+        let context = WorkflowCompileContext {
+            adapter_id: None,
+            available_adapters: vec![
+                AdapterCapabilities::new(
+                    "greentic.desktop.java-accessibility",
+                    "1.0.0",
+                    ["java.find_window", "java.type_text", "java.read_text"],
+                ),
+                AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    ["macos.activate_app", "macos.type_text", "macos.read_text"],
+                ),
+            ],
+        };
+
+        let compiled = compile_primitive_workflow_with_context(&workflow, &context)
+            .expect("primitive workflow should compile");
+
+        assert_eq!(compiled.steps[0].required_capability, "macos.activate_app");
     }
 }

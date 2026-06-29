@@ -2,8 +2,9 @@ use greentic_desktop_adapter::{LocatorStrategy, LocatorTarget, RunnerStep};
 use greentic_desktop_core::RiskLevel;
 use greentic_desktop_recorder::{RecordingMode, RunnerPackage};
 use greentic_desktop_workflow::{
-    compile_workflow, CompiledWorkflowOutput, DesktopWorkflow, WorkflowActionKind,
-    WorkflowCompileError, WorkflowOutputExtractor, WorkflowRisk, WorkflowValueType,
+    compile_primitive_workflow, compile_workflow, CompiledWorkflowOutput, DesktopWorkflow,
+    PrimitiveWorkflow, WorkflowActionKind, WorkflowCompileError, WorkflowOutputExtractor,
+    WorkflowRisk, WorkflowValueType,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -384,6 +385,7 @@ pub fn runner_draft_json_schema() -> String {
             "required_capabilities": {"type": "array", "items": {"type": "string"}},
             "inputs": {"type": "object"},
             "outputs": {"type": "object"},
+            "primitive_workflow": primitive_workflow_schema_value(),
             "steps": {"type": "array", "items": runner_step_schema_value()},
             "assertions": {"type": "array", "items": {"type": "string"}},
             "open_questions": {"type": "array", "items": {"type": "string"}}
@@ -406,6 +408,7 @@ pub fn runner_definition_json_schema() -> String {
             "inputs": {"type": "array"},
             "secrets": {"type": "array"},
             "workflow": {"type": "object"},
+            "primitive_workflow": primitive_workflow_schema_value(),
             "outputs": {"type": "array"},
             "assertions": {"type": "array"},
             "evidence_policy": {"type": "object"},
@@ -415,6 +418,59 @@ pub fn runner_definition_json_schema() -> String {
         }
     })
     .to_string()
+}
+
+pub fn primitive_workflow_json_schema() -> String {
+    primitive_workflow_schema_value().to_string()
+}
+
+fn primitive_workflow_schema_value() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["id", "summary", "target", "primitives"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "summary": {"type": "string"},
+            "target": {"type": "object"},
+            "inputs": {"type": "array"},
+            "outputs": {"type": "array"},
+            "assertions": {"type": "array"},
+            "evidence_policy": {"type": "object"},
+            "primitives": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "open_app",
+                                "open_resource",
+                                "focus",
+                                "enter_text",
+                                "invoke_command",
+                                "save_resource",
+                                "observe_output",
+                                "assert_state"
+                            ]
+                        },
+                        "app": {"type": "object"},
+                        "resource": {"type": "object"},
+                        "target": {"type": "object"},
+                        "command": {"type": "object"},
+                        "value_template": {"type": "string"},
+                        "path_template": {"type": ["string", "null"]},
+                        "policy": {"type": "string"},
+                        "name": {"type": "string"},
+                        "extractor": {"type": "object"},
+                        "condition": {"type": "object"},
+                        "create_if_missing": {"type": "boolean"}
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn fields_to_json_schema(title: &str, fields: &[RunnerSchemaField]) -> String {
@@ -575,21 +631,27 @@ pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaD
     let risk_level = parse_risk(&parsed.risk_level)?;
     let required_capabilities = parsed.required_capabilities;
     let steps = if parsed.steps.is_empty() {
-        required_capabilities
-            .iter()
-            .enumerate()
-            .map(|(index, capability)| RunnerStep {
-                id: format!("draft_{}", index + 1),
-                action: capability
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("execute")
-                    .to_owned(),
-                target: LocatorTarget::default(),
-                value: None,
-                required_capability: capability.clone(),
-            })
-            .collect()
+        if let Some(primitive_workflow) = &parsed.primitive_workflow {
+            compile_primitive_workflow(primitive_workflow)
+                .map_err(|err| diagnostic("planner.schema_mismatch", &err.to_string()))?
+                .steps
+        } else {
+            required_capabilities
+                .iter()
+                .enumerate()
+                .map(|(index, capability)| RunnerStep {
+                    id: format!("draft_{}", index + 1),
+                    action: capability
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("execute")
+                        .to_owned(),
+                    target: LocatorTarget::default(),
+                    value: None,
+                    required_capability: capability.clone(),
+                })
+                .collect()
+        }
     } else {
         parsed.steps.into_iter().map(Into::into).collect()
     };
@@ -688,6 +750,8 @@ struct JsonRunnerDraftDocument {
     outputs: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     steps: Vec<JsonRunnerStep>,
+    #[serde(default)]
+    primitive_workflow: Option<PrimitiveWorkflow>,
     #[serde(default)]
     assertions: Vec<String>,
     #[serde(default)]
@@ -922,6 +986,83 @@ mod tests {
     }
 
     #[test]
+    fn parses_primitive_workflow_when_llm_omits_raw_steps() {
+        let draft = parse_runner_draft_json(
+            r#"{
+                "runner_id": "web.open.resource",
+                "version": "0.1.8-draft",
+                "summary": "Open a browser resource",
+                "risk_level": "low",
+                "required_capabilities": ["web.goto"],
+                "inputs": {"url": {"type": "string"}},
+                "outputs": {"status": {"type": "string"}},
+                "primitive_workflow": {
+                    "id": "web.open.resource",
+                    "summary": "Open a browser resource",
+                    "target": {"kind": "Web", "open": {"Url": "about:blank"}},
+                    "inputs": [],
+                    "primitives": [{
+                        "kind": "open_resource",
+                        "resource": {
+                            "path_template": "{{inputs.url}}",
+                            "resource_type": "BrowserPage"
+                        },
+                        "create_if_missing": false
+                    }],
+                    "outputs": [],
+                    "assertions": [],
+                    "evidence_policy": {"capture_steps": true, "capture_screenshots": false}
+                },
+                "steps": [],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        )
+        .expect("primitive draft should parse");
+
+        assert_eq!(draft.steps[0].required_capability, "web.goto");
+    }
+
+    #[test]
+    fn parses_llm_primitive_app_aliases_without_missing_name_error() {
+        let draft = parse_runner_draft_json(
+            r#"{
+                "runner_id": "word.document.create",
+                "version": "0.1.8-draft",
+                "summary": "Create a Word document",
+                "risk_level": "medium",
+                "required_capabilities": ["macos.activate_app", "macos.type_text", "macos.click_element"],
+                "inputs": {
+                    "document_path": {"type": "string"},
+                    "text_content": {"type": "string"}
+                },
+                "outputs": {"saved_status": {"type": "string"}},
+                "primitive_workflow": {
+                    "id": "word.document.create",
+                    "summary": "Create a Word document",
+                    "target": {"kind": {"NativeApp": "MacOs"}, "open": {"App": {"app_name": "Word", "window_title": "Word"}}},
+                    "inputs": [],
+                    "primitives": [
+                        {"kind": "open_app", "app": {"app_name": "Word", "window_title": "Word"}},
+                        {"kind": "enter_text", "target": {"label": "active document", "role": "document"}, "value_template": "{{inputs.text_content}}"},
+                        {"kind": "save_resource", "path_template": "{{inputs.document_path}}", "policy": "Create"}
+                    ],
+                    "outputs": [],
+                    "assertions": [],
+                    "evidence_policy": {"capture_steps": true, "capture_screenshots": true}
+                },
+                "steps": [],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        )
+        .expect("primitive app aliases should parse");
+
+        assert_eq!(draft.steps[0].value.as_deref(), Some("Word"));
+        assert_eq!(draft.steps[0].required_capability, "macos.activate_app");
+    }
+
+    #[test]
     fn exports_runner_draft_json_schema() {
         let schema = runner_draft_json_schema();
         let value: serde_json::Value = serde_json::from_str(&schema).expect("schema json");
@@ -931,6 +1072,22 @@ mod tests {
             .as_array()
             .expect("required")
             .contains(&serde_json::Value::String("runner_id".to_owned())));
+        assert_eq!(
+            value["properties"]["primitive_workflow"]["properties"]["primitives"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn exports_primitive_workflow_json_schema() {
+        let schema = primitive_workflow_json_schema();
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema json");
+
+        assert_eq!(value["type"], "object");
+        assert!(value["required"]
+            .as_array()
+            .expect("required")
+            .contains(&serde_json::Value::String("primitives".to_owned())));
     }
 
     #[test]

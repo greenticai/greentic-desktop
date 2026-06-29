@@ -1,5 +1,10 @@
+#![recursion_limit = "256"]
+
+use greentic_llm::{
+    ChatMessage, ChatRequest, Credential, LlmProvider as GreenticProvider, ProviderKind, RigBackend,
+};
 use serde_json::json;
-use std::process::Command;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPolicy {
@@ -63,12 +68,68 @@ pub fn known_providers() -> &'static [LlmProvider] {
             secret_name: Some("DEEPSEEK_API_KEY"),
         },
         LlmProvider {
-            id: "google",
+            id: "gemini",
             name: "Google Gemini",
             default_model: "gemini-1.5-flash",
             mode: "remote",
             endpoint: Some("https://generativelanguage.googleapis.com"),
             secret_name: Some("GOOGLE_API_KEY"),
+        },
+        LlmProvider {
+            id: "cohere",
+            name: "Cohere",
+            default_model: "command-r-plus",
+            mode: "remote",
+            endpoint: Some("https://api.cohere.com"),
+            secret_name: Some("COHERE_API_KEY"),
+        },
+        LlmProvider {
+            id: "groq",
+            name: "Groq",
+            default_model: "llama-3.1-70b-versatile",
+            mode: "remote",
+            endpoint: Some("https://api.groq.com/openai/v1"),
+            secret_name: Some("GROQ_API_KEY"),
+        },
+        LlmProvider {
+            id: "perplexity",
+            name: "Perplexity",
+            default_model: "sonar-pro",
+            mode: "remote",
+            endpoint: Some("https://api.perplexity.ai"),
+            secret_name: Some("PERPLEXITY_API_KEY"),
+        },
+        LlmProvider {
+            id: "xai",
+            name: "xAI",
+            default_model: "grok-2-latest",
+            mode: "remote",
+            endpoint: Some("https://api.x.ai/v1"),
+            secret_name: Some("XAI_API_KEY"),
+        },
+        LlmProvider {
+            id: "azure",
+            name: "Azure OpenAI",
+            default_model: "deployment-name",
+            mode: "remote",
+            endpoint: None,
+            secret_name: Some("AZURE_OPENAI_API_KEY"),
+        },
+        LlmProvider {
+            id: "azure-foundry",
+            name: "Azure AI Foundry",
+            default_model: "DeepSeek-R1",
+            mode: "remote",
+            endpoint: None,
+            secret_name: Some("AZURE_AI_FOUNDRY_API_KEY"),
+        },
+        LlmProvider {
+            id: "bedrock",
+            name: "Amazon Bedrock",
+            default_model: "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            mode: "remote",
+            endpoint: None,
+            secret_name: None,
         },
         LlmProvider {
             id: "mistral",
@@ -79,11 +140,99 @@ pub fn known_providers() -> &'static [LlmProvider] {
             secret_name: Some("MISTRAL_API_KEY"),
         },
         LlmProvider {
+            id: "openrouter",
+            name: "OpenRouter",
+            default_model: "openai/gpt-4o-mini",
+            mode: "remote",
+            endpoint: Some("https://openrouter.ai/api/v1"),
+            secret_name: Some("OPENROUTER_API_KEY"),
+        },
+        LlmProvider {
+            id: "huggingface",
+            name: "Hugging Face",
+            default_model: "mistralai/Mistral-7B-Instruct-v0.3",
+            mode: "remote",
+            endpoint: Some("https://api-inference.huggingface.co"),
+            secret_name: Some("HUGGINGFACE_API_KEY"),
+        },
+        LlmProvider {
+            id: "together",
+            name: "Together AI",
+            default_model: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+            mode: "remote",
+            endpoint: Some("https://api.together.xyz/v1"),
+            secret_name: Some("TOGETHER_API_KEY"),
+        },
+        LlmProvider {
+            id: "moonshot",
+            name: "Moonshot AI",
+            default_model: "moonshot-v1-8k",
+            mode: "remote",
+            endpoint: Some("https://api.moonshot.ai/v1"),
+            secret_name: Some("MOONSHOT_API_KEY"),
+        },
+        LlmProvider {
+            id: "minimax",
+            name: "MiniMax",
+            default_model: "abab6.5s-chat",
+            mode: "remote",
+            endpoint: Some("https://api.minimax.chat/v1"),
+            secret_name: Some("MINIMAX_API_KEY"),
+        },
+        LlmProvider {
+            id: "hyperbolic",
+            name: "Hyperbolic",
+            default_model: "meta-llama/Meta-Llama-3.1-70B-Instruct",
+            mode: "remote",
+            endpoint: Some("https://api.hyperbolic.xyz/v1"),
+            secret_name: Some("HYPERBOLIC_API_KEY"),
+        },
+        LlmProvider {
+            id: "galadriel",
+            name: "Galadriel",
+            default_model: "gpt-4o-mini",
+            mode: "remote",
+            endpoint: Some("https://api.galadriel.com/v1"),
+            secret_name: Some("GALADRIEL_API_KEY"),
+        },
+        LlmProvider {
+            id: "mira",
+            name: "Mira",
+            default_model: "gpt-4o-mini",
+            mode: "remote",
+            endpoint: Some("https://api.mira.network/v1"),
+            secret_name: Some("MIRA_API_KEY"),
+        },
+        LlmProvider {
+            id: "zai",
+            name: "Z.ai",
+            default_model: "glm-4",
+            mode: "remote",
+            endpoint: Some("https://open.bigmodel.cn/api/paas/v4"),
+            secret_name: Some("ZAI_API_KEY"),
+        },
+        LlmProvider {
+            id: "xiaomimimo",
+            name: "Xiaomi MiMo",
+            default_model: "mimo-vl-7b",
+            mode: "remote",
+            endpoint: Some("https://api.mimo.mi.com/v1"),
+            secret_name: Some("XIAOMIMIMO_API_KEY"),
+        },
+        LlmProvider {
             id: "ollama",
             name: "Ollama",
             default_model: "llama3.1",
             mode: "remote",
             endpoint: Some("http://127.0.0.1:11434"),
+            secret_name: None,
+        },
+        LlmProvider {
+            id: "llamafile",
+            name: "Llamafile",
+            default_model: "local",
+            mode: "remote",
+            endpoint: Some("http://127.0.0.1:8080"),
             secret_name: None,
         },
     ]
@@ -111,6 +260,14 @@ pub struct LlmRequestEnvelope {
     pub context: LlmPlanningContext,
     pub user_prompt: String,
     pub expected_json_schema: serde_json::Value,
+    pub repair: Option<LlmRepairContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmRepairContext {
+    pub invalid_json: String,
+    pub validation_error: String,
+    pub attempt: u8,
 }
 
 impl LlmRequestEnvelope {
@@ -121,6 +278,28 @@ impl LlmRequestEnvelope {
             context,
             user_prompt: prompt.into(),
             expected_json_schema: runner_draft_json_schema(),
+            repair: None,
+        }
+    }
+
+    pub fn repair_runner_json(
+        prompt: impl Into<String>,
+        context: LlmPlanningContext,
+        invalid_json: impl Into<String>,
+        validation_error: impl Into<String>,
+        attempt: u8,
+    ) -> Self {
+        Self {
+            task: "desktop.repair_runner_json".to_owned(),
+            model_policy: ModelPolicy::default(),
+            context,
+            user_prompt: prompt.into(),
+            expected_json_schema: runner_draft_json_schema(),
+            repair: Some(LlmRepairContext {
+                invalid_json: invalid_json.into(),
+                validation_error: validation_error.into(),
+                attempt,
+            }),
         }
     }
 
@@ -143,6 +322,12 @@ impl LlmRequestEnvelope {
             },
             "user_prompt": self.user_prompt,
             "expected_json_schema": self.expected_json_schema,
+            "repair": self.repair.as_ref().map(|repair| json!({
+                "attempt": repair.attempt,
+                "validation_error": repair.validation_error,
+                "invalid_json": repair.invalid_json,
+                "instruction": "Return a corrected JSON object only. Preserve user intent, fix every validation error, and validate against expected_json_schema."
+            })),
             "valid_example": runner_draft_json_example(),
         })
         .to_string()
@@ -195,6 +380,53 @@ pub fn runner_draft_json_schema() -> serde_json::Value {
                     }
                 }
             },
+            "primitive_workflow": {
+                "type": "object",
+                "description": "Preferred portable workflow plan. Use this for desktop, web, Java, terminal, remote desktop, and vision automation. Keep steps empty when primitive_workflow is present; Greentic compiles primitives to platform adapter steps.",
+                "required": ["id", "summary", "target", "primitives"],
+                "properties": {
+                    "id": {"type": "string", "minLength": 1},
+                    "summary": {"type": "string"},
+                    "target": {"type": "object"},
+                    "inputs": {"type": "array"},
+                    "outputs": {"type": "array"},
+                    "assertions": {"type": "array"},
+                    "evidence_policy": {"type": "object"},
+                    "primitives": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["kind"],
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "open_app",
+                                        "open_resource",
+                                        "focus",
+                                        "enter_text",
+                                        "invoke_command",
+                                        "save_resource",
+                                        "observe_output",
+                                        "assert_state"
+                                    ]
+                                },
+                                "app": {"type": "object"},
+                                "resource": {"type": "object"},
+                                "target": {"type": "object"},
+                                "command": {"type": "object"},
+                                "value_template": {"type": "string"},
+                                "path_template": {"type": ["string", "null"]},
+                                "policy": {"type": "string"},
+                                "name": {"type": "string"},
+                                "extractor": {"type": "object"},
+                                "condition": {"type": "object"},
+                                "create_if_missing": {"type": "boolean"}
+                            }
+                        }
+                    }
+                }
+            },
             "steps": {
                 "type": "array",
                 "items": {
@@ -231,13 +463,23 @@ fn runner_draft_json_example() -> serde_json::Value {
         "outputs": {
             "saved_status": {"type": "string"}
         },
-        "steps": [
-            {"id": "open-target-app", "action": "activate_app", "required_capability": "macos.activate_app", "value": "{{inputs.resource_name}}"},
-            {"id": "enter-name", "action": "type_text", "required_capability": "macos.type_text", "value": "{{inputs.name}}"},
-            {"id": "enter-email", "action": "type_text", "required_capability": "macos.type_text", "value": "{{inputs.email}}"},
-            {"id": "save-resource", "action": "type_text", "required_capability": "macos.type_text", "value": "save"},
-            {"id": "read-saved-status", "action": "read_text", "required_capability": "macos.read_text"}
-        ],
+        "primitive_workflow": {
+            "id": "generic.resource.update",
+            "summary": "Open or create a resource, enter user-provided data, save it, and prove the resource exists.",
+            "target": {"kind": {"NativeApp": "MacOs"}, "open": {"App": {"app_name": "Default app", "window_title": "Default app"}}},
+            "inputs": [],
+            "primitives": [
+                {"kind": "open_app", "app": {"name": "Default app", "bundle_id": null, "executable": null, "window_title": "Default app"}},
+                {"kind": "open_resource", "resource": {"path_template": "{{inputs.resource_name}}", "resource_type": "Unknown"}, "create_if_missing": true},
+                {"kind": "enter_text", "target": {"label": "active document", "role": "document", "text": null, "automation_id": null, "shortcut": null}, "value_template": "{{inputs.name}}\t{{inputs.email}}"},
+                {"kind": "save_resource", "path_template": "{{inputs.resource_name}}", "policy": "CreateOrUpdate"},
+                {"kind": "assert_state", "condition": {"ResourceExists": {"path_template": "{{inputs.resource_name}}"}}}
+            ],
+            "outputs": [],
+            "assertions": [],
+            "evidence_policy": {"capture_steps": true, "capture_screenshots": true}
+        },
+        "steps": [],
         "assertions": ["resource was saved"],
         "open_questions": ["Which application should open this resource if the OS default is not correct?"]
     })
@@ -289,91 +531,69 @@ impl OpenAiCompatibleLlmClient {
             api_key,
         }
     }
-
-    fn url(&self) -> String {
-        format!("{}/chat/completions", self.endpoint.trim_end_matches('/'))
-    }
 }
 
 impl GreenticLlmClient for OpenAiCompatibleLlmClient {
     fn complete(&self, request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError> {
-        if !is_openai_compatible_provider(&self.provider_id) {
+        if !is_greentic_llm_provider(&self.provider_id) {
             return Err(LlmError::Unavailable(format!(
                 "LLM provider '{}' is not wired to a live request format yet.",
                 self.provider_id
             )));
         }
 
-        let body = openai_compatible_body(&self.model, request)?;
-        let mut command = Command::new("curl");
-        command
-            .arg("-fsS")
-            .arg("-X")
-            .arg("POST")
-            .arg(self.url())
-            .arg("-H")
-            .arg("content-type: application/json")
-            .arg("-d")
-            .arg(body);
-        if let Some(api_key) = &self.api_key {
-            if !api_key.trim().is_empty() {
-                command
-                    .arg("-H")
-                    .arg(format!("authorization: Bearer {api_key}"));
-            }
-        }
-        let output = command
-            .output()
-            .map_err(|err| LlmError::Unavailable(format!("failed to start curl: {err}")))?;
-        if !output.status.success() {
-            return Err(LlmError::Unavailable(format!(
-                "LLM request failed with status {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let content = extract_openai_compatible_content(&raw)?;
+        let kind = ProviderKind::from_str(&self.provider_id).map_err(LlmError::Unavailable)?;
+        let backend = RigBackend::new(
+            kind,
+            &self.model,
+            &Credential {
+                api_key: self.api_key.clone().unwrap_or_default(),
+                base_url: endpoint_override(kind, &self.endpoint),
+                expires_at: None,
+                api_version: None,
+                aws_profile: None,
+            },
+        )
+        .map_err(|err| LlmError::Unavailable(err.to_string()))?;
+        let response = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| LlmError::Unavailable(format!("failed to start LLM runtime: {err}")))?
+            .block_on(backend.chat(ChatRequest {
+                messages: vec![
+                    ChatMessage::system(system_prompt()),
+                    ChatMessage::user(request.render_json()),
+                ],
+                tools: Vec::new(),
+                tool_choice: None,
+                max_tokens: Some(8_192),
+                temperature: Some(f32::from(request.model_policy.temperature_tenths) / 10.0),
+            }))
+            .map_err(|err| LlmError::Unavailable(err.to_string()))?;
+        let content = response.content;
         Ok(LlmResponse { content })
     }
 }
 
+fn endpoint_override(kind: ProviderKind, endpoint: &str) -> Option<String> {
+    let default = provider_by_id(kind.as_str())
+        .and_then(|provider| provider.endpoint)
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let endpoint = endpoint.trim_end_matches('/');
+    (!endpoint.is_empty() && endpoint != default).then(|| endpoint.to_owned())
+}
+
+fn system_prompt() -> &'static str {
+    "You turn desktop automation prompts into strict runner JSON. Return only a JSON object that validates against expected_json_schema in the user message. If the task is desktop.repair_runner_json, fix the supplied invalid_json using repair.validation_error and return only the corrected JSON. Prefer primitive_workflow for portable desktop, web, Java, terminal, remote desktop, and vision automation. If primitive_workflow is present, steps may be empty because Greentic compiles primitives. If you include steps, every item MUST include id, action, and required_capability. Inputs and outputs must be JSON objects keyed by field name."
+}
+
 pub fn is_openai_compatible_provider(provider_id: &str) -> bool {
-    matches!(provider_id, "openai" | "deepseek" | "mistral" | "ollama")
+    is_greentic_llm_provider(provider_id)
 }
 
-fn openai_compatible_body(model: &str, request: &LlmRequestEnvelope) -> Result<String, LlmError> {
-    serde_json::to_string(&json!({
-        "model": model,
-        "temperature": f64::from(request.model_policy.temperature_tenths) / 10.0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": "You turn desktop automation prompts into strict runner JSON. Return only a JSON object that validates against expected_json_schema in the user message. Do not omit required fields. Every item in steps MUST include id, action, and required_capability. Inputs and outputs must be JSON objects keyed by field name."
-            },
-            {
-                "role": "user",
-                "content": request.render_json()
-            }
-        ]
-    }))
-    .map_err(|err| LlmError::Unavailable(format!("failed to render LLM request JSON: {err}")))
-}
-
-fn extract_openai_compatible_content(raw: &str) -> Result<String, LlmError> {
-    let value: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
-        LlmError::Unavailable(format!("LLM response was not valid JSON: {err}: {raw}"))
-    })?;
-    value
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            LlmError::Unavailable(format!(
-                "LLM response did not contain choices[0].message.content: {raw}"
-            ))
-        })
+pub fn is_greentic_llm_provider(provider_id: &str) -> bool {
+    ProviderKind::from_str(provider_id).is_ok()
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +649,16 @@ impl GreenticLlmClient for HeuristicLlmClient {
         if lower.contains("spreadsheet") {
             inputs.push("spreadsheet_name");
         }
+        if lower.contains("document") || lower.contains("word") {
+            if lower.contains("place") || lower.contains("path") || lower.contains("location") {
+                inputs.push("document_path");
+            } else {
+                inputs.push("document_name");
+            }
+        }
+        if lower.contains("text") || lower.contains("content") {
+            inputs.push("text_content");
+        }
         if lower.contains("provided") && lower.contains("name")
             || lower.contains("user provided name")
         {
@@ -482,20 +712,129 @@ impl GreenticLlmClient for HeuristicLlmClient {
             Vec::new()
         };
 
+        let primitive_workflow = primitive_workflow_json(
+            &runner_id,
+            &request.user_prompt,
+            &lower,
+            capability,
+            &inputs,
+        );
+        let steps = if primitive_workflow.is_some() {
+            "[]".to_owned()
+        } else {
+            format!(
+                "[{{\"id\":\"draft_1\",\"action\":\"plan\",\"required_capability\":\"{}\"}}]",
+                capability
+            )
+        };
+        let primitive_property = primitive_workflow
+            .map(|workflow| format!(",\"primitive_workflow\":{workflow}"))
+            .unwrap_or_default();
+
         Ok(LlmResponse {
             content: format!(
-                "{{\"runner_id\":\"{}\",\"version\":\"0.1.0-draft\",\"summary\":\"{}\",\"risk_level\":\"{}\",\"required_capabilities\":[\"{}\"],\"inputs\":{},\"outputs\":{},\"steps\":[{{\"id\":\"draft_1\",\"action\":\"plan\",\"required_capability\":\"{}\"}}],\"assertions\":[\"no unexpected errors\"],\"open_questions\":{}}}",
+                "{{\"runner_id\":\"{}\",\"version\":\"0.1.0-draft\",\"summary\":\"{}\",\"risk_level\":\"{}\",\"required_capabilities\":[\"{}\"],\"inputs\":{},\"outputs\":{}{},\"steps\":{},\"assertions\":[\"no unexpected errors\"],\"open_questions\":{}}}",
                 escape(&runner_id),
                 escape(&request.user_prompt),
                 risk,
                 capability,
                 named_schema(&inputs),
                 named_schema(&outputs),
-                capability,
+                primitive_property,
+                steps,
                 string_array(&open_questions.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>())
             ),
         })
     }
+}
+
+fn primitive_workflow_json(
+    runner_id: &str,
+    prompt: &str,
+    lower: &str,
+    capability: &str,
+    inputs: &[&str],
+) -> Option<String> {
+    let platform = if capability.starts_with("macos.") {
+        ("MacOs", "macos")
+    } else if capability.starts_with("windows.") {
+        ("Windows", "windows")
+    } else if capability.starts_with("linux.") {
+        ("LinuxX11", "linux")
+    } else {
+        return None;
+    };
+    let app_name = if lower.contains("calculator") {
+        "Calculator"
+    } else if lower.contains("word") || lower.contains("document") {
+        "Word"
+    } else if lower.contains("spreadsheet") {
+        "Default spreadsheet app"
+    } else {
+        "Default app"
+    };
+    let path_template = if lower.contains("spreadsheet") {
+        "{{inputs.spreadsheet_name}}"
+    } else if inputs.contains(&"document_path") {
+        "{{inputs.document_path}}"
+    } else {
+        "{{inputs.resource_name}}"
+    };
+    let mut primitives = vec![format!(
+        "{{\"kind\":\"open_app\",\"app\":{{\"name\":\"{}\",\"bundle_id\":null,\"executable\":null,\"window_title\":\"{}\"}}}}",
+        escape(app_name),
+        escape(app_name)
+    )];
+    if lower.contains("spreadsheet") || lower.contains("document") || lower.contains("resource") {
+        primitives.push(format!(
+            "{{\"kind\":\"open_resource\",\"resource\":{{\"path_template\":\"{}\",\"resource_type\":\"{}\"}},\"create_if_missing\":true}}",
+            escape(path_template),
+            if lower.contains("spreadsheet") {
+                "Spreadsheet"
+            } else {
+                "Document"
+            }
+        ));
+    }
+    let value_template = if lower.contains("calculator") {
+        "{{inputs.number_1}} {{inputs.operation}} {{inputs.number_2}}"
+    } else if lower.contains("email") && lower.contains("name") {
+        "{{inputs.name}}\\t{{inputs.email}}"
+    } else if inputs.contains(&"text_content") {
+        "{{inputs.text_content}}"
+    } else {
+        "{{inputs.input}}"
+    };
+    primitives.push(format!(
+        "{{\"kind\":\"enter_text\",\"target\":{{\"label\":\"active document\",\"role\":\"document\",\"text\":null,\"automation_id\":null,\"shortcut\":null}},\"value_template\":\"{}\"}}",
+        escape(value_template)
+    ));
+    if lower.contains("save") || lower.contains("spreadsheet") || lower.contains("document") {
+        primitives.push(format!(
+            "{{\"kind\":\"save_resource\",\"path_template\":\"{}\",\"policy\":\"CreateOrUpdate\"}}",
+            escape(path_template)
+        ));
+        primitives.push(format!(
+            "{{\"kind\":\"assert_state\",\"condition\":{{\"ResourceExists\":{{\"path_template\":\"{}\"}}}}}}",
+            escape(path_template)
+        ));
+    } else {
+        primitives.push(
+            "{\"kind\":\"observe_output\",\"name\":\"result\",\"extractor\":{\"target\":{\"label\":\"result\",\"role\":\"status\",\"text\":null,\"automation_id\":null,\"shortcut\":null},\"pattern\":null}}"
+                .to_owned(),
+        );
+    }
+
+    Some(format!(
+        "{{\"id\":\"{}\",\"summary\":\"{}\",\"target\":{{\"kind\":{{\"NativeApp\":\"{}\"}},\"open\":{{\"App\":{{\"app_name\":\"{}\",\"window_title\":\"{}\"}}}}}},\"inputs\":[],\"primitives\":[{}],\"outputs\":[],\"assertions\":[],\"evidence_policy\":{{\"capture_steps\":true,\"capture_screenshots\":true}},\"metadata\":{{\"platform\":\"{}\"}}}}",
+        escape(runner_id),
+        escape(prompt),
+        platform.0,
+        escape(app_name),
+        escape(app_name),
+        primitives.join(","),
+        platform.1
+    ))
 }
 
 fn desktop_capability(request: &LlmRequestEnvelope) -> &'static str {
@@ -673,14 +1012,27 @@ mod tests {
         ));
         assert!(providers.iter().any(|provider| provider.id == "deepseek"
             && provider.secret_name == Some("DEEPSEEK_API_KEY")));
+        assert!(providers.iter().any(|provider| provider.id == "gemini"));
+        assert!(providers.iter().any(|provider| provider.id == "openrouter"));
+        assert!(providers.iter().any(|provider| provider.id == "llamafile"));
         assert_eq!(
             provider_by_id("openai").map(|provider| provider.default_model),
             Some("gpt-4.1-mini")
         );
+        for kind in ProviderKind::all() {
+            assert!(
+                providers
+                    .iter()
+                    .any(|provider| provider.id == kind.as_str()),
+                "missing greentic-llm provider {}",
+                kind.as_str()
+            );
+            assert!(is_greentic_llm_provider(kind.as_str()));
+        }
     }
 
     #[test]
-    fn openai_compatible_client_uses_http_response_for_runner_fields() {
+    fn rig_backed_client_uses_provider_http_response_for_runner_fields() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock LLM should bind");
         let addr = listener.local_addr().expect("mock addr");
         let server = thread::spawn(move || {
@@ -691,12 +1043,30 @@ mod tests {
             assert!(request.contains("desktop.prompt_to_runner"));
             assert!(request.contains("open the calculator"));
             assert!(request.contains("expected_json_schema"));
-            assert!(request.contains(
-                "\\\"required\\\":[\\\"id\\\",\\\"action\\\",\\\"required_capability\\\"]"
-            ));
+            assert!(
+                request.contains("authorization: Bearer test-key")
+                    || request.contains("Authorization: Bearer test-key")
+            );
             let content = r#"{"runner_id":"calculator.from_llm","version":"0.1.0-draft","summary":"Calculator runner from LLM","risk_level":"low","required_capabilities":["web.goto","web.fill","web.click","web.extract_text"],"inputs":{"number_1":{"type":"number"},"number_2":{"type":"number"},"operation":{"type":"string"}},"outputs":{"result":{"type":"string"}},"steps":[{"id":"open-calculator","action":"goto","required_capability":"web.goto"},{"id":"fill-number-1","action":"fill","required_capability":"web.fill","value":"{{inputs.number_1}}"},{"id":"fill-number-2","action":"fill","required_capability":"web.fill","value":"{{inputs.number_2}}"},{"id":"read-result","action":"extract_text","required_capability":"web.extract_text"}],"assertions":["result is visible"],"open_questions":[]}"#;
             let body = serde_json::json!({
-                "choices": [{"message": {"content": content}}]
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "system_fingerprint": null,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "total_tokens": 2
+                }
             })
             .to_string();
             let response = format!(

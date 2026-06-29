@@ -135,6 +135,25 @@ greentic-desktop runner list
 
 The runtime looks for `.gtpack` files under the local Greentic Desktop runner directory.
 
+Package a reviewed runner through `greentic-pack`:
+
+```bash
+greentic-desktop runner pack crm.create_customer --out ./dist/crm.create_customer.gtpack
+```
+
+Greentic Desktop writes a temporary `answers.json` and invokes:
+
+```bash
+greentic-pack --answers /path/to/answers.json
+```
+
+Verify or install a package through `greentic-pack`:
+
+```bash
+greentic-desktop runner verify-pack ./dist/crm.create_customer.gtpack
+greentic-desktop runner install-pack ./dist/crm.create_customer.gtpack
+```
+
 Create a draft runner from a prompt:
 
 ```bash

@@ -25,3 +25,4 @@ greentic-desktop-mcp.workspace = true
 greentic-desktop-registry.workspace = true
 greentic-desktop-session.workspace = true
 greentic-desktop-telemetry.workspace = true
+serde_json.workspace = true

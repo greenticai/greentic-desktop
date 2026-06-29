@@ -205,7 +205,9 @@ mod tests {
                 },
                 required_adapters: vec!["greentic.desktop.playwright".to_owned()],
                 compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-                package_checksum: "sha256:abc123".to_owned(),
+                package_checksum:
+                    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        .to_owned(),
             },
             &key,
         )

@@ -14,7 +14,7 @@ Greentic Desktop runs desktop automation from a local runtime. The runtime keeps
 8. Open **My Runners**, run the saved runner, inspect the evidence, and approve any high-risk actions.
 9. Start the managed MCP service from **My Runners** and copy the client configuration when you need an assistant or MCP client to call the runner.
 
-The detailed browser workflow is in [Automate Hub GUI](gui.md). A release validation checklist is in [End-To-End Smoke Checklist](e2e-smoke.md).
+The detailed browser workflow is in [Automate Hub GUI](gui.md). Check the [Capability Matrix](capability-matrix.md) before relying on an adapter path; native desktop, terminal, Java, and vision paths are experimental until their fixture E2Es prove the full workflow. A release validation checklist is in [End-To-End Smoke Checklist](e2e-smoke.md).
 
 ## 1. Check The Runtime
 
@@ -44,7 +44,7 @@ You can point it somewhere else by setting `GREENTIC_DESKTOP_HOME` before runnin
 
 ## 3. Install An Adapter Extension
 
-Adapters let Greentic Desktop interact with different kinds of applications. For example, to install the built-in Playwright web adapter manifest:
+Adapters let Greentic Desktop interact with different kinds of applications, but they are not all equally mature. For example, to install the built-in Playwright web adapter manifest:
 
 ```bash
 greentic-desktop extension install greentic.desktop.playwright
@@ -86,7 +86,7 @@ greentic-desktop record start \
   --out ./recordings/generic.resource_append
 ```
 
-During recording, Greentic Desktop captures the meaningful desktop actions: opening an app or page, clicking controls, filling fields, reading values, waiting for visible text, and taking screenshots when evidence is needed. Sensitive values are redacted before they become part of a runner.
+During web recording, Greentic Desktop captures actions in the Greentic-owned browser context: opening a page, clicking controls, filling fields, reading values, waiting for visible text, and taking screenshots when evidence is needed. Sensitive values are redacted before they become part of a runner. Native desktop, terminal, Java, and vision recording paths are experimental and must block with a concrete setup or backend reason when they cannot capture real events.
 
 Pause, resume, inspect, or stop the recording as needed:
 

@@ -32,6 +32,10 @@ pub fn macos_capabilities() -> AdapterCapabilities {
             "macos.find_element",
             "macos.click_element",
             "macos.type_text",
+            "macos.press_shortcut",
+            "macos.invoke_menu",
+            "macos.focus_document",
+            "macos.save_as",
             "macos.read_text",
             "macos.assert_visible",
             "macos.screenshot",
@@ -465,6 +469,43 @@ impl MacOsAccessibilityAdapter {
                 macos_click_element(&app, &step.target)?;
                 Ok("clicked macOS accessibility element".to_owned())
             }
+            "macos.press_shortcut" => {
+                let shortcut = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macos.press_shortcut requires a shortcut such as Cmd+N in step.value."
+                            .to_owned(),
+                    )
+                })?;
+                let app = self.active_app_or_frontmost()?;
+                macos_press_shortcut(&app, shortcut)?;
+                Ok(format!("pressed macOS shortcut {shortcut}"))
+            }
+            "macos.invoke_menu" => {
+                let menu_path = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macos.invoke_menu requires a menu path such as File > Save in step.value."
+                            .to_owned(),
+                    )
+                })?;
+                let app = self.active_app_or_frontmost()?;
+                macos_invoke_menu(&app, menu_path)?;
+                Ok(format!("invoked macOS menu {menu_path}"))
+            }
+            "macos.focus_document" => {
+                let app = self.active_app_or_frontmost()?;
+                macos_focus_document(&app, &step.target)?;
+                Ok("focused macOS document area".to_owned())
+            }
+            "macos.save_as" => {
+                let path = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macos.save_as requires the target path in step.value.".to_owned(),
+                    )
+                })?;
+                let app = self.active_app_or_frontmost()?;
+                macos_save_as(&app, path)?;
+                Ok(format!("saved macOS document as {path}"))
+            }
             "macos.read_text" => {
                 let app = self.active_app_or_frontmost()?;
                 let text = macos_read_element_text(&app, &step.target)?;
@@ -772,6 +813,120 @@ end tell
     run_osascript(&script).map(|_| ())
 }
 
+fn macos_press_shortcut(app: &str, shortcut: &str) -> AdapterResult<()> {
+    let (key, modifiers) = macos_shortcut_parts(shortcut)?;
+    let using = if modifiers.is_empty() {
+        String::new()
+    } else {
+        format!(" using {{{}}}", modifiers.join(", "))
+    };
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    keystroke {key}{using}
+  end tell
+end tell
+"#,
+        app = apple_quote(app),
+        key = apple_quote(&key),
+        using = using
+    );
+    run_osascript(&script).map(|_| ())
+}
+
+fn macos_invoke_menu(app: &str, menu_path: &str) -> AdapterResult<()> {
+    let parts = menu_path
+        .split('>')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return Err(AdapterError::ExecutionFailed(
+            "macos.invoke_menu requires at least a menu and item, for example File > Save."
+                .to_owned(),
+        ));
+    }
+    let menu = apple_quote(parts[0]);
+    let mut expression = format!("menu item {}", apple_quote(parts[parts.len() - 1]));
+    for part in parts[1..parts.len() - 1].iter().rev() {
+        expression = format!(
+            "menu item {} of menu 1 of {}",
+            apple_quote(part),
+            expression
+        );
+    }
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    click {expression} of menu {menu} of menu bar 1
+  end tell
+end tell
+"#,
+        app = apple_quote(app),
+        expression = expression,
+        menu = menu
+    );
+    run_osascript(&script).map(|_| ())
+}
+
+fn macos_focus_document(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
+    let predicate = macos_locator_predicate(target, None).unwrap_or_else(|_| {
+        "(its role is \"AXTextArea\") or (its role is \"AXWebArea\") or (its role is \"AXScrollArea\")"
+            .to_owned()
+    });
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    set candidate to first UI element of entire contents of front window whose {predicate}
+    try
+      set focused of candidate to true
+    end try
+    try
+      click candidate
+    end try
+  end tell
+end tell
+"#,
+        app = apple_quote(app),
+        predicate = predicate
+    );
+    run_osascript(&script).map(|_| ())
+}
+
+fn macos_save_as(app: &str, path: &str) -> AdapterResult<()> {
+    if path.trim().is_empty() {
+        return Err(AdapterError::ExecutionFailed(
+            "macos.save_as requires a non-empty file path.".to_owned(),
+        ));
+    }
+    let script = format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    keystroke "s" using {{command down, shift down}}
+    delay 0.5
+    keystroke "g" using {{command down, shift down}}
+    delay 0.2
+    keystroke {path}
+    key code 36
+    delay 0.2
+    key code 36
+  end tell
+end tell
+"#,
+        app = apple_quote(app),
+        path = apple_quote(path)
+    );
+    run_osascript(&script).map(|_| ())
+}
+
 fn take_macos_screenshot(path: &Path) -> AdapterResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
@@ -827,16 +982,16 @@ fn macos_locator_predicate(
     let candidates = [target.preferred.as_ref(), target.fallback.as_ref()];
     let mut predicates = Vec::new();
     for strategy in candidates.into_iter().flatten() {
-        if let Some(id) = strategy.automation_id.as_deref() {
+        if let Some(id) = non_empty(strategy.automation_id.as_deref()) {
             predicates.push(format!("its description is {}", apple_quote(id)));
         }
-        if let Some(name) = strategy.name.as_deref() {
+        if let Some(name) = non_empty(strategy.name.as_deref()) {
             predicates.push(format!("its name contains {}", apple_quote(name)));
         }
-        if let Some(role) = strategy.role.as_deref() {
+        if let Some(role) = non_empty(strategy.role.as_deref()) {
             predicates.push(format!("its role is {}", apple_quote(role)));
         }
-        if let Some(text) = strategy.text.as_deref() {
+        if let Some(text) = non_empty(strategy.text.as_deref()) {
             predicates.push(format!("its value as text contains {}", apple_quote(text)));
         }
     }
@@ -854,6 +1009,41 @@ fn macos_locator_predicate(
         ));
     }
     Ok(predicates.join(" or "))
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+fn macos_shortcut_parts(shortcut: &str) -> AdapterResult<(String, Vec<&'static str>)> {
+    let parts = shortcut
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some(key) = parts.last() else {
+        return Err(AdapterError::ExecutionFailed(
+            "shortcut must include a key, for example Cmd+N.".to_owned(),
+        ));
+    };
+    let mut modifiers = Vec::new();
+    for modifier in &parts[..parts.len().saturating_sub(1)] {
+        match modifier.to_ascii_lowercase().as_str() {
+            "cmd" | "command" | "meta" => modifiers.push("command down"),
+            "shift" => modifiers.push("shift down"),
+            "option" | "alt" => modifiers.push("option down"),
+            "ctrl" | "control" => modifiers.push("control down"),
+            other => {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "unsupported macOS shortcut modifier {other}"
+                )))
+            }
+        }
+    }
+    Ok(((*key).to_owned(), modifiers))
 }
 
 fn frontmost_app_script() -> &'static str {
@@ -1050,6 +1240,10 @@ mod tests {
         assert!(capabilities.supports("macos.find_app"));
         assert!(capabilities.supports("macos.screenshot"));
         assert!(capabilities.supports("macos.close_app"));
+        assert!(capabilities.supports("macos.press_shortcut"));
+        assert!(capabilities.supports("macos.invoke_menu"));
+        assert!(capabilities.supports("macos.focus_document"));
+        assert!(capabilities.supports("macos.save_as"));
     }
 
     #[test]
@@ -1069,6 +1263,43 @@ mod tests {
         assert!(ready.supports("macos.activate_app"));
         assert!(ready.supports("macos.type_text"));
         assert!(ready.supports("macos.read_text"));
+        assert!(ready.supports("macos.press_shortcut"));
+        assert!(ready.supports("macos.save_as"));
+    }
+
+    #[test]
+    fn parses_macos_shortcut_modifiers() {
+        let (key, modifiers) = macos_shortcut_parts("Cmd+Shift+N").expect("shortcut");
+
+        assert_eq!(key, "N");
+        assert_eq!(modifiers, vec!["command down", "shift down"]);
+        let err = macos_shortcut_parts("Cmd+Hyper+N").expect_err("unsupported modifier");
+        assert!(format!("{err}").contains("unsupported macOS shortcut modifier"));
+    }
+
+    #[test]
+    fn new_macos_actions_report_missing_values_before_touching_os_state() {
+        let adapter = MacOsAccessibilityAdapter::new(platform(full_permissions()));
+        for (capability, expected) in [
+            ("macos.press_shortcut", "requires a shortcut"),
+            ("macos.invoke_menu", "requires a menu path"),
+            ("macos.save_as", "requires the target path"),
+        ] {
+            let err = adapter
+                .execute(RunnerStep {
+                    id: capability.to_owned(),
+                    action: capability
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(capability)
+                        .to_owned(),
+                    target: LocatorTarget::default(),
+                    value: None,
+                    required_capability: capability.to_owned(),
+                })
+                .expect_err("missing value should fail before querying frontmost app");
+            assert!(format!("{err}").contains(expected), "{err}");
+        }
     }
 
     #[test]

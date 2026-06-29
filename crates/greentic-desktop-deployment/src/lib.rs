@@ -568,7 +568,9 @@ mod tests {
                 },
                 required_adapters: vec!["greentic.desktop.playwright".to_owned()],
                 compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-                package_checksum: "sha256:runner".to_owned(),
+                package_checksum:
+                    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        .to_owned(),
             },
             &registry_key,
         )
@@ -688,7 +690,8 @@ mod tests {
     #[test]
     fn tampered_checksums_are_rejected() {
         let mut package = signed_runner(DeploymentMode::Airgapped);
-        package.manifest.checksum = "sha256:tampered".to_owned();
+        package.manifest.checksum =
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned();
         package.signature = signature_for(&package.manifest, &package.payload, &key());
 
         assert_eq!(

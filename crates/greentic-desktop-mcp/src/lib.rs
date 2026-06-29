@@ -9,6 +9,8 @@ use greentic_desktop_security::{
 use greentic_desktop_session::SessionProfile;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpTool {
     pub name: String,
@@ -66,6 +68,34 @@ impl PublishedRunnerTool {
             ),
             risk: self.risk,
         }
+    }
+}
+
+pub fn mcp_tool_descriptor_for_package(
+    package: &RunnerPackage,
+    adapters: &[AdapterCapabilities],
+    risk: RiskLevel,
+    name: String,
+    description: String,
+) -> McpTool {
+    let input_schema = McpInputSchema {
+        fields: schema_fields(&package.inputs, false)
+            .into_iter()
+            .chain(schema_fields(&package.secrets, true))
+            .collect(),
+    };
+    let output_schema = McpOutputSchema {
+        fields: schema_fields(&package.outputs, false),
+    };
+    McpTool {
+        name,
+        description,
+        input_schema_ref: "inputs.schema.json".to_owned(),
+        output_schema_ref: "outputs.schema.json".to_owned(),
+        input_schema_json: input_schema.to_json_schema(),
+        output_schema_json: output_schema.to_json_schema(),
+        availability_diagnostics: adapter_availability_diagnostics(package, adapters),
+        risk,
     }
 }
 
@@ -211,6 +241,218 @@ impl McpServerState {
             .join(",");
         format!("{{\"tools\":[{tools}]}}")
     }
+
+    pub fn handle_jsonrpc(&mut self, body: &str) -> String {
+        match parse_jsonrpc_request(body) {
+            Ok(request) => match request.method.as_str() {
+                "initialize" => render_initialize_response(request.id.as_ref()),
+                "notifications/initialized" => render_empty_response(request.id.as_ref()),
+                "tools/list" => render_tools_list_response(request.id.as_ref(), &self.list_tools()),
+                "tools/call" => {
+                    let Some(name) = request.tool_name else {
+                        return render_jsonrpc_error(
+                            request.id.as_ref(),
+                            -32602,
+                            "tools/call params.name is required",
+                        );
+                    };
+                    let (inputs, secrets) = self.partition_call_arguments(&name, request.arguments);
+                    let result = self.call_tool(McpCallRequest {
+                        tool_name: name,
+                        inputs,
+                        secrets,
+                        approved_by_human: false,
+                        environment: "local".to_owned(),
+                        approvals: 0,
+                    });
+                    render_tool_call_response(request.id.as_ref(), &result)
+                }
+                _ => render_jsonrpc_error(request.id.as_ref(), -32601, "method not found"),
+            },
+            Err(err) => render_jsonrpc_error(None, err.code, &err.message),
+        }
+    }
+
+    fn partition_call_arguments(
+        &self,
+        tool_name: &str,
+        arguments: BTreeMap<String, String>,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let secret_names = self
+            .tools
+            .iter()
+            .find(|tool| tool.tool_name() == tool_name)
+            .map(|tool| {
+                tool.package
+                    .secrets
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        arguments
+            .into_iter()
+            .partition(|(name, _)| !secret_names.contains(name))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpJsonRpcRequest {
+    pub id: Option<serde_json::Value>,
+    pub method: String,
+    pub tool_name: Option<String>,
+    pub arguments: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpJsonRpcError {
+    pub code: i64,
+    pub message: String,
+}
+
+pub fn parse_jsonrpc_request(body: &str) -> Result<McpJsonRpcRequest, McpJsonRpcError> {
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|err| McpJsonRpcError {
+        code: -32700,
+        message: format!("parse error: {err}"),
+    })?;
+    let method = value
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| McpJsonRpcError {
+            code: -32600,
+            message: "JSON-RPC method is required".to_owned(),
+        })?
+        .to_owned();
+    let params = value.get("params").unwrap_or(&serde_json::Value::Null);
+    let tool_name = params
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let arguments = params
+        .get("arguments")
+        .and_then(serde_json::Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    Ok(McpJsonRpcRequest {
+        id: value.get("id").cloned(),
+        method,
+        tool_name,
+        arguments,
+    })
+}
+
+pub fn render_initialize_response(id: Option<&serde_json::Value>) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": json_id(id),
+        "result": {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "serverInfo": {
+                "name": "greentic-desktop",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {
+                "tools": {}
+            }
+        }
+    })
+    .to_string()
+}
+
+pub fn render_empty_response(id: Option<&serde_json::Value>) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": json_id(id),
+        "result": {}
+    })
+    .to_string()
+}
+
+pub fn render_tools_list_response(id: Option<&serde_json::Value>, tools: &[McpTool]) -> String {
+    let tools = tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": serde_json::from_str::<serde_json::Value>(&tool.input_schema_json)
+                    .unwrap_or_else(|_| serde_json::json!({"type":"object"})),
+                "outputSchema": serde_json::from_str::<serde_json::Value>(&tool.output_schema_json)
+                    .unwrap_or_else(|_| serde_json::json!({"type":"object"})),
+                "annotations": {
+                    "risk": format!("{:?}", tool.risk),
+                    "availabilityDiagnostics": tool.availability_diagnostics,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": json_id(id),
+        "result": {"tools": tools}
+    })
+    .to_string()
+}
+
+pub fn render_tool_call_response(id: Option<&serde_json::Value>, result: &McpCallResult) -> String {
+    if result.success {
+        let outputs = serde_json::from_str::<serde_json::Value>(&result.outputs_json)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": json_id(id),
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": format!("Runner completed. Evidence: {}", result.evidence_uri)
+                }],
+                "structuredContent": {
+                    "status": "passed",
+                    "evidenceRef": result.evidence_uri,
+                    "outputs": outputs
+                }
+            }
+        })
+        .to_string()
+    } else {
+        let failure = result.failure.as_ref();
+        render_jsonrpc_error(
+            id,
+            -32005,
+            failure
+                .map(|failure| failure.message.as_str())
+                .unwrap_or("runner failed"),
+        )
+    }
+}
+
+pub fn render_jsonrpc_error(id: Option<&serde_json::Value>, code: i64, message: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": json_id(id),
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
+    .to_string()
+}
+
+fn json_id(id: Option<&serde_json::Value>) -> serde_json::Value {
+    id.cloned().unwrap_or(serde_json::Value::Null)
 }
 
 pub fn stable_tool_name(runner_id: &str) -> String {
@@ -620,6 +862,68 @@ mod tests {
         assert!(json.contains("\"tools\""));
         assert!(json.contains("\"name\":\"web.submit_form\""));
         assert!(json.contains("form_value"));
+    }
+
+    #[test]
+    fn jsonrpc_initialize_returns_mcp_capabilities_with_request_id() {
+        let mut state = state();
+        let response =
+            state.handle_jsonrpc(r#"{"jsonrpc":"2.0","id":"init-1","method":"initialize"}"#);
+
+        let value: serde_json::Value = serde_json::from_str(&response).expect("valid json");
+        assert_eq!(value["id"], "init-1");
+        assert_eq!(
+            value["result"]["protocolVersion"],
+            serde_json::Value::String(MCP_PROTOCOL_VERSION.to_owned())
+        );
+        assert_eq!(
+            value["result"]["capabilities"]["tools"],
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn jsonrpc_tools_list_returns_standard_input_schema() {
+        let mut state = state();
+        let response = state.handle_jsonrpc(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#);
+
+        let value: serde_json::Value = serde_json::from_str(&response).expect("valid json");
+        assert_eq!(value["id"], 7);
+        assert_eq!(value["result"]["tools"][0]["name"], "web.submit_form");
+        assert_eq!(
+            value["result"]["tools"][0]["inputSchema"]["properties"]["form_value"]["type"],
+            "string"
+        );
+        assert_eq!(
+            value["result"]["tools"][0]["outputSchema"]["properties"]["confirmation"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn jsonrpc_tools_call_parses_nested_arguments_and_returns_failure_json() {
+        let mut state = state();
+        let response = state.handle_jsonrpc(
+            r#"{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"web.submit_form","arguments":{"form_value":"Alice","session_token":"secret"}}}"#,
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&response).expect("valid json");
+        assert_eq!(value["id"], "call-1");
+        assert_eq!(value["error"]["code"], -32005);
+        assert!(!value["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("required input or secret is missing"));
+    }
+
+    #[test]
+    fn jsonrpc_unknown_method_returns_method_not_found() {
+        let mut state = state();
+        let response = state.handle_jsonrpc(r#"{"jsonrpc":"2.0","id":2,"method":"bad"}"#);
+
+        let value: serde_json::Value = serde_json::from_str(&response).expect("valid json");
+        assert_eq!(value["id"], 2);
+        assert_eq!(value["error"]["code"], -32601);
     }
 
     #[test]

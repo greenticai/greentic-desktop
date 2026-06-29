@@ -16,18 +16,22 @@ path = "src/lib.rs"
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
+greentic-desktop-core.workspace = true
 greentic-distributor-client.workspace = true
+greentic-desktop-evidence.workspace = true
 greentic-desktop-extension.workspace = true
 greentic-desktop-gui-assets.workspace = true
 greentic-desktop-java.workspace = true
 greentic-desktop-linux.workspace = true
 greentic-desktop-llm.workspace = true
+greentic-desktop-mcp.workspace = true
 greentic-desktop-macos.workspace = true
 greentic-desktop-planner.workspace = true
 greentic-desktop-platform.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-replay.workspace = true
 greentic-desktop-runner-schema.workspace = true
+greentic-desktop-security.workspace = true
 greentic-desktop-session.workspace = true
 greentic-desktop-terminal.workspace = true
 greentic-desktop-vision.workspace = true

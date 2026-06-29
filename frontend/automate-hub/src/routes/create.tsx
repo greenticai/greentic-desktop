@@ -697,7 +697,7 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
       {step === 1 && (
         <div className="space-y-4">
           <div className="grid sm:grid-cols-2 gap-3">
-            {recordingTargets.map(({ id, label, detail }) => (
+            {recordingTargets.map(({ id, label, detail, status, statusLabel }) => (
               <button
                 key={id}
                 onClick={() => setTarget(id)}
@@ -705,8 +705,14 @@ function RecordWizard({ onBack }: { onBack: () => void }) {
                   target === id ? "border-primary bg-accent/50" : ""
                 }`}
               >
-                <div className="font-medium text-sm">{label}</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-sm">{label}</span>
+                  <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-normal text-muted-foreground">
+                    {status}
+                  </span>
+                </div>
                 <div className="text-xs text-muted-foreground mt-2">{detail}</div>
+                <div className="text-xs text-muted-foreground mt-2">{statusLabel}</div>
               </button>
             ))}
           </div>
@@ -748,27 +754,37 @@ const recordingTargets = [
     id: "browser",
     label: "Browser task",
     detail: "Greentic opens a controlled browser window. Existing browser tabs are not recorded.",
+    status: "beta",
+    statusLabel: "Real web replay and MCP evidence paths have fixture coverage.",
   },
   {
     id: "desktop",
     label: "Desktop app task",
     detail: "Uses native accessibility APIs and OS permissions for the current desktop session.",
+    status: "experimental",
+    statusLabel: "Requires native OS event capture; fixture E2Es are still required.",
   },
   {
     id: "java",
     label: "Java app task",
     detail: "Uses Java Access Bridge for Swing/AWT component events and trees.",
+    status: "experimental",
+    statusLabel: "Only for Java apps with a Java accessibility event source.",
   },
   {
     id: "remote",
     label: "Remote desktop task",
     detail:
       "Requires a Greentic-owned remote viewport, screen capture, input control, and calibration.",
+    status: "experimental",
+    statusLabel: "Requires viewport calibration and proof through structured assertions.",
   },
   {
     id: "terminal",
     label: "Terminal/mainframe task",
     detail: "Greentic opens or connects a controlled PTY, SSH, or TN3270 session.",
+    status: "experimental",
+    statusLabel: "Requires a Greentic-owned terminal runtime, not arbitrary shell tabs.",
   },
 ];
 

@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -98,6 +99,11 @@ impl RunnerManifest {
         if self.required_adapters.is_empty() {
             return Err(RegistryError::InvalidManifest(
                 "at least one required adapter must be declared".to_owned(),
+            ));
+        }
+        if !is_sha256_checksum(&self.package_checksum) {
+            return Err(RegistryError::InvalidManifest(
+                "package checksum must be sha256:<64 lowercase hex chars>".to_owned(),
             ));
         }
         Ok(())
@@ -312,12 +318,18 @@ pub fn sign_manifest(
 }
 
 fn signature_for(manifest: &RunnerManifest, key: &SigningKey) -> String {
-    deterministic_hash(&format!(
-        "{}\nkey:{}\nmaterial:{}",
-        manifest.render_reviewable(),
-        key.key_id,
-        key.key_material
-    ))
+    format!(
+        "sig-sha256:{}",
+        sha256_hex(
+            format!(
+                "{}\nkey:{}\nmaterial:{}",
+                manifest.render_reviewable(),
+                key.key_id,
+                key.key_material
+            )
+            .as_bytes()
+        )
+    )
 }
 
 fn registry_key(manifest: &RunnerManifest) -> String {
@@ -335,13 +347,23 @@ fn is_semver(version: &str) -> bool {
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-fn deterministic_hash(value: &str) -> String {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    format!("{hash:016x}")
+fn is_sha256_checksum(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+}
+
+pub fn sha256_checksum(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -365,7 +387,7 @@ mod tests {
             },
             required_adapters: vec!["greentic.desktop.playwright".to_owned()],
             compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-            package_checksum: "sha256:abc123".to_owned(),
+            package_checksum: sha256_checksum(b"runner package bytes"),
         }
     }
 
@@ -380,9 +402,17 @@ mod tests {
     #[test]
     fn tampered_runner_packages_are_refused() {
         let mut signed = sign_manifest(manifest(), &key()).expect("signed manifest");
-        signed.manifest.package_checksum = "sha256:tampered".to_owned();
+        signed.manifest.package_checksum = sha256_checksum(b"tampered runner package bytes");
 
         assert_eq!(signed.verify(&key()), Err(RegistryError::TamperedPackage));
+    }
+
+    #[test]
+    fn sha256_checksum_uses_standard_digest() {
+        assert_eq!(
+            sha256_checksum(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

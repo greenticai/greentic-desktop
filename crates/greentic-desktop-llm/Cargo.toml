@@ -16,4 +16,6 @@ name = "greentic_desktop_llm"
 path = "src/lib.rs"
 
 [dependencies]
+greentic-llm = "1.2.6-research"
 serde_json.workspace = true
+tokio = { version = "1", features = ["rt"] }

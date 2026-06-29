@@ -435,8 +435,18 @@ function AdapterHealthRow({ adapter }: { adapter: AdapterHealthDto }) {
     <li className="py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="text-sm font-medium">{adapter.id}</div>
+          <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+            <span>{adapter.id}</span>
+            {adapter.status && (
+              <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-normal text-muted-foreground">
+                {adapter.status}
+              </span>
+            )}
+          </div>
           <div className="mt-1 text-xs text-muted-foreground">{adapter.message}</div>
+          {adapter.statusLabel && (
+            <div className="mt-1 text-xs text-muted-foreground">{adapter.statusLabel}</div>
+          )}
         </div>
         <span
           className={`shrink-0 text-xs font-medium ${

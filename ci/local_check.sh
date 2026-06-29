@@ -62,6 +62,19 @@ cargo clippy --all-targets --all-features -- -D warnings
 header "cargo test"
 cargo test --all-features
 
+header "secret leak guard"
+if rg -n \
+  --glob 'evidence/**' \
+  --glob 'logs/**' \
+  --glob '*.log' \
+  --glob 'bundle.json' \
+  --glob 'outputs.json' \
+  --glob 'trace.json' \
+  'sk-test-super-secret|DEEPSEEK_API_KEY=[^[:space:]]+' .; then
+  printf 'Known fake secret appeared in generated evidence or log artifacts.\n' >&2
+  exit 1
+fi
+
 header "cargo build"
 cargo build --all-features
 
