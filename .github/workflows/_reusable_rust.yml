@@ -19,6 +19,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install Linux native automation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxdo-dev \
+            libxrandr-dev \
+            pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: Run command
         shell: bash
