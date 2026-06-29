@@ -98,11 +98,7 @@ Use `macos.read_window_tree` during review to inspect available element metadata
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 
@@ -130,3 +126,5 @@ The built-in manifest requests:
 - `desktop.input_monitoring`
 
 Grant these permissions to the process that runs Greentic Desktop before recording or replaying native macOS workflows.
+
+Screenshot evidence is captured through the shared `xcap` backend. Accessibility element traversal and element-targeted actions still depend on the macOS AX implementation; avoid app-specific scripts or AppleScript-only flows when designing new runner primitives.

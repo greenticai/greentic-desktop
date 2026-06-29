@@ -11,12 +11,16 @@ use greentic_desktop_workflow::{
     WorkflowActionKind, WorkflowEvidencePolicy, WorkflowOutput, WorkflowOutputExtractor,
     WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use vte::{Params, Parser, Perform};
 
 pub const TERMINAL_ADAPTER_ID: &str = "greentic.desktop.terminal-tn3270";
 pub const TERMINAL_RECORDER_BACKEND_ID: &str = "greentic.recording.terminal.owned";
+const TERMINAL_RUNTIME_COMMAND_ENV: &str = "GREENTIC_TERMINAL_ADAPTER_COMMAND";
 
 pub fn terminal_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -107,26 +111,8 @@ impl RecordingBackend for TerminalRecordingBackend {
     }
 
     fn start(&self, request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
-        let mut event = RecordingEventEnvelope::new(
-            sink.session_id(),
-            TERMINAL_RECORDER_BACKEND_ID,
-            RecordingTargetKind::Terminal,
-            1,
-            "connect",
-        );
-        event.target_json = format!(
-            r#"{{"profile":"{}","protocol":"{}","host":"{}","ownership":"greentic-owned"}}"#,
-            escape_json(&self.profile.name),
-            terminal_protocol_name(&self.profile.protocol),
-            escape_json(&self.profile.host)
-        );
-        event.value = Some(self.profile.host.clone());
-        event.terminal_buffer_ref = Some("evidence://terminal/initial-buffer.txt".to_owned());
-        let _ = sink.append_event(event);
-        let _ = sink.update_heartbeat();
-
         if let Some(command) = self.capture_command.clone() {
-            run_terminal_capture_command(command, request, sink.clone());
+            run_terminal_capture_command(command, self.profile.clone(), request, sink.clone());
         }
 
         RecordingHandle {
@@ -138,6 +124,7 @@ impl RecordingBackend for TerminalRecordingBackend {
 
 fn run_terminal_capture_command(
     command: String,
+    profile: TerminalProfile,
     request: RecordingStartRequest,
     sink: RecordingEventSink,
 ) {
@@ -145,6 +132,12 @@ fn run_terminal_capture_command(
     let output = child
         .env("GREENTIC_RECORDING_SESSION_ID", sink.session_id())
         .env("GREENTIC_RECORDING_ROOT", request.out.display().to_string())
+        .env("GREENTIC_TERMINAL_PROFILE_NAME", &profile.name)
+        .env(
+            "GREENTIC_TERMINAL_PROFILE_PROTOCOL",
+            terminal_protocol_name(&profile.protocol),
+        )
+        .env("GREENTIC_TERMINAL_PROFILE_HOST", &profile.host)
         .stdin(Stdio::null())
         .output();
     let Ok(output) = output else {
@@ -221,65 +214,48 @@ pub struct ScreenField {
     pub len: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TerminalAdapter {
-    state: Arc<Mutex<TerminalState>>,
+    runtime: Option<TerminalRuntimeConfig>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct TerminalState {
-    connected: bool,
+#[derive(Debug, Clone)]
+struct TerminalRuntimeConfig {
+    command: String,
     profile: Option<TerminalProfile>,
-    screen: Vec<String>,
-    fields: BTreeMap<String, ScreenField>,
-    recorded: Vec<RecordedEvent>,
 }
 
 impl TerminalAdapter {
     pub fn new() -> Self {
-        Self::default()
+        let runtime = std::env::var(TERMINAL_RUNTIME_COMMAND_ENV)
+            .ok()
+            .filter(|command| !command.trim().is_empty())
+            .map(|command| TerminalRuntimeConfig {
+                command,
+                profile: None,
+            });
+        Self { runtime }
     }
 
-    pub fn connect_profile(&self, profile: TerminalProfile) {
-        let mut state = self.state.lock().expect("terminal adapter mutex poisoned");
-        state.connected = true;
-        state.profile = Some(profile);
+    pub fn with_runtime_command(command: impl Into<String>) -> Self {
+        Self {
+            runtime: Some(TerminalRuntimeConfig {
+                command: command.into(),
+                profile: None,
+            }),
+        }
     }
 
-    pub fn record_screen_buffer(&self, lines: impl IntoIterator<Item = impl Into<String>>) {
-        self.state
-            .lock()
-            .expect("terminal adapter mutex poisoned")
-            .screen = lines.into_iter().map(Into::into).collect();
-    }
-
-    pub fn define_field(&self, name: impl Into<String>, field: ScreenField) {
-        self.state
-            .lock()
-            .expect("terminal adapter mutex poisoned")
-            .fields
-            .insert(name.into(), field);
-    }
-
-    pub fn extract_field(&self, field: ScreenField) -> Option<String> {
-        let state = self.state.lock().expect("terminal adapter mutex poisoned");
-        let line = state.screen.get(field.row)?;
-        Some(
-            line.chars()
-                .skip(field.col)
-                .take(field.len)
-                .collect::<String>()
-                .trim()
-                .to_owned(),
-        )
-    }
-
-    pub fn extract_after_anchor(&self, anchor: &str) -> Option<String> {
-        let state = self.state.lock().expect("terminal adapter mutex poisoned");
-        state.screen.iter().find_map(|line| {
-            let index = line.find(anchor)?;
-            Some(line[index + anchor.len()..].trim().to_owned())
-        })
+    pub fn with_profile_runtime_command(
+        profile: TerminalProfile,
+        command: impl Into<String>,
+    ) -> Self {
+        Self {
+            runtime: Some(TerminalRuntimeConfig {
+                command: command.into(),
+                profile: Some(profile),
+            }),
+        }
     }
 
     pub fn replay(&self, steps: &[RunnerStep]) -> AdapterResult<Vec<StepResult>> {
@@ -291,20 +267,28 @@ impl TerminalAdapter {
     }
 }
 
+impl Default for TerminalAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DesktopAdapter for TerminalAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         terminal_capabilities()
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        let state = self.state.lock().expect("terminal adapter mutex poisoned");
+        let output = self.run_runtime(TerminalRuntimeAction::Observe, None, None)?;
         Ok(Observation {
             adapter_id: TERMINAL_ADAPTER_ID.to_owned(),
-            summary: format!(
-                "terminal session {} connected={}",
-                ctx.session_id, state.connected
-            ),
-            visible_text: state.screen.clone(),
+            summary: output.message.unwrap_or_else(|| {
+                format!(
+                    "terminal session {} observed through owned runtime",
+                    ctx.session_id
+                )
+            }),
+            visible_text: output.screen,
         })
     }
 
@@ -315,37 +299,14 @@ impl DesktopAdapter for TerminalAdapter {
             ));
         }
 
-        let mut state = self.state.lock().expect("terminal adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "terminal.connect" => {
-                state.connected = true;
-            }
-            "terminal.disconnect" => state.connected = false,
-            "terminal.type_text" | "terminal.send_text" => {
-                let value = step.value.clone().unwrap_or_default();
-                if !value.is_empty() {
-                    state.screen.push(format!("INPUT: {}", value));
-                }
-            }
-            "terminal.send_keys" => {}
-            "terminal.read_screen"
-            | "terminal.wait_for_screen"
-            | "terminal.assert_text"
-            | "terminal.extract_field"
-            | "terminal.capture_screen" => {}
-            _ => {}
-        }
-
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
+        let output = self.run_runtime(TerminalRuntimeAction::Execute, Some(&step), None)?;
 
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: "terminal step accepted".to_owned(),
+            message: output
+                .message
+                .unwrap_or_else(|| "terminal step completed by owned runtime".to_owned()),
         })
     }
 
@@ -356,15 +317,14 @@ impl DesktopAdapter for TerminalAdapter {
             ));
         }
 
-        let state = self.state.lock().expect("terminal adapter mutex poisoned");
-        let passed = match assertion.required_capability.as_str() {
-            "terminal.assert_text" | "terminal.wait_for_screen" => state
-                .screen
-                .iter()
-                .any(|line| line.contains(&assertion.expected)),
-            "terminal.extract_field" => state.fields.contains_key(&assertion.expected),
-            _ => state.connected,
-        };
+        let output = self.run_runtime(TerminalRuntimeAction::Validate, None, Some(&assertion))?;
+        let passed = output.passed.unwrap_or_else(|| {
+            assertion.expected.is_empty()
+                || output
+                    .screen
+                    .iter()
+                    .any(|line| line.contains(&assertion.expected))
+        });
 
         Ok(AssertionResult {
             assertion_id: assertion.id,
@@ -378,14 +338,303 @@ impl DesktopAdapter for TerminalAdapter {
     }
 
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
-        Ok(self
-            .state
-            .lock()
-            .expect("terminal adapter mutex poisoned")
-            .recorded
-            .last()
-            .cloned())
+        Ok(None)
     }
+}
+
+impl TerminalAdapter {
+    fn run_runtime(
+        &self,
+        action: TerminalRuntimeAction,
+        step: Option<&RunnerStep>,
+        assertion: Option<&Assertion>,
+    ) -> AdapterResult<TerminalCommandOutput> {
+        let Some(runtime) = &self.runtime else {
+            return Err(AdapterError::ExecutionFailed(format!(
+                "No owned terminal runtime is configured. Set {TERMINAL_RUNTIME_COMMAND_ENV} to a PTY, SSH, or TN3270 sidecar command."
+            )));
+        };
+        run_terminal_runtime_command(runtime, action, step, assertion)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalRuntimeAction {
+    Execute,
+    Observe,
+    Validate,
+}
+
+impl TerminalRuntimeAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            TerminalRuntimeAction::Execute => "execute",
+            TerminalRuntimeAction::Observe => "observe",
+            TerminalRuntimeAction::Validate => "validate",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TerminalCommandOutput {
+    screen: Vec<String>,
+    message: Option<String>,
+    passed: Option<bool>,
+}
+
+fn run_terminal_runtime_command(
+    runtime: &TerminalRuntimeConfig,
+    action: TerminalRuntimeAction,
+    step: Option<&RunnerStep>,
+    assertion: Option<&Assertion>,
+) -> AdapterResult<TerminalCommandOutput> {
+    let mut command = shell_command(&runtime.command);
+    command
+        .env("GREENTIC_TERMINAL_ACTION", action.as_str())
+        .env("GREENTIC_TERMINAL_ADAPTER_ID", TERMINAL_ADAPTER_ID)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(profile) = &runtime.profile {
+        command
+            .env("GREENTIC_TERMINAL_PROFILE_NAME", &profile.name)
+            .env(
+                "GREENTIC_TERMINAL_PROFILE_PROTOCOL",
+                terminal_protocol_name(&profile.protocol),
+            )
+            .env("GREENTIC_TERMINAL_PROFILE_HOST", &profile.host);
+    }
+    if let Some(step) = step {
+        command
+            .env("GREENTIC_TERMINAL_STEP_ID", &step.id)
+            .env("GREENTIC_TERMINAL_CAPABILITY", &step.required_capability)
+            .env("GREENTIC_TERMINAL_STEP_ACTION", &step.action)
+            .env(
+                "GREENTIC_TERMINAL_VALUE",
+                step.value.as_deref().unwrap_or(""),
+            );
+    }
+    if let Some(assertion) = assertion {
+        command
+            .env("GREENTIC_TERMINAL_ASSERTION_ID", &assertion.id)
+            .env(
+                "GREENTIC_TERMINAL_CAPABILITY",
+                &assertion.required_capability,
+            )
+            .env("GREENTIC_TERMINAL_EXPECTED", &assertion.expected);
+    }
+
+    let mut child = command.spawn().map_err(|err| {
+        AdapterError::ExecutionFailed(format!("terminal runtime failed to start: {err}"))
+    })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        let payload = terminal_runtime_payload(step, assertion);
+        stdin.write_all(payload.as_bytes()).map_err(|err| {
+            AdapterError::ExecutionFailed(format!("terminal runtime stdin failed: {err}"))
+        })?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("terminal runtime failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AdapterError::ExecutionFailed(format!(
+            "terminal runtime action {} failed with status {:?}: {}",
+            action.as_str(),
+            output.status.code(),
+            stderr.trim()
+        )));
+    }
+    Ok(parse_terminal_command_output(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn terminal_runtime_payload(step: Option<&RunnerStep>, assertion: Option<&Assertion>) -> String {
+    if let Some(step) = step {
+        return format!(
+            "kind=step\nid={}\ncapability={}\naction={}\nvalue={}\n",
+            step.id,
+            step.required_capability,
+            step.action,
+            step.value.as_deref().unwrap_or("")
+        );
+    }
+    if let Some(assertion) = assertion {
+        return format!(
+            "kind=assertion\nid={}\ncapability={}\nexpected={}\n",
+            assertion.id, assertion.required_capability, assertion.expected
+        );
+    }
+    "kind=observe\n".to_owned()
+}
+
+fn parse_terminal_command_output(stdout: &str) -> TerminalCommandOutput {
+    let mut output = TerminalCommandOutput::default();
+    for line in parse_terminal_screen(stdout) {
+        if let Some(value) = line.strip_prefix("message:") {
+            output.message = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("screen:") {
+            output.screen.push(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("passed:") {
+            output.passed = Some(value.trim().eq_ignore_ascii_case("true"));
+        } else if !line.trim().is_empty() {
+            output.screen.push(line.to_owned());
+        }
+    }
+    output
+}
+
+pub fn run_local_pty_command(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AdapterResult<Vec<String>> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to open PTY: {err}")))?;
+    let mut command = CommandBuilder::new(program);
+    for arg in args {
+        command.arg(arg);
+    }
+    let mut child = pair.slave.spawn_command(command).map_err(|err| {
+        AdapterError::ExecutionFailed(format!("failed to spawn PTY command: {err}"))
+    })?;
+    drop(pair.slave);
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to read PTY: {err}")))?;
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while Instant::now() < deadline {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "failed to read PTY output: {err}"
+                )));
+            }
+        }
+        if let Ok(Some(_status)) = child.try_wait() {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let output = String::from_utf8_lossy(&bytes);
+    Ok(parse_terminal_screen(&output))
+}
+
+pub fn parse_terminal_screen(output: &str) -> Vec<String> {
+    let mut parser = Parser::new();
+    let mut screen = AnsiScreen::default();
+    parser.advance(&mut screen, output.as_bytes());
+    screen.lines()
+}
+
+#[derive(Debug, Default)]
+struct AnsiScreen {
+    row: usize,
+    col: usize,
+    rows: Vec<Vec<char>>,
+}
+
+impl AnsiScreen {
+    fn put_char(&mut self, value: char) {
+        while self.rows.len() <= self.row {
+            self.rows.push(Vec::new());
+        }
+        let line = &mut self.rows[self.row];
+        while line.len() < self.col {
+            line.push(' ');
+        }
+        if line.len() == self.col {
+            line.push(value);
+        } else {
+            line[self.col] = value;
+        }
+        self.col += 1;
+    }
+
+    fn newline(&mut self) {
+        self.row += 1;
+        self.col = 0;
+    }
+
+    fn carriage_return(&mut self) {
+        self.col = 0;
+    }
+
+    fn lines(self) -> Vec<String> {
+        self.rows
+            .into_iter()
+            .map(|line| line.into_iter().collect::<String>().trim_end().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+}
+
+impl Perform for AnsiScreen {
+    fn print(&mut self, c: char) {
+        self.put_char(c);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\n' => self.newline(),
+            b'\r' => self.carriage_return(),
+            0x08 => {
+                self.col = self.col.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
+
+    fn put(&mut self, _byte: u8) {}
+
+    fn unhook(&mut self) {}
+
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+
+    fn csi_dispatch(
+        &mut self,
+        params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        if action == 'H' || action == 'f' {
+            let mut params = params.iter();
+            let row = params
+                .next()
+                .and_then(|values| values.first().copied())
+                .unwrap_or(1)
+                .saturating_sub(1) as usize;
+            let col = params
+                .next()
+                .and_then(|values| values.first().copied())
+                .unwrap_or(1)
+                .saturating_sub(1) as usize;
+            self.row = row;
+            self.col = col;
+        }
+    }
+
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,20 +699,6 @@ fn redact_terminal_value(kind: &str, value: &str) -> String {
     }
 }
 
-fn escape_json(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '"' => "\\\"".chars().collect::<Vec<_>>(),
-            '\\' => "\\\\".chars().collect::<Vec<_>>(),
-            '\n' => "\\n".chars().collect::<Vec<_>>(),
-            '\r' => "\\r".chars().collect::<Vec<_>>(),
-            '\t' => "\\t".chars().collect::<Vec<_>>(),
-            _ => vec![ch],
-        })
-        .collect()
-}
-
 pub fn run_terminal_workflow(
     adapter: &TerminalAdapter,
     workflow: TerminalWorkflow,
@@ -474,16 +709,8 @@ pub fn run_terminal_workflow(
     let compiled = compile_workflow(&terminal_desktop_workflow(&workflow))
         .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
 
-    adapter.connect_profile(workflow.profile);
-    if !workflow.initial_screen.is_empty() {
-        adapter.record_screen_buffer(workflow.initial_screen);
-    }
-
     let steps = compiled.steps;
     let results = adapter.replay(&steps)?;
-    if !workflow.final_screen.is_empty() {
-        adapter.record_screen_buffer(workflow.final_screen);
-    }
 
     let visible = adapter
         .observe(ObserveContext {
@@ -504,7 +731,7 @@ pub fn run_terminal_workflow(
     }
 
     for output in field_outputs {
-        let value = adapter.extract_field(output.field).ok_or_else(|| {
+        let value = extract_field_from_screen(&visible, output.field).ok_or_else(|| {
             AdapterError::ExecutionFailed(format!(
                 "No terminal field was visible for {}",
                 output.name
@@ -575,6 +802,25 @@ fn terminal_desktop_workflow(workflow: &TerminalWorkflow) -> DesktopWorkflow {
     }
 }
 
+pub fn extract_field_from_screen(lines: &[String], field: ScreenField) -> Option<String> {
+    let line = lines.get(field.row)?;
+    Some(
+        line.chars()
+            .skip(field.col)
+            .take(field.len)
+            .collect::<String>()
+            .trim()
+            .to_owned(),
+    )
+}
+
+pub fn extract_after_anchor_from_screen(lines: &[String], anchor: &str) -> Option<String> {
+    lines.iter().find_map(|line| {
+        let index = line.find(anchor)?;
+        Some(line[index + anchor.len()..].trim().to_owned())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,8 +840,15 @@ mod tests {
     }
 
     #[test]
-    fn generic_terminal_workflow_sends_actions_and_reads_outputs() {
-        let adapter = TerminalAdapter::new();
+    fn terminal_workflow_uses_owned_runtime_and_reads_outputs() {
+        let adapter = TerminalAdapter::with_profile_runtime_command(
+            TerminalProfile {
+                name: "test".to_owned(),
+                protocol: TerminalProtocol::Tn3270,
+                host: "terminal.test".to_owned(),
+            },
+            "echo message:ok && echo screen:ACCOUNT STATUS: ACTIVE && echo screen:BALANCE: 100.00 && echo passed:true",
+        );
         let outcome = run_terminal_workflow(
             &adapter,
             TerminalWorkflow {
@@ -649,28 +902,96 @@ mod tests {
     }
 
     #[test]
-    fn records_and_extracts_screen_fields() {
+    fn terminal_workflow_fails_without_owned_runtime() {
         let adapter = TerminalAdapter::new();
-        adapter.record_screen_buffer(["ACCOUNT STATUS: ACTIVE", "BALANCE: 100.00"]);
-        adapter.define_field(
-            "status",
-            ScreenField {
-                row: 0,
-                col: 16,
-                len: 6,
+        let err = run_terminal_workflow(
+            &adapter,
+            TerminalWorkflow {
+                profile: TerminalProfile {
+                    name: "test".to_owned(),
+                    protocol: TerminalProtocol::Tn3270,
+                    host: "terminal.test".to_owned(),
+                },
+                prompt: "Connect to a terminal.".to_owned(),
+                initial_screen: Vec::new(),
+                actions: vec![TerminalWorkflowAction {
+                    name: "connect".to_owned(),
+                    required_capability: "terminal.connect".to_owned(),
+                    value: None,
+                }],
+                final_screen: Vec::new(),
+                text_outputs: Vec::new(),
+                field_outputs: Vec::new(),
             },
-        );
+        )
+        .expect_err("terminal workflow should fail without a real runtime");
 
+        assert!(
+            err.to_string()
+                .contains("No owned terminal runtime is configured"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parses_ansi_terminal_screen_with_cursor_positioning() {
+        let screen = parse_terminal_screen("first\r\n\x1b[3;5Hfield");
+
+        assert_eq!(screen, vec!["first".to_owned(), "    field".to_owned()]);
         assert_eq!(
-            adapter.extract_field(ScreenField {
-                row: 0,
-                col: 16,
-                len: 6,
-            }),
+            extract_field_from_screen(
+                &screen,
+                ScreenField {
+                    row: 1,
+                    col: 4,
+                    len: 5,
+                }
+            ),
+            Some("field".to_owned())
+        );
+    }
+
+    #[test]
+    fn local_pty_fixture_runs_command_and_parses_output() {
+        if cfg!(windows) {
+            return;
+        }
+        let screen = run_local_pty_command(
+            "sh",
+            &[
+                "-lc",
+                "printf 'ACCOUNT STATUS: ACTIVE\\nBALANCE: 100.00\\n'",
+            ],
+            Duration::from_secs(2),
+        )
+        .expect("local PTY command should run");
+
+        assert!(screen.iter().any(|line| line.contains("ACCOUNT STATUS")));
+        assert_eq!(
+            extract_after_anchor_from_screen(&screen, "BALANCE:"),
+            Some("100.00".to_owned())
+        );
+    }
+
+    #[test]
+    fn extracts_screen_fields_without_stateful_adapter() {
+        let screen = vec![
+            "ACCOUNT STATUS: ACTIVE".to_owned(),
+            "BALANCE: 100.00".to_owned(),
+        ];
+        assert_eq!(
+            extract_field_from_screen(
+                &screen,
+                ScreenField {
+                    row: 0,
+                    col: 16,
+                    len: 6,
+                }
+            ),
             Some("ACTIVE".to_owned())
         );
         assert_eq!(
-            adapter.extract_after_anchor("BALANCE:"),
+            extract_after_anchor_from_screen(&screen, "BALANCE:"),
             Some("100.00".to_owned())
         );
     }
@@ -712,7 +1033,7 @@ mod tests {
                 host: "localhost".to_owned(),
             },
             true,
-            "printf 'ACCOUNT STATUS: ACTIVE\\nBALANCE: 100.00\\n'",
+            "echo ACCOUNT STATUS: ACTIVE && echo BALANCE: 100.00",
         ));
 
         let manifest = start_recording_session_with_registry(
@@ -741,7 +1062,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        assert!(raw.contains(r#""kind":"connect""#), "{raw}");
         assert!(raw.contains(r#""kind":"read_screen""#), "{raw}");
         assert!(raw.contains("ACCOUNT STATUS: ACTIVE"), "{raw}");
     }

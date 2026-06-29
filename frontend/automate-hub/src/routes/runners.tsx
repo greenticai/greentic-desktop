@@ -507,6 +507,11 @@ function RunnersPage() {
                 Evidence {r.evidenceRefs[0]}
               </div>
             )}
+            {r.available === false && r.availabilityMessage && (
+              <div className="mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                {r.availabilityMessage}
+              </div>
+            )}
             <div className="mt-5 flex flex-wrap gap-2">
               {r.friendly.tone === "fix" ? (
                 <Button
@@ -522,7 +527,7 @@ function RunnersPage() {
                 <Button
                   size="sm"
                   className="gap-1.5"
-                  disabled={runnerAction.isPending}
+                  disabled={runnerAction.isPending || r.available === false}
                   onClick={() => openRun(r)}
                 >
                   <Play className="h-3.5 w-3.5" />

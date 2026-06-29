@@ -83,15 +83,21 @@ Place reviewed runner packages there, or use the folder selected by `GREENTIC_DE
 greentic-desktop runner list
 ```
 
-Draft YAML files are useful for review and editing. Production runner packages are expected to be packaged, signed, and published before they are exposed as tools.
+Draft YAML and typed runner JSON files are useful for review and editing. Production `.gtpack` packages are built and verified by `greentic-pack`; Greentic Desktop does not implement a separate archive format.
+
+```bash
+greentic-desktop runner pack generic.resource_append --out ./dist/generic.resource_append.gtpack
+greentic-desktop runner verify-pack ./dist/generic.resource_append.gtpack
+greentic-desktop runner install-pack ./dist/generic.resource_append.gtpack
+```
+
+The `runner pack` command generates a temporary `answers.json` and delegates to `greentic-pack --answers answers.json`, so automated packaging uses the same package semantics as the Greentic pack tooling.
 
 ## Use A Runner
 
-After a runner is approved and exposed as an MCP tool, start the MCP endpoint:
+After a runner is approved and exposed as an MCP tool, start the managed MCP endpoint from Automate Hub **My Runners**.
 
-```bash
-greentic-desktop mcp serve
-```
+For local desktop agents, stdio is the preferred MCP transport. When the GUI starts an HTTP MCP listener, requests must include the local session bearer token and must come from a localhost origin. Do not expose the HTTP MCP listener on an untrusted interface.
 
 An MCP client can list tools and call the runner by name. A call for a generic resource append runner uses the normal MCP `tools/call` shape:
 

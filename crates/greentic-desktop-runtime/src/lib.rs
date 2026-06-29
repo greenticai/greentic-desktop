@@ -1,6 +1,5 @@
 use greentic_desktop_adapter::{
     select_best_adapter, validate_required_capabilities, AdapterCapabilities, CapabilityValidation,
-    DesktopAdapter, StaticAdapter,
 };
 use greentic_desktop_config::RuntimeConfig;
 use greentic_desktop_core::{
@@ -10,18 +9,27 @@ use greentic_desktop_core::{
 use greentic_desktop_extension::{
     built_in_extension, ExtensionError, ExtensionManager, ExtensionManifest, SidecarProcess,
 };
-use greentic_desktop_mcp::{example_runner_tool, McpServerState};
+use greentic_desktop_mcp::{rmcp_call_tool_result, rmcp_list_tools_result, McpServerState};
 use greentic_desktop_registry::{RegistryError, SignedRunnerManifest, SigningKey};
 use greentic_desktop_session::DesktopSession;
 use greentic_desktop_telemetry::TelemetryLog;
 use greentic_distributor_client::{
     DistributorError, GreenticDistributorClient, ResolvedArtifact, StoreExtension,
 };
+use rmcp::{
+    model::{
+        CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
+    ServerHandler,
+};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct DesktopRuntime {
@@ -38,6 +46,7 @@ pub enum RuntimeError {
     Registry(RegistryError),
     Security(String),
     InvalidCapabilities(String),
+    Pack(String),
 }
 
 impl fmt::Display for RuntimeError {
@@ -47,7 +56,9 @@ impl fmt::Display for RuntimeError {
             Self::Extension(err) => write!(f, "{err}"),
             Self::Distributor(err) => write!(f, "{err}"),
             Self::Registry(err) => write!(f, "{err}"),
-            Self::Security(message) | Self::InvalidCapabilities(message) => write!(f, "{message}"),
+            Self::Security(message) | Self::InvalidCapabilities(message) | Self::Pack(message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -83,7 +94,7 @@ impl DesktopRuntime {
         Self {
             config,
             telemetry: TelemetryLog::default(),
-            adapters: vec![StaticAdapter::new(AdapterCapabilities::new(
+            adapters: vec![AdapterCapabilities::new(
                 "greentic.desktop.core",
                 env!("CARGO_PKG_VERSION"),
                 [
@@ -92,8 +103,7 @@ impl DesktopRuntime {
                     "desktop.mcp.serve",
                     "evidence.log",
                 ],
-            ))
-            .capabilities()],
+            )],
         }
     }
 
@@ -300,16 +310,111 @@ impl DesktopRuntime {
         })
     }
 
+    pub fn pack_runner(
+        &self,
+        runner_id: &str,
+        out: &Path,
+    ) -> Result<GreenticPackCommandResult, RuntimeError> {
+        self.telemetry.record("runner_pack", runner_id.to_owned());
+        let runner_manifest = self.find_runner_manifest(runner_id)?;
+        let temp = std::env::temp_dir().join(format!(
+            "greentic-pack-{}-{}",
+            std::process::id(),
+            monotonic_nanos()
+        ));
+        fs::create_dir_all(&temp)?;
+        let answers_path = temp.join("answers.json");
+        let answers = serde_json::json!({
+            "schema_version": "greentic.pack.answers.v1",
+            "source": "greentic-desktop",
+            "runner_id": runner_id,
+            "runner_manifest_path": runner_manifest,
+            "runner_definition_path": runner_manifest,
+            "input_schema_path": serde_json::Value::Null,
+            "output_schema_path": serde_json::Value::Null,
+            "asset_paths": [],
+            "evidence_policy": {
+                "capture_outputs": true,
+                "redact_secrets": true
+            },
+            "signing": {
+                "mode": "greentic-pack-default"
+            },
+            "output_path": out,
+        });
+        fs::write(
+            &answers_path,
+            serde_json::to_vec_pretty(&answers).map_err(|err| {
+                RuntimeError::Pack(format!(
+                    "failed to render greentic-pack answers.json: {err}"
+                ))
+            })?,
+        )?;
+        set_owner_only_permissions(&answers_path)?;
+        run_greentic_pack(["--answers".to_owned(), answers_path.display().to_string()]).map(
+            |mut result| {
+                result.answers_path = Some(answers_path);
+                result
+            },
+        )
+    }
+
+    pub fn verify_runner_pack(
+        &self,
+        path: &Path,
+    ) -> Result<GreenticPackCommandResult, RuntimeError> {
+        self.telemetry
+            .record("runner_pack_verify", path.display().to_string());
+        run_greentic_pack(["verify".to_owned(), path.display().to_string()])
+    }
+
+    pub fn install_runner_pack(&self, path: &Path) -> Result<PathBuf, RuntimeError> {
+        self.verify_runner_pack(path)?;
+        let runners_dir = self.config.runner.home.join("runners");
+        fs::create_dir_all(&runners_dir)?;
+        let file_name = path.file_name().ok_or_else(|| {
+            RuntimeError::Pack(format!(
+                "runner pack path has no file name: {}",
+                path.display()
+            ))
+        })?;
+        let destination = runners_dir.join(file_name);
+        fs::copy(path, &destination)?;
+        Ok(destination)
+    }
+
     pub fn serve_mcp(&self, bind: &str) -> Result<(), RuntimeError> {
         self.telemetry.record("tool_call", "desktop.mcp.serve");
-        let listener = TcpListener::bind(bind)?;
-
-        for stream in listener.incoming() {
-            handle_mcp_connection(stream?)?;
-        }
-
-        Ok(())
+        Err(RuntimeError::Pack(format!(
+            "standalone CLI MCP server is disabled because it cannot load and execute installed runner packs yet. Start the managed MCP server from the Automate Hub GUI instead. Requested bind: {bind}"
+        )))
     }
+
+    fn find_runner_manifest(&self, runner_id: &str) -> Result<PathBuf, RuntimeError> {
+        let runners_dir = self.config.runner.home.join("runners");
+        [
+            format!("{runner_id}.runner.json"),
+            format!("{runner_id}.draft.yaml"),
+            format!("{runner_id}.yaml"),
+            format!("{runner_id}.json"),
+        ]
+        .into_iter()
+        .map(|file| runners_dir.join(file))
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            RuntimeError::Pack(format!(
+                "runner manifest for {runner_id} was not found in {}",
+                runners_dir.display()
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GreenticPackCommandResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub answers_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,28 +475,121 @@ pub fn discover_runners(home: &Path) -> Result<Vec<String>, RuntimeError> {
     Ok(runners)
 }
 
-fn handle_mcp_connection(mut stream: TcpStream) -> Result<(), RuntimeError> {
-    let mut buffer = [0; 1024];
-    let read = stream.read(&mut buffer)?;
-    let request = String::from_utf8_lossy(&buffer[..read]);
-    let body = if request.starts_with("GET /health") {
-        "{\"status\":\"ok\"}".to_owned()
-    } else if request.contains("tools/list") {
-        let state = McpServerState::new(
-            vec![example_runner_tool()],
-            ["crm.create_customer".to_owned()],
-        );
-        state.render_tools_list_json()
-    } else {
-        "{\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"ok\"},\"id\":null}".to_owned()
+fn run_greentic_pack(
+    args: impl IntoIterator<Item = String>,
+) -> Result<GreenticPackCommandResult, RuntimeError> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    // greentic-pack is an explicit local tool dependency and is invoked directly without a shell.
+    // foxguard: ignore[rs/no-command-injection]
+    let output = Command::new("greentic-pack")
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| {
+            RuntimeError::Pack(format!(
+                "failed to run greentic-pack {}: {err}. Install greentic-pack and ensure it is on PATH.",
+                args.join(" ")
+            ))
+        })?;
+    let result = GreenticPackCommandResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        answers_path: None,
     };
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes())?;
+    if output.status.success() {
+        Ok(result)
+    } else {
+        Err(RuntimeError::Pack(format!(
+            "greentic-pack {} failed with status {}.\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status,
+            result.stdout,
+            result.stderr
+        )))
+    }
+}
+
+fn monotonic_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+fn set_owner_only_permissions(_path: &Path) -> Result<(), RuntimeError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(_path)?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(_path, permissions)?;
+    }
     Ok(())
+}
+
+#[derive(Clone)]
+pub struct RuntimeMcpServer {
+    state: Arc<Mutex<McpServerState>>,
+}
+
+impl RuntimeMcpServer {
+    pub fn new(state: McpServerState) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+}
+
+impl ServerHandler for RuntimeMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2025_06_18)
+            .with_server_info(Implementation::new(
+                "greentic-desktop",
+                env!("CARGO_PKG_VERSION"),
+            ))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ErrorData::internal_error("MCP state lock is poisoned", None))?;
+        Ok(rmcp_list_tools_result(&state.list_tools()))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let arguments = mcp_arguments_to_strings(request.arguments.unwrap_or_default());
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ErrorData::internal_error("MCP state lock is poisoned", None))?;
+        let result = state.call_tool_with_arguments(request.name.into_owned(), arguments);
+        Ok(rmcp_call_tool_result(&result))
+    }
+}
+
+fn mcp_arguments_to_strings(arguments: JsonObject) -> BTreeMap<String, String> {
+    arguments
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -428,7 +626,8 @@ mod tests {
             },
             required_adapters: vec!["greentic.desktop.playwright".to_owned()],
             compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-            package_checksum: "sha256:abc123".to_owned(),
+            package_checksum:
+                "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned(),
         };
         let signed = sign_manifest(manifest, &key).expect("manifest should sign");
         (signed, key)
@@ -507,7 +706,8 @@ mod tests {
     fn refuses_tampered_registry_runner_package() {
         let runtime = DesktopRuntime::new(RuntimeConfig::default());
         let (mut signed, key) = signed_manifest_for("tenant_a");
-        signed.manifest.package_checksum = "sha256:tampered".to_owned();
+        signed.manifest.package_checksum =
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned();
 
         let err = runtime
             .verify_registry_runner(&signed, &key, "tenant_a")
@@ -668,5 +868,15 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("test dir should be removable");
+    }
+
+    #[test]
+    fn runtime_mcp_server_uses_rmcp_server_info() {
+        let info =
+            RuntimeMcpServer::new(McpServerState::new(Vec::new(), Vec::<String>::new())).get_info();
+
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
+        assert_eq!(info.server_info.name, "greentic-desktop");
+        assert!(info.capabilities.tools.is_some());
     }
 }

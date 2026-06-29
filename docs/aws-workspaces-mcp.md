@@ -235,10 +235,6 @@ Treat screenshots and tool traces as sensitive operational evidence. Configure r
 
 ## Current Scope
 
-The current Greentic CLI can initialize the runtime, install extension manifests, discover `.gtpack` runner packages, and serve a minimal local MCP endpoint:
-
-```bash
-greentic-desktop mcp serve
-```
+The current Greentic CLI can initialize the runtime, install extension manifests, and discover `.gtpack` runner packages. The usable local MCP endpoint is managed by Automate Hub **My Runners**; the standalone CLI MCP server is disabled until it can load and execute installed packs directly.
 
 The AWS WorkSpaces install plan, approved-runner pull, forwarded MCP tool builder, and forwarded runner call flow are implemented in this repository as models and tests. The production command surface for registry publish, AWS forwarder registration, and live AWS API orchestration is still being added.

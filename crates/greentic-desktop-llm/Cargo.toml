@@ -16,4 +16,6 @@ name = "greentic_desktop_llm"
 path = "src/lib.rs"
 
 [dependencies]
+greentic-llm.workspace = true
 serde_json.workspace = true
+tokio.workspace = true

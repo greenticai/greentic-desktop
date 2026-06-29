@@ -13,6 +13,7 @@ include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
+greentic-desktop-automation-foundation.workspace = true
 greentic-desktop-platform.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-workflow.workspace = true

@@ -97,11 +97,7 @@ Use `linux.read_window_tree` during review to inspect the available UI tree.
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 
@@ -130,3 +126,5 @@ The built-in manifest requests:
 - `desktop.input`
 
 Use the Wayland adapter instead when the session is Wayland and global input/window control is restricted.
+
+Screenshot evidence is captured through the shared `xcap` backend. Core X11 automation should move toward `x11rb` for window/input primitives and AT-SPI over `zbus` for element traversal instead of adding new shell command paths.

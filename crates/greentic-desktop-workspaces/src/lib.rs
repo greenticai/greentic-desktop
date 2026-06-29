@@ -167,7 +167,9 @@ mod tests {
                 },
                 required_adapters: vec!["greentic.desktop.playwright".to_owned()],
                 compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-                package_checksum: "sha256:abc123".to_owned(),
+                package_checksum:
+                    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        .to_owned(),
             },
             key,
         )
@@ -226,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn external_mcp_client_can_call_runner_and_receive_evidence() {
+    fn external_mcp_client_gets_structured_failure_and_evidence_without_real_replay_registry() {
         let mut state = expose_workspace_tools(vec![workspace_validation_tool()]);
         let result = call_forwarded_runner(
             &mut state,
@@ -235,7 +237,11 @@ mod tests {
             BTreeMap::from([("password".to_owned(), "secret".to_owned())]),
         );
 
-        assert!(result.success);
+        assert!(!result.success);
+        assert!(result
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.message.contains("real adapter registry")));
         assert!(result
             .evidence_uri
             .contains("run_workspace.validate_after_patch"));

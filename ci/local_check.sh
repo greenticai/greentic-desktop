@@ -20,6 +20,31 @@ is_publishable() {
   ! sed -n '/^\[package\]/,/^\[/p' "$1" | grep -Eq '^[[:space:]]*publish[[:space:]]*=[[:space:]]*false([[:space:]]|$)'
 }
 
+frontend_node_is_supported() {
+  command -v node >/dev/null 2>&1 \
+    && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && minor >= 19) ? 0 : 1)'
+}
+
+ensure_frontend_node() {
+  if frontend_node_is_supported; then
+    return
+  fi
+
+  if [ -s "${HOME:-}/.nvm/nvm.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${HOME}/.nvm/nvm.sh"
+    for version in 24 22 20; do
+      if nvm use "$version" >/dev/null 2>&1 && frontend_node_is_supported; then
+        return
+      fi
+    done
+  fi
+
+  printf 'Node.js >=20.19 is required because Rust GUI tests exercise the Playwright web replay adapter.\n' >&2
+  printf 'Install or activate a supported Node.js version, then rerun ci/local_check.sh.\n' >&2
+  exit 1
+}
+
 locally_packageable_crates() {
   # Before the first release, crates.io cannot resolve workspace-internal
   # dependencies for downstream crates. Full ordered publish dry-runs happen in
@@ -50,14 +75,49 @@ source ci/crate_publish_order.sh
 header "publish crate order"
 validate_publish_crate_order
 
+header "workspace dependency policy"
+bash ci/workspace_dependency_policy_check.sh
+
+header "no-mock production check"
+bash ci/no_mock_production_check.sh
+
+header "no-handrolled scripting check"
+bash ci/no_handrolled_scripting_check.sh
+
 header "cargo fmt"
 cargo fmt --all -- --check
+
+header "frontend automation dependencies"
+ensure_frontend_node
+if command -v npm >/dev/null 2>&1; then
+  (
+    cd frontend/automate-hub
+    npm ci
+    npx playwright install chromium
+  )
+else
+  printf 'npm is required because Rust GUI tests exercise the Playwright web replay adapter.\n' >&2
+  exit 1
+fi
 
 header "cargo clippy"
 cargo clippy --all-targets --all-features -- -D warnings
 
 header "cargo test"
 cargo test --all-features
+
+header "secret leak guard"
+if rg -n \
+  --glob 'evidence/**' \
+  --glob 'logs/**' \
+  --glob '*.log' \
+  --glob 'bundle.json' \
+  --glob 'outputs.json' \
+  --glob 'trace.json' \
+  'sk-test-super-secret|DEEPSEEK_API_KEY=[^[:space:]]+' .; then
+  printf 'Known fake secret appeared in generated evidence or log artifacts.\n' >&2
+  exit 1
+fi
 
 header "cargo build"
 cargo build --all-features

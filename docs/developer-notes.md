@@ -42,6 +42,35 @@ bash ci/local_check.sh
 
 It runs formatting, Clippy, tests, builds, documentation generation, package checks, and publish dry-runs for publishable crates.
 
+`ci/local_check.sh` also runs architectural guardrails:
+
+- `ci/workspace_dependency_policy_check.sh` keeps dependency and dev-dependency versions in the workspace root only.
+- `ci/no_mock_production_check.sh` blocks fake replay/recording success paths.
+- `ci/no_handrolled_scripting_check.sh` blocks new per-adapter scripting surfaces such as `curl`, `osascript`, `screencapture`, `wmctrl`, `xdotool`, PowerShell UIA snippets, and manual MCP HTTP loops outside reviewed migration files.
+
+## Adapter Migration Checklist
+
+Before an adapter capability can move beyond experimental status, its PR must document:
+
+- maintained library or shared foundation used for capture, input, protocol, or accessibility;
+- real fixture E2E that proves input, side effect, output extraction, and evidence;
+- permission preflight for the OS, session, or remote protocol;
+- output proof, especially for files or durable business artifacts;
+- secret redaction for traces, screenshots, terminal buffers, and evidence;
+- capability matrix status and remaining unsupported paths.
+
+Current migration boundaries:
+
+| Adapter | Library-backed baseline | Still explicitly allowed while migrating |
+| --- | --- | --- |
+| Web | Playwright typed stdio protocol with request ids. | Node sidecar launch. |
+| macOS | Shared `xcap` screenshot evidence. | Existing `osascript`/Swift AX migration file only. |
+| Windows | Shared `xcap` screenshot evidence. | Existing PowerShell UIA migration file only. |
+| Linux | Shared `xcap` screenshot evidence and Wayland fail-closed model. | Existing X11 `wmctrl`/`xdotool` migration file only. |
+| Terminal | `portable-pty` local fixtures and `vte` parsing. | Configured owned runtime command boundary. |
+| Java | Explicit Java target classifier; native apps route to OS accessibility. | Java Access Bridge sidecar command boundary. |
+| Vision/Remote | Shared `xcap` screenshot path and explicit backend/provider requirements. | Configured OCR/input/remote viewport provider command boundary. |
+
 Frontend validation is opt-in for local checks so Rust contributors do not need a JavaScript toolchain for unrelated changes:
 
 ```bash

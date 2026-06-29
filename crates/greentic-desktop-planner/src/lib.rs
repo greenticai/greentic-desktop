@@ -107,11 +107,33 @@ pub fn plan_prompt_with_llm(
     let llm_context = llm_context(context);
     let request = LlmRequestEnvelope::prompt_to_runner(prompt, llm_context);
     let request_json = request.render_json();
-    let response = client
+    let max_retries = request.model_policy.max_retries;
+    let mut response = client
         .complete(&request)
         .map_err(|err| diagnostic("planner.llm_unavailable", &format!("{err:?}")))?;
-    let mut document = parse_runner_draft_json(&response.content).map_err(from_schema)?;
+    let mut repair_attempt = 0;
+    let mut document = loop {
+        match parse_runner_draft_json(&response.content) {
+            Ok(document) => break document,
+            Err(err) if repair_attempt < max_retries => {
+                repair_attempt += 1;
+                let repair_request = LlmRequestEnvelope::repair_runner_json(
+                    prompt,
+                    request.context.clone(),
+                    response.content,
+                    format!("{}: {}", err.code, err.message),
+                    repair_attempt,
+                );
+                response = client.complete(&repair_request).map_err(|llm_err| {
+                    diagnostic("planner.llm_unavailable", &format!("{llm_err:?}"))
+                })?;
+            }
+            Err(err) => return Err(from_schema(err)),
+        }
+    };
     resolve_adapter_id_steps(context, &mut document.steps);
+    normalize_native_capabilities(context, &mut document.steps);
+    document.required_capabilities = required_capabilities_from_steps(&document.steps);
     validate_planned_runner(&document, &options.policy)
         .map_err(|err| diagnostic(&err.code, &err.message))?;
 
@@ -521,6 +543,144 @@ fn resolve_adapter_id_steps(context: &PlanningContext, steps: &mut [RunnerStep])
     }
 }
 
+fn normalize_native_capabilities(context: &PlanningContext, steps: &mut [RunnerStep]) {
+    let Some(preferred_prefix) = preferred_native_prefix(context) else {
+        for step in steps {
+            if let Some(capability) =
+                canonical_native_capability(&step.required_capability, None, &step.action)
+            {
+                step.required_capability = capability;
+            }
+        }
+        return;
+    };
+
+    for step in steps {
+        if let Some(capability) = canonical_native_capability(
+            &step.required_capability,
+            Some(preferred_prefix),
+            &step.action,
+        ) {
+            step.required_capability = capability;
+        }
+    }
+}
+
+fn preferred_native_prefix(context: &PlanningContext) -> Option<&'static str> {
+    let observations = context
+        .desktop_observations
+        .iter()
+        .chain(context.application_metadata.iter())
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if observations
+        .iter()
+        .any(|value| value.contains("current desktop platform: macos"))
+    {
+        return Some("macos");
+    }
+    if observations
+        .iter()
+        .any(|value| value.contains("current desktop platform: windows"))
+    {
+        return Some("windows");
+    }
+    if observations
+        .iter()
+        .any(|value| value.contains("current desktop platform: linux"))
+    {
+        return Some("linux");
+    }
+    if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.adapter_id == "greentic.desktop.macos.ax")
+    {
+        return Some("macos");
+    }
+    if context
+        .available_adapters
+        .iter()
+        .any(|adapter| adapter.adapter_id == "greentic.desktop.windows-ui")
+    {
+        return Some("windows");
+    }
+    if context.available_adapters.iter().any(|adapter| {
+        adapter.adapter_id == "greentic.desktop.linux.x11"
+            || adapter.adapter_id == "greentic.desktop.linux.wayland"
+    }) {
+        return Some("linux");
+    }
+    None
+}
+
+fn canonical_native_capability(
+    capability: &str,
+    preferred_prefix: Option<&str>,
+    action: &str,
+) -> Option<String> {
+    let (prefix, suffix) = capability.split_once('.')?;
+    if !matches!(prefix, "windows" | "macos" | "linux") {
+        return None;
+    }
+    let prefix = preferred_prefix.unwrap_or(prefix);
+    let normalized = normalize_capability_token(&format!("{suffix}_{action}"));
+    let canonical_suffix = if normalized.contains("open_app")
+        || normalized.contains("activate_app")
+        || normalized.contains("launch")
+        || normalized.contains("start")
+    {
+        match prefix {
+            "windows" => "open_app",
+            "macos" => "activate_app",
+            "linux" => "find_window",
+            _ => suffix,
+        }
+    } else if normalized.contains("find_window") || normalized.contains("activate_window") {
+        match prefix {
+            "linux" if normalized.contains("activate_window") => "activate_window",
+            "linux" => "find_window",
+            _ => "find_window",
+        }
+    } else if normalized.contains("find") {
+        "find_element"
+    } else if normalized.contains("click")
+        || normalized.contains("press")
+        || normalized.contains("save")
+    {
+        "click_element"
+    } else if normalized.contains("type")
+        || normalized.contains("input")
+        || normalized.contains("fill")
+        || normalized.contains("enter")
+    {
+        "type_text"
+    } else if normalized.contains("read")
+        || normalized.contains("extract")
+        || normalized.contains("return")
+        || normalized.contains("get")
+    {
+        "read_text"
+    } else if normalized.contains("assert") {
+        "assert_visible"
+    } else if normalized.contains("screenshot") {
+        "screenshot"
+    } else {
+        suffix
+    };
+    Some(format!("{prefix}.{canonical_suffix}"))
+}
+
+fn required_capabilities_from_steps(steps: &[RunnerStep]) -> Vec<String> {
+    let mut capabilities = steps
+        .iter()
+        .map(|step| step.required_capability.clone())
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
 fn capability_for_action(adapter: &AdapterCapabilities, action: &str) -> Option<String> {
     let normalized_action = normalize_capability_token(action);
     let suffix_matches = |capability: &&String| {
@@ -894,7 +1054,11 @@ fn runner_id(prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_desktop_llm::StaticLlmClient;
+    use greentic_desktop_llm::{
+        LlmError, LlmRequestEnvelope, LlmResponse, OpenAiCompatibleLlmClient, StaticLlmClient,
+    };
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     fn context() -> PlanningContext {
         PlanningContext {
@@ -1111,6 +1275,47 @@ mod tests {
         )
     }
 
+    struct SequencedLlmClient {
+        responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
+        requests: Mutex<Vec<String>>,
+    }
+
+    impl SequencedLlmClient {
+        fn ok(responses: Vec<&'static str>) -> Self {
+            Self {
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|content| {
+                            Ok(LlmResponse {
+                                content: content.to_owned(),
+                            })
+                        })
+                        .collect(),
+                ),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("requests lock").clone()
+        }
+    }
+
+    impl GreenticLlmClient for SequencedLlmClient {
+        fn complete(&self, request: &LlmRequestEnvelope) -> Result<LlmResponse, LlmError> {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.render_json());
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .unwrap_or_else(|| Err(LlmError::Unavailable("no more mock responses".to_owned())))
+        }
+    }
+
     #[test]
     fn mock_llm_valid_runner_draft_is_validated() {
         let result = plan_prompt_with_llm(
@@ -1156,6 +1361,78 @@ mod tests {
     }
 
     #[test]
+    fn invalid_structured_llm_response_triggers_repair_and_then_succeeds() {
+        let client = SequencedLlmClient::ok(vec![
+            r#"{
+                "runner_id": "crm.create_customer",
+                "version": "0.1.0-draft",
+                "summary": "Create a customer",
+                "risk_level": "moderate",
+                "required_capabilities": ["web.goto"],
+                "inputs": {"company_name": {"type": "string", "required": true}},
+                "outputs": {"customer_id": {"type": "string"}},
+                "steps": [{"id": "open", "action": "goto", "required_capability": "web.goto"}],
+                "assertions": ["customer created"],
+                "open_questions": []
+            }"#,
+            r#"{
+                "runner_id": "crm.create_customer",
+                "version": "0.1.0-draft",
+                "summary": "Create a customer",
+                "risk_level": "medium",
+                "required_capabilities": ["web.goto"],
+                "inputs": {"company_name": {"type": "string", "required": true}},
+                "outputs": {"customer_id": {"type": "string"}},
+                "steps": [{"id": "open", "action": "goto", "required_capability": "web.goto"}],
+                "assertions": ["customer created"],
+                "open_questions": []
+            }"#,
+        ]);
+
+        let result = plan_prompt_with_llm(
+            "Create CRM customer",
+            &context(),
+            &PlannerOptions::default(),
+            &client,
+        )
+        .expect("repair should produce a valid draft");
+
+        assert_eq!(result.draft.package.id, "crm.create_customer");
+        let requests = client.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("\"task\":\"desktop.prompt_to_runner\""));
+        assert!(requests[1].contains("\"task\":\"desktop.repair_runner_json\""));
+        assert!(requests[1].contains("risk_level"));
+        assert!(requests[1].contains("one of"));
+        assert!(requests[1].contains("moderate"));
+    }
+
+    #[test]
+    fn exhausted_structured_repair_returns_validation_details() {
+        let client = SequencedLlmClient::ok(vec![
+            r#"{"runner_id": ""}"#,
+            r#"{"runner_id": ""}"#,
+            r#"{"runner_id": ""}"#,
+        ]);
+
+        let err = plan_prompt_with_llm(
+            "Create CRM customer",
+            &context(),
+            &PlannerOptions::default(),
+            &client,
+        )
+        .expect_err("repair attempts should be exhausted");
+
+        assert_eq!(err.code, "planner.schema_mismatch");
+        assert!(
+            err.message.contains("required property") || err.message.contains("runner_id"),
+            "{}",
+            err.message
+        );
+        assert_eq!(client.requests().len(), 3);
+    }
+
+    #[test]
     fn calculator_llm_response_missing_step_id_returns_schema_diagnostic() {
         let err = plan_prompt_with_llm(
             "open the local calculator app, ask the user for two numbers and an operation, introduce the first number in the calculator, press the operation, introduce the next, get the result and return it",
@@ -1180,7 +1457,7 @@ mod tests {
 
         assert_eq!(err.code, "planner.schema_mismatch");
         assert!(
-            err.message.contains("missing field `id`"),
+            err.message.contains("\"id\" is a required property"),
             "{}",
             err.message
         );
@@ -1309,7 +1586,6 @@ mod tests {
             vec![
                 "greentic.desktop.java-accessibility",
                 "greentic.desktop.macos.ax",
-                "greentic.desktop.playwright",
                 "greentic.desktop.vision"
             ]
         );
@@ -1328,6 +1604,181 @@ mod tests {
                 "vision.extract_text"
             ]
         );
+    }
+
+    #[test]
+    fn llm_windows_native_steps_are_normalized_to_current_macos_platform() {
+        let result = plan_prompt_with_llm(
+            "Create a desktop document",
+            &PlanningContext {
+                available_adapters: vec![AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    [
+                        "macos.activate_app",
+                        "macos.find_element",
+                        "macos.type_text",
+                        "macos.click_element",
+                        "macos.read_text",
+                    ],
+                )],
+                available_mcp_tools: Vec::new(),
+                application_metadata: vec!["current desktop platform: macos".to_owned()],
+                existing_runners: Vec::new(),
+                ltm_examples: Vec::new(),
+                security_policies: Vec::new(),
+                desktop_observations: vec!["current desktop platform: macos".to_owned()],
+            },
+            &PlannerOptions::default(),
+            &StaticLlmClient::ok(
+                r#"{
+                    "runner_id": "document.create",
+                    "version": "0.1.0-draft",
+                    "summary": "Create document",
+                    "risk_level": "medium",
+                    "required_capabilities": ["windows.activate_app", "windows.click", "windows.read_text", "windows.type_text"],
+                    "inputs": {"document_path": {"type": "string"}, "text_content": {"type": "string"}},
+                    "outputs": {"saved_status": {"type": "string"}},
+                    "steps": [
+                        {"id": "open-word", "action": "activate_app", "required_capability": "windows.activate_app", "value": "Word"},
+                        {"id": "type-text", "action": "type_text", "required_capability": "windows.type_text", "value": "{{inputs.text_content}}"},
+                        {"id": "save", "action": "click", "required_capability": "windows.click"},
+                        {"id": "read-state", "action": "read_text", "required_capability": "windows.read_text"}
+                    ],
+                    "assertions": [],
+                    "open_questions": []
+                }"#,
+            ),
+        )
+        .expect("foreign native capabilities should normalize");
+
+        assert_eq!(
+            result.draft.required_adapters,
+            vec!["greentic.desktop.macos.ax"]
+        );
+        let step_capabilities = result
+            .draft
+            .package
+            .steps
+            .iter()
+            .map(|step| step.required_capability.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            step_capabilities,
+            vec![
+                "macos.activate_app",
+                "macos.type_text",
+                "macos.click_element",
+                "macos.read_text"
+            ]
+        );
+    }
+
+    #[test]
+    fn llm_primitive_word_prompt_accepts_app_name_aliases() {
+        let result = plan_prompt_with_llm(
+            "open the word app. Create a new word document in the place and the name that input parameters provide. Add the text that input parameters provide. Save the document.",
+            &PlanningContext {
+                available_adapters: vec![AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    [
+                        "macos.activate_app",
+                        "macos.find_element",
+                        "macos.type_text",
+                        "macos.click_element",
+                    ],
+                )],
+                available_mcp_tools: Vec::new(),
+                application_metadata: vec!["current desktop platform: macos".to_owned()],
+                existing_runners: Vec::new(),
+                ltm_examples: Vec::new(),
+                security_policies: Vec::new(),
+                desktop_observations: vec!["current desktop platform: macos".to_owned()],
+            },
+            &PlannerOptions::default(),
+            &StaticLlmClient::ok(
+                r#"{
+                    "runner_id": "word.document.create",
+                    "version": "0.1.0-draft",
+                    "summary": "Create a Word document",
+                    "risk_level": "medium",
+                    "required_capabilities": ["macos.activate_app", "macos.type_text", "macos.click_element"],
+                    "inputs": {"document_path": {"type": "string"}, "text_content": {"type": "string"}},
+                    "outputs": {"saved_status": {"type": "string"}},
+                    "primitive_workflow": {
+                        "id": "word.document.create",
+                        "summary": "Create a Word document",
+                        "target": {"kind": {"NativeApp": "MacOs"}, "open": {"App": {"app_name": "Word", "window_title": "Word"}}},
+                        "inputs": [],
+                        "primitives": [
+                            {"kind": "open_app", "app": {"app_name": "Word", "window_title": "Word"}},
+                            {"kind": "enter_text", "target": {"label": "active document", "role": "document"}, "value_template": "{{inputs.text_content}}"},
+                            {"kind": "save_resource", "path_template": "{{inputs.document_path}}", "policy": "Create"}
+                        ],
+                        "outputs": [],
+                        "assertions": [],
+                        "evidence_policy": {"capture_steps": true, "capture_screenshots": true}
+                    },
+                    "steps": [],
+                    "assertions": [],
+                    "open_questions": []
+                }"#,
+            ),
+        )
+        .expect("primitive Word draft should parse and plan");
+
+        assert_eq!(result.draft.package.id, "word.document.create");
+        assert_eq!(result.draft.package.steps[0].value.as_deref(), Some("Word"));
+        assert_eq!(
+            result.draft.required_adapters,
+            vec!["greentic.desktop.macos.ax"]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires network and DEEPSEEK_API_KEY"]
+    fn deepseek_live_word_prompt_returns_parseable_runner() {
+        let api_key = std::env::var("DEEPSEEK_API_KEY")
+            .expect("set DEEPSEEK_API_KEY to run the live DeepSeek planner test");
+        let client = OpenAiCompatibleLlmClient::new(
+            "deepseek",
+            "https://api.deepseek.com",
+            "deepseek-chat",
+            Some(api_key),
+        );
+        let result = plan_prompt_with_llm(
+            "open the word app. Create a new word document in the place and the name that input parameters provide. Add the text that input parameters provide. Save the document.",
+            &PlanningContext {
+                available_adapters: vec![AdapterCapabilities::new(
+                    "greentic.desktop.macos.ax",
+                    "1.0.0",
+                    [
+                        "macos.activate_app",
+                        "macos.find_element",
+                        "macos.type_text",
+                        "macos.click_element",
+                    ],
+                )],
+                available_mcp_tools: Vec::new(),
+                application_metadata: vec!["current desktop platform: macos".to_owned()],
+                existing_runners: Vec::new(),
+                ltm_examples: Vec::new(),
+                security_policies: Vec::new(),
+                desktop_observations: vec!["current desktop platform: macos".to_owned()],
+            },
+            &PlannerOptions::default(),
+            &client,
+        )
+        .expect("DeepSeek response should validate as a runner draft");
+
+        assert!(!result.draft.package.steps.is_empty());
+        assert!(result
+            .draft
+            .package
+            .inputs
+            .iter()
+            .any(|input| input.contains("document") || input.contains("text")));
     }
 
     #[test]

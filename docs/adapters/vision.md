@@ -102,11 +102,7 @@ Use vision locators carefully:
 
 ## Use As An MCP Tool
 
-Start MCP after the runner is approved:
-
-```bash
-greentic-desktop mcp serve
-```
+Start the managed MCP endpoint from Automate Hub **My Runners** after the runner is approved.
 
 Example MCP call:
 
@@ -125,3 +121,5 @@ Example MCP call:
 ## Permissions And Notes
 
 The built-in manifest requests `desktop.screenshot`. macOS, Linux Wayland, remote desktops, and managed workspaces may require explicit screenshot or screen-recording permission before this adapter can work.
+
+Plain `vision.screenshot` uses the shared `xcap` backend and returns a real screenshot artifact or a concrete capture error. Text extraction, visual clicking, OCR, and remote viewport actions require a configured production backend; a screenshot match alone is not proof that a durable business side effect happened.

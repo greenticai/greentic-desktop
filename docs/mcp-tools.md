@@ -21,11 +21,7 @@ Runner IDs are normalized into stable tool names so they can be safely listed an
 
 Automate Hub manages MCP from **My Runners**. Start, stop, or restart the managed MCP server there; each saved ready runner is the MCP tool contract. Run, edit, delete, and MCP calls use the same runner definition.
 
-The CLI can also start the MCP endpoint:
-
-```bash
-greentic-desktop mcp serve
-```
+The standalone CLI `mcp serve` command is disabled until the runtime can load and execute installed `.gtpack` runner packages directly. Use the GUI-managed server for local assistant integrations.
 
 The default address is:
 

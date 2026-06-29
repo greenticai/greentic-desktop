@@ -102,11 +102,7 @@ Use `java.capture_tree` during review to confirm the component tree exposes stab
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 
@@ -127,3 +123,5 @@ Example MCP call:
 ## Permissions And Notes
 
 The built-in manifest requests `desktop.java_accessibility`. Make sure the Java accessibility bridge or equivalent platform accessibility support is enabled for the target environment.
+
+This adapter is for Java applications, not for generic desktop documents. Native apps such as Word, Excel, or platform file dialogs should route through the OS accessibility adapter unless an explicit app profile or process/accessibility metadata proves the target is Java. Direct JNI/JVM integration should only be added for a fixture that cannot be solved through OS accessibility metadata.

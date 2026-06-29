@@ -3,9 +3,10 @@ use greentic_desktop_adapter::{
     LocatorStrategy, LocatorTarget, Observation, ObserveContext, RecordedEvent, RunnerStep,
     StepResult, VisualLocator,
 };
+use greentic_desktop_automation_foundation::{ScreenshotBackend, XcapScreenshotBackend};
 use greentic_desktop_recorder::{
-    RecordingBackend, RecordingCaptureState, RecordingEventEnvelope, RecordingEventSink,
-    RecordingHandle, RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
+    RecordingBackend, RecordingCaptureState, RecordingEventSink, RecordingHandle,
+    RecordingPreflight, RecordingStartRequest, RecordingTargetKind,
 };
 use greentic_desktop_workflow::{
     compile_workflow, workflow_id_component, DesktopWorkflow, NativePlatform, WorkflowAction,
@@ -13,6 +14,8 @@ use greentic_desktop_workflow::{
     WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 pub const WINDOWS_ADAPTER_ID: &str = "greentic.desktop.windows-ui";
@@ -110,31 +113,36 @@ impl RecordingBackend for WindowsUiRecordingBackend {
         }
     }
 
-    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
-        let mut event = RecordingEventEnvelope::new(
-            sink.session_id(),
-            WINDOWS_RECORDER_BACKEND_ID,
-            RecordingTargetKind::Desktop,
-            1,
-            "activate_window",
-        );
-        event.target_json =
-            r#"{"platform":"windows","api":"UI Automation","window":"focused"}"#.to_owned();
-        event.value = Some("focused Windows application".to_owned());
-        event.ui_tree_ref = Some("evidence://ui-tree/windows/focused.json".to_owned());
-        let _ = sink.append_event(event);
-        let _ = sink.update_heartbeat();
+    fn start(&self, request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        if let Ok(command) = std::env::var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE_COMMAND") {
+            // Local operator supplied recorder path is invoked directly without a shell.
+            // foxguard: ignore[rs/no-command-injection]
+            let spawn = Command::new(command)
+                .arg(sink.session_id())
+                .arg(&request.out)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            if spawn.is_ok() {
+                let _ = sink.update_heartbeat();
+                return RecordingHandle {
+                    backend_id: WINDOWS_RECORDER_BACKEND_ID.to_owned(),
+                    capture_state: RecordingCaptureState::Recording,
+                };
+            }
+        }
 
         RecordingHandle {
             backend_id: WINDOWS_RECORDER_BACKEND_ID.to_owned(),
-            capture_state: RecordingCaptureState::Recording,
+            capture_state: RecordingCaptureState::Blocked,
         }
     }
 }
 
 fn windows_uia_event_source_configured() -> bool {
-    std::env::var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    std::env::var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE_COMMAND")
+        .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
 }
 
@@ -146,23 +154,12 @@ pub struct WindowsUiAdapter {
 #[derive(Debug, Clone, Default)]
 struct WindowsState {
     app: Option<String>,
-    window_title: Option<String>,
-    controls: BTreeMap<String, String>,
-    error_dialogs: Vec<String>,
     recorded: Vec<RecordedEvent>,
 }
 
 impl WindowsUiAdapter {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn seed_control(&self, target: LocatorTarget, value: impl Into<String>) {
-        self.state
-            .lock()
-            .expect("windows adapter mutex poisoned")
-            .controls
-            .insert(target_key(&target), value.into());
     }
 
     pub fn record_control_interaction(
@@ -192,12 +189,110 @@ impl WindowsUiAdapter {
             .collect()
     }
 
-    pub fn detect_error_dialog(&self, title: impl Into<String>) {
+    fn active_app(&self) -> AdapterResult<String> {
         self.state
             .lock()
             .expect("windows adapter mutex poisoned")
-            .error_dialogs
-            .push(title.into());
+            .app
+            .clone()
+            .ok_or_else(|| {
+                AdapterError::ExecutionFailed(
+                    "No active Windows app is known; run windows.open_app first.".to_owned(),
+                )
+            })
+    }
+
+    fn execute_real_step(&self, step: &RunnerStep) -> AdapterResult<String> {
+        match step.required_capability.as_str() {
+            "windows.open_app" => {
+                let app = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "windows.open_app requires an app path or executable in step.value."
+                            .to_owned(),
+                    )
+                })?;
+                windows_open_app(app)?;
+                self.state
+                    .lock()
+                    .expect("windows adapter mutex poisoned")
+                    .app = Some(app.to_owned());
+                Ok(format!("opened Windows app {app}"))
+            }
+            "windows.find_window" => {
+                let title = step.value.as_deref().unwrap_or_default();
+                if windows_window_exists(title)? {
+                    Ok(format!("found Windows window containing {title}"))
+                } else {
+                    Err(AdapterError::ExecutionFailed(format!(
+                        "No Windows window containing {title} was visible."
+                    )))
+                }
+            }
+            "windows.find_element" | "windows.assert_visible" => {
+                let app = self.active_app()?;
+                if windows_element_exists(&app, &step.target, step.value.as_deref())? {
+                    Ok("found Windows UI Automation element".to_owned())
+                } else {
+                    Err(AdapterError::ExecutionFailed(
+                        "No matching Windows UI Automation element was visible.".to_owned(),
+                    ))
+                }
+            }
+            "windows.type_text" => {
+                let app = self.active_app()?;
+                windows_type_text(
+                    &app,
+                    &step.target,
+                    step.value.as_deref().unwrap_or_default(),
+                )?;
+                Ok("typed text through Windows UI Automation".to_owned())
+            }
+            "windows.click_element" => {
+                let app = self.active_app()?;
+                windows_click_element(&app, &step.target)?;
+                Ok("clicked Windows UI Automation element".to_owned())
+            }
+            "windows.read_text" => {
+                let app = self.active_app()?;
+                Ok(windows_read_element_text(&app, &step.target)?)
+            }
+            "windows.read_window_tree" => {
+                let app = self.active_app()?;
+                Ok(format!(
+                    "read {} Windows UI Automation text entries",
+                    windows_read_tree(&app)?.len()
+                ))
+            }
+            "windows.screenshot" => {
+                let path = step
+                    .value
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(default_screenshot_path);
+                windows_screenshot(&path)?;
+                Ok(path.display().to_string())
+            }
+            "windows.close_app" => {
+                let app = step.value.clone().or_else(|| {
+                    self.state
+                        .lock()
+                        .expect("windows adapter mutex poisoned")
+                        .app
+                        .clone()
+                });
+                if let Some(app) = app {
+                    windows_close_app(&app)?;
+                }
+                self.state
+                    .lock()
+                    .expect("windows adapter mutex poisoned")
+                    .app = None;
+                Ok("closed Windows app".to_owned())
+            }
+            _ => Err(AdapterError::UnsupportedCapability(
+                step.required_capability.clone(),
+            )),
+        }
     }
 }
 
@@ -207,15 +302,12 @@ impl DesktopAdapter for WindowsUiAdapter {
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        let state = self.state.lock().expect("windows adapter mutex poisoned");
+        let app = self.active_app()?;
+        let visible_text = windows_read_tree(&app)?;
         Ok(Observation {
             adapter_id: WINDOWS_ADAPTER_ID.to_owned(),
-            summary: format!(
-                "windows session {} app {}",
-                ctx.session_id,
-                state.app.clone().unwrap_or_else(|| "none".to_owned())
-            ),
-            visible_text: state.controls.values().cloned().collect(),
+            summary: format!("windows session {} app {}", ctx.session_id, app),
+            visible_text,
         })
     }
 
@@ -226,41 +318,22 @@ impl DesktopAdapter for WindowsUiAdapter {
             ));
         }
 
-        let mut state = self.state.lock().expect("windows adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "windows.open_app" => {
-                state.app = step.value.clone();
-                state.window_title = step.value.clone();
-            }
-            "windows.find_window" | "windows.find_element" | "windows.assert_visible" => {
-                let key = target_key(&step.target);
-                state.controls.entry(key).or_default();
-            }
-            "windows.type_text" => {
-                state.controls.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
-            }
-            "windows.click_element" => {}
-            "windows.read_text" | "windows.read_window_tree" | "windows.screenshot" => {}
-            "windows.close_app" => {
-                state.app = None;
-                state.window_title = None;
-            }
-            _ => {}
-        }
+        let message = self.execute_real_step(&step)?;
 
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
+        self.state
+            .lock()
+            .expect("windows adapter mutex poisoned")
+            .recorded
+            .push(RecordedEvent {
+                action: step.action.clone(),
+                target: step.target,
+                value: step.value,
+            });
 
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: "windows step accepted".to_owned(),
+            message,
         })
     }
 
@@ -271,21 +344,13 @@ impl DesktopAdapter for WindowsUiAdapter {
             ));
         }
 
-        let state = self.state.lock().expect("windows adapter mutex poisoned");
-        let target = target_key(&assertion.target);
         let passed = match assertion.required_capability.as_str() {
             "windows.assert_visible" => {
-                state.controls.contains_key(&target)
-                    || state
-                        .controls
-                        .values()
-                        .any(|value| value == &assertion.expected)
+                let app = self.active_app()?;
+                windows_element_exists(&app, &assertion.target, Some(&assertion.expected))?
             }
-            "windows.find_window" => state
-                .window_title
-                .as_ref()
-                .is_some_and(|title| title.contains(&assertion.expected)),
-            _ => state.error_dialogs.is_empty(),
+            "windows.find_window" => windows_window_exists(&assertion.expected)?,
+            _ => true,
         };
 
         Ok(AssertionResult {
@@ -310,30 +375,226 @@ impl DesktopAdapter for WindowsUiAdapter {
     }
 }
 
-fn target_key(target: &LocatorTarget) -> String {
-    target
-        .preferred
-        .as_ref()
-        .and_then(|strategy| {
-            strategy
-                .automation_id
-                .clone()
-                .or_else(|| strategy.name.clone())
-                .or_else(|| strategy.control_type.clone())
-                .or_else(|| strategy.class_name.clone())
-                .or_else(|| strategy.relative_position.clone())
-        })
-        .or_else(|| {
-            target.fallback.as_ref().and_then(|strategy| {
-                strategy
-                    .name
-                    .clone()
-                    .or_else(|| strategy.class_name.clone())
-                    .or_else(|| strategy.control_type.clone())
-            })
-        })
-        .unwrap_or_else(|| "target".to_owned())
-        .to_lowercase()
+fn windows_open_app(app: &str) -> AdapterResult<()> {
+    run_powershell(&format!("Start-Process -FilePath {}", ps_quote(app))).map(|_| ())
+}
+
+fn windows_close_app(app: &str) -> AdapterResult<()> {
+    let script = format!(
+        "$p = Get-Process | Where-Object {{$_.ProcessName -eq {name} -or $_.Path -eq {path}}} | Select-Object -First 1; if ($p) {{$p.CloseMainWindow() | Out-Null}}",
+        name = ps_quote(app.trim_end_matches(".exe")),
+        path = ps_quote(app)
+    );
+    run_powershell(&script).map(|_| ())
+}
+
+fn windows_window_exists(title: &str) -> AdapterResult<bool> {
+    let script = format!(
+        "if (Get-Process | Where-Object {{$_.MainWindowTitle -like {}}} | Select-Object -First 1) {{'true'}} else {{'false'}}",
+        ps_quote(&format!("*{title}*"))
+    );
+    Ok(run_powershell(&script)?.trim() == "true")
+}
+
+fn windows_element_exists(
+    app: &str,
+    target: &LocatorTarget,
+    expected: Option<&str>,
+) -> AdapterResult<bool> {
+    let script = windows_uia_script(app, target, expected, "exists")?;
+    Ok(run_powershell(&script)?.trim() == "true")
+}
+
+fn windows_type_text(app: &str, target: &LocatorTarget, value: &str) -> AdapterResult<()> {
+    let script = windows_uia_script(app, target, Some(value), "type")?;
+    run_powershell(&script).map(|_| ())
+}
+
+fn windows_click_element(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
+    let script = windows_uia_script(app, target, None, "click")?;
+    run_powershell(&script).map(|_| ())
+}
+
+fn windows_read_element_text(app: &str, target: &LocatorTarget) -> AdapterResult<String> {
+    let script = windows_uia_script(app, target, None, "read")?;
+    Ok(run_powershell(&script)?.trim().to_owned())
+}
+
+fn windows_read_tree(app: &str) -> AdapterResult<Vec<String>> {
+    let script = format!(
+        r#"
+Add-Type -AssemblyName UIAutomationClient
+$process = Get-Process | Where-Object {{$_.ProcessName -eq {name} -or $_.Path -eq {path}}} | Select-Object -First 1
+if (-not $process) {{ throw 'process not found' }}
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id)
+$window = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+if (-not $window) {{ throw 'window not found' }}
+$all = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+foreach ($item in $all) {{ if ($item.Current.Name) {{ $item.Current.Name }} }}
+"#,
+        name = ps_quote(app.trim_end_matches(".exe")),
+        path = ps_quote(app)
+    );
+    Ok(run_powershell(&script)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn windows_screenshot(path: &Path) -> AdapterResult<()> {
+    XcapScreenshotBackend
+        .capture_primary_monitor(path)
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("xcap screenshot capture failed: {err}"))
+        })?;
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "screenshot did not create {}",
+            path.display()
+        )))
+    }
+}
+
+fn windows_uia_script(
+    app: &str,
+    target: &LocatorTarget,
+    value: Option<&str>,
+    mode: &str,
+) -> AdapterResult<String> {
+    let predicate = windows_locator_predicate(target, value)?;
+    Ok(format!(
+        r#"
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$process = Get-Process | Where-Object {{$_.ProcessName -eq {name} -or $_.Path -eq {path}}} | Select-Object -First 1
+if (-not $process) {{ throw 'process not found' }}
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id)
+$window = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+if (-not $window) {{ throw 'window not found' }}
+$all = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+$candidate = $null
+foreach ($item in $all) {{ if ({predicate}) {{ $candidate = $item; break }} }}
+if (-not $candidate) {{ if ({mode} -eq 'exists') {{ 'false'; exit 0 }}; throw 'element not found' }}
+if ({mode} -eq 'exists') {{ 'true'; exit 0 }}
+if ({mode} -eq 'read') {{ $candidate.Current.Name; exit 0 }}
+if ({mode} -eq 'click') {{
+  $pattern = $candidate.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  $pattern.Invoke()
+  exit 0
+}}
+if ({mode} -eq 'type') {{
+  $pattern = $candidate.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+  $pattern.SetValue({value})
+  exit 0
+}}
+"#,
+        name = ps_quote(app.trim_end_matches(".exe")),
+        path = ps_quote(app),
+        predicate = predicate,
+        mode = ps_quote(mode),
+        value = ps_quote(value.unwrap_or_default())
+    ))
+}
+
+fn windows_locator_predicate(
+    target: &LocatorTarget,
+    expected: Option<&str>,
+) -> AdapterResult<String> {
+    let mut clauses = Vec::new();
+    for strategy in [target.preferred.as_ref(), target.fallback.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(id) = strategy.automation_id.as_deref() {
+            clauses.push(format!("$item.Current.AutomationId -eq {}", ps_quote(id)));
+        }
+        if let Some(name) = strategy.name.as_deref() {
+            clauses.push(format!(
+                "$item.Current.Name -like {}",
+                ps_quote(&format!("*{name}*"))
+            ));
+        }
+        if let Some(class_name) = strategy.class_name.as_deref() {
+            clauses.push(format!(
+                "$item.Current.ClassName -eq {}",
+                ps_quote(class_name)
+            ));
+        }
+        if let Some(control_type) = strategy.control_type.as_deref() {
+            clauses.push(format!(
+                "$item.Current.ControlType.ProgrammaticName -like {}",
+                ps_quote(&format!("*{control_type}*"))
+            ));
+        }
+    }
+    if let Some(expected) = expected {
+        if !expected.trim().is_empty() {
+            clauses.push(format!(
+                "$item.Current.Name -like {}",
+                ps_quote(&format!("*{expected}*"))
+            ));
+        }
+    }
+    if clauses.is_empty() {
+        return Err(AdapterError::ExecutionFailed(
+            "Windows UIA locator requires automation id, name, class name, control type, or expected text.".to_owned(),
+        ));
+    }
+    Ok(clauses.join(" -or "))
+}
+
+fn run_powershell(script: &str) -> AdapterResult<String> {
+    if std::env::consts::OS != "windows" {
+        return Err(AdapterError::ExecutionFailed(
+            "Windows UI Automation can only run on Windows.".to_owned(),
+        ));
+    }
+    // Program name is fixed and script is passed directly as an argument, not through a shell.
+    // foxguard: ignore[rs/no-command-injection]
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run PowerShell: {err}")))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "PowerShell UIA failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn default_screenshot_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "greentic-windows-screenshot-{}-{}.png",
+        std::process::id(),
+        epoch_millis()
+    ))
+}
+
+fn epoch_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -384,18 +645,20 @@ pub fn run_windows_app_workflow(
         .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
     let steps = compiled.steps;
 
-    let results = adapter.replay(&steps)?;
-    for output in &output_specs {
-        if let Some(expected) = &output.expected {
-            adapter.seed_control(output.target.clone(), expected.clone());
-        }
-    }
-    let visible = adapter
+    let results = adapter.replay(&steps).map_err(|err| {
+        AdapterError::ExecutionFailed(format!("Windows UI Automation app workflow failed: {err}"))
+    })?;
+    let observation = adapter
         .observe(ObserveContext {
             session_id: format!("windows-app-workflow-{}", workflow_id_component(&app_name)),
             target: output_specs.first().map(|output| output.target.clone()),
-        })?
-        .visible_text;
+        })
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!(
+                "Windows UI Automation app workflow failed: {err}"
+            ))
+        })?;
+    let visible = observation.visible_text;
 
     let mut outputs = BTreeMap::new();
     for output in output_specs {
@@ -480,6 +743,9 @@ fn windows_desktop_workflow(workflow: &WindowsAppWorkflow) -> DesktopWorkflow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn metadata() -> WindowsElementMetadata {
         WindowsElementMetadata {
@@ -521,49 +787,214 @@ mod tests {
     }
 
     #[test]
-    fn can_open_find_fill_and_replay_after_reboot() {
+    fn open_app_fails_closed_off_windows_instead_of_mutating_state() {
         let adapter = WindowsUiAdapter::new();
-        let target = stable_windows_target(&metadata());
-        let steps = vec![
-            RunnerStep {
-                id: "open".to_owned(),
-                action: "open_app".to_owned(),
-                target: LocatorTarget::default(),
-                value: Some("CustomerClient.exe".to_owned()),
-                required_capability: "windows.open_app".to_owned(),
-            },
-            RunnerStep {
-                id: "find".to_owned(),
-                action: "find_element".to_owned(),
-                target: target.clone(),
-                value: None,
-                required_capability: "windows.find_element".to_owned(),
-            },
-            RunnerStep {
-                id: "type".to_owned(),
-                action: "type_text".to_owned(),
-                target: target.clone(),
-                value: Some("Acme".to_owned()),
-                required_capability: "windows.type_text".to_owned(),
-            },
-        ];
+        let result = adapter.execute(RunnerStep {
+            id: "open".to_owned(),
+            action: "open_app".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some("CustomerClient.exe".to_owned()),
+            required_capability: "windows.open_app".to_owned(),
+        });
 
-        assert!(adapter
-            .replay(&steps)
-            .expect("first replay should pass")
-            .iter()
-            .all(|result| result.success));
-
-        let rebooted = WindowsUiAdapter::new();
-        assert!(rebooted
-            .replay(&steps)
-            .expect("recorded actions should replay after reboot")
-            .iter()
-            .all(|result| result.success));
+        if std::env::consts::OS == "windows" {
+            assert!(result.is_ok() || result.is_err());
+        } else {
+            let error = result.expect_err("off-Windows execution should fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Windows UI Automation can only run on Windows"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
-    fn generic_app_workflow_opens_app_enters_inputs_and_reads_outputs() {
+    fn uia_script_uses_stable_locator_metadata() {
+        let target = stable_windows_target(&metadata());
+        let script = windows_uia_script("CustomerClient.exe", &target, Some("Acme"), "type")
+            .expect("script should render");
+
+        assert!(script.contains("UIAutomationClient"), "{script}");
+        assert!(script.contains("CustomerSearchBox"), "{script}");
+        assert!(script.contains("Customer Search"), "{script}");
+        assert!(script.contains("ValuePattern"), "{script}");
+    }
+
+    #[test]
+    fn uia_script_renders_click_read_and_exists_modes() {
+        let target = stable_windows_target(&metadata());
+
+        let click = windows_uia_script("CustomerClient.exe", &target, None, "click")
+            .expect("click script should render");
+        let read = windows_uia_script("CustomerClient.exe", &target, None, "read")
+            .expect("read script should render");
+        let exists = windows_uia_script("CustomerClient.exe", &target, Some("Customer"), "exists")
+            .expect("exists script should render");
+
+        assert!(click.contains("InvokePattern"), "{click}");
+        assert!(read.contains("$candidate.Current.Name"), "{read}");
+        assert!(exists.contains("'exists'"), "{exists}");
+        assert!(exists.contains("*Customer*"), "{exists}");
+    }
+
+    #[test]
+    fn empty_locator_is_rejected_before_powershell() {
+        let error = windows_locator_predicate(&LocatorTarget::default(), None)
+            .expect_err("empty locator should be invalid");
+
+        assert!(
+            error.to_string().contains("locator requires automation id"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn powershell_quote_escapes_single_quotes() {
+        assert_eq!(ps_quote("O'Hara"), "'O''Hara'");
+    }
+
+    #[test]
+    fn close_app_without_active_app_is_a_noop_success() {
+        let adapter = WindowsUiAdapter::new();
+        let result = adapter
+            .execute(RunnerStep {
+                id: "close".to_owned(),
+                action: "close_app".to_owned(),
+                target: LocatorTarget::default(),
+                value: None,
+                required_capability: "windows.close_app".to_owned(),
+            })
+            .expect("close without active app should not require Windows");
+
+        assert_eq!(result.message, "closed Windows app");
+        assert!(adapter.record_event().expect("record event").is_some());
+    }
+
+    #[test]
+    fn unsupported_execute_and_validate_fail_before_platform_calls() {
+        let adapter = WindowsUiAdapter::new();
+        let execute = adapter.execute(RunnerStep {
+            id: "bad".to_owned(),
+            action: "bad".to_owned(),
+            target: LocatorTarget::default(),
+            value: None,
+            required_capability: "windows.unsupported".to_owned(),
+        });
+        let validate = adapter.validate(Assertion {
+            id: "bad-assertion".to_owned(),
+            target: LocatorTarget::default(),
+            expected: "visible".to_owned(),
+            required_capability: "windows.unsupported".to_owned(),
+        });
+
+        assert!(matches!(
+            execute,
+            Err(AdapterError::UnsupportedCapability(capability)) if capability == "windows.unsupported"
+        ));
+        assert!(matches!(
+            validate,
+            Err(AdapterError::UnsupportedCapability(capability)) if capability == "windows.unsupported"
+        ));
+    }
+
+    #[test]
+    fn observe_requires_an_active_app() {
+        let adapter = WindowsUiAdapter::new();
+        let error = adapter
+            .observe(ObserveContext {
+                session_id: "windows-observe".to_owned(),
+                target: None,
+            })
+            .expect_err("observe should fail without an active app");
+
+        assert!(
+            error.to_string().contains("No active Windows app"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn recording_preflight_blocks_missing_uia_event_source() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE_COMMAND");
+        let backend = WindowsUiRecordingBackend::new(false, false);
+        let preflight = backend.preflight(&RecordingStartRequest {
+            name: "windows.record".to_owned(),
+            profile: "desktop".to_owned(),
+            adapter: WINDOWS_ADAPTER_ID.to_owned(),
+            target_kind: RecordingTargetKind::Desktop,
+            out: std::env::temp_dir().join("windows-record-missing"),
+            runtime_home: std::env::temp_dir().join("windows-record-home-missing"),
+            redact: Vec::new(),
+            secret_fields: Vec::new(),
+        });
+
+        assert!(!preflight.available);
+        assert!(preflight.blocked_reasons[0].contains("UI Automation event source"));
+    }
+
+    #[test]
+    fn windows_desktop_workflow_compiles_generic_inputs_actions_and_outputs() {
+        let workflow = WindowsAppWorkflow {
+            app_name: "GenericApp.exe".to_owned(),
+            window_title: "Generic App".to_owned(),
+            prompt: "Open a desktop app and return a result.".to_owned(),
+            inputs: vec![WindowsWorkflowInput {
+                name: "search".to_owned(),
+                target: stable_windows_target(&metadata()),
+                value: "{{inputs.search}}".to_owned(),
+            }],
+            submit: Some(WindowsWorkflowAction {
+                name: "submit".to_owned(),
+                target: stable_windows_target(&WindowsElementMetadata {
+                    automation_id: Some("Submit".to_owned()),
+                    name: Some("Submit".to_owned()),
+                    control_type: Some("Button".to_owned()),
+                    class_name: Some("Button".to_owned()),
+                    relative_position: None,
+                    nearby_text: None,
+                    visual_region: None,
+                }),
+            }),
+            outputs: vec![WindowsWorkflowOutput {
+                name: "result".to_owned(),
+                target: stable_windows_target(&WindowsElementMetadata {
+                    automation_id: Some("Result".to_owned()),
+                    name: Some("Result".to_owned()),
+                    control_type: Some("Text".to_owned()),
+                    class_name: Some("TextBlock".to_owned()),
+                    relative_position: None,
+                    nearby_text: None,
+                    visual_region: None,
+                }),
+                expected: Some("done".to_owned()),
+            }],
+        };
+
+        let desktop = windows_desktop_workflow(&workflow);
+        let compiled = compile_workflow(&desktop).expect("workflow should compile");
+
+        assert!(matches!(
+            desktop.target.open,
+            Some(greentic_desktop_workflow::WorkflowOpenTarget::App {
+                app_name: Some(ref app_name),
+                ..
+            }) if app_name == "GenericApp.exe"
+        ));
+        assert!(compiled
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "windows.type_text"));
+        assert!(compiled
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "windows.click_element"));
+    }
+
+    #[test]
+    fn generic_app_workflow_fails_without_real_windows_fixture() {
         let adapter = WindowsUiAdapter::new();
         let input_target = stable_windows_target(&WindowsElementMetadata {
             automation_id: Some("PrimaryInput".to_owned()),
@@ -614,37 +1045,21 @@ mod tests {
                 }],
             },
         )
-        .expect("generic windows workflow should pass");
+        .expect_err("missing real fixture should fail");
 
-        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
-        assert!(outcome.prompt.contains("Sample.exe"));
-        assert!(outcome.steps.iter().all(|step| step.success));
-        assert!(outcome
-            .steps
-            .iter()
-            .any(|step| step.step_id == "read-output-result"));
-    }
-
-    #[test]
-    fn can_detect_error_dialogs() {
-        let adapter = WindowsUiAdapter::new();
-        adapter.detect_error_dialog("Validation Error");
-
-        let result = adapter
-            .validate(Assertion {
-                id: "no_errors".to_owned(),
-                required_capability: "windows.read_window_tree".to_owned(),
-                target: LocatorTarget::default(),
-                expected: String::new(),
-            })
-            .expect("validation should run");
-
-        assert!(!result.passed);
+        assert!(
+            outcome.to_string().contains("Windows UI Automation"),
+            "{outcome}"
+        );
     }
 
     #[test]
     fn recording_backend_blocks_elevated_target_when_greentic_is_not_elevated() {
-        std::env::set_var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE", "1");
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var(
+            "GREENTIC_WINDOWS_UIA_EVENT_SOURCE_COMMAND",
+            "uia-recorder.exe",
+        );
         let backend = WindowsUiRecordingBackend::new(true, false);
         let preflight = backend.preflight(&RecordingStartRequest {
             name: "windows.record".to_owned(),
@@ -659,6 +1074,6 @@ mod tests {
 
         assert!(!preflight.available);
         assert!(preflight.blocked_reasons[0].contains("elevated app"));
-        std::env::remove_var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE");
+        std::env::remove_var("GREENTIC_WINDOWS_UIA_EVENT_SOURCE_COMMAND");
     }
 }

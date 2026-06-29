@@ -1,3 +1,5 @@
+use ed25519_dalek::{Signature, Signer, SigningKey as Ed25519SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -100,6 +102,11 @@ impl RunnerManifest {
                 "at least one required adapter must be declared".to_owned(),
             ));
         }
+        if !is_sha256_checksum(&self.package_checksum) {
+            return Err(RegistryError::InvalidManifest(
+                "package checksum must be sha256:<64 lowercase hex chars>".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -160,12 +167,7 @@ impl SignedRunnerManifest {
         if self.key_id != key.key_id {
             return Err(RegistryError::InvalidSignature);
         }
-        let expected = signature_for(&self.manifest, key);
-        if self.signature == expected {
-            Ok(())
-        } else {
-            Err(RegistryError::TamperedPackage)
-        }
+        verify_signature(&self.manifest, key, &self.signature)
     }
 
     pub fn render_reviewable(&self) -> String {
@@ -312,12 +314,50 @@ pub fn sign_manifest(
 }
 
 fn signature_for(manifest: &RunnerManifest, key: &SigningKey) -> String {
-    deterministic_hash(&format!(
-        "{}\nkey:{}\nmaterial:{}",
-        manifest.render_reviewable(),
-        key.key_id,
-        key.key_material
-    ))
+    let signing_key = ed25519_signing_key(key);
+    let signature = signing_key.sign(manifest.render_reviewable().as_bytes());
+    format!("ed25519:{}", bytes_to_hex(&signature.to_bytes()))
+}
+
+fn verify_signature(
+    manifest: &RunnerManifest,
+    key: &SigningKey,
+    signature: &str,
+) -> Result<(), RegistryError> {
+    let Some(hex) = signature.strip_prefix("ed25519:") else {
+        return Err(RegistryError::InvalidSignature);
+    };
+    let bytes = hex_to_bytes(hex).map_err(|_| RegistryError::InvalidSignature)?;
+    let signature_bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| RegistryError::InvalidSignature)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let signing_key = ed25519_signing_key(key);
+    let verifying_key = VerifyingKey::from(&signing_key);
+    verifying_key
+        .verify(manifest.render_reviewable().as_bytes(), &signature)
+        .map_err(|_| RegistryError::TamperedPackage)
+}
+
+fn ed25519_signing_key(key: &SigningKey) -> Ed25519SigningKey {
+    let seed = Sha256::digest(format!("{}:{}", key.key_id, key.key_material).as_bytes());
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&seed[..32]);
+    Ed25519SigningKey::from_bytes(&bytes)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, ()> {
+    if !hex.len().is_multiple_of(2) || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).map_err(|_| ()))
+        .collect()
 }
 
 fn registry_key(manifest: &RunnerManifest) -> String {
@@ -335,13 +375,23 @@ fn is_semver(version: &str) -> bool {
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-fn deterministic_hash(value: &str) -> String {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    format!("{hash:016x}")
+fn is_sha256_checksum(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+}
+
+pub fn sha256_checksum(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    bytes_to_hex(&digest)
 }
 
 #[cfg(test)]
@@ -365,7 +415,7 @@ mod tests {
             },
             required_adapters: vec!["greentic.desktop.playwright".to_owned()],
             compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-            package_checksum: "sha256:abc123".to_owned(),
+            package_checksum: sha256_checksum(b"runner package bytes"),
         }
     }
 
@@ -374,15 +424,36 @@ mod tests {
         let signed = sign_manifest(manifest(), &key()).expect("signed manifest");
 
         assert_eq!(signed.manifest.package_ref(), "crm.create_customer@1.2.0");
+        assert!(
+            signed.signature.starts_with("ed25519:"),
+            "{}",
+            signed.signature
+        );
         assert!(signed.verify(&key()).is_ok());
     }
 
     #[test]
     fn tampered_runner_packages_are_refused() {
         let mut signed = sign_manifest(manifest(), &key()).expect("signed manifest");
-        signed.manifest.package_checksum = "sha256:tampered".to_owned();
+        signed.manifest.package_checksum = sha256_checksum(b"tampered runner package bytes");
 
         assert_eq!(signed.verify(&key()), Err(RegistryError::TamperedPackage));
+    }
+
+    #[test]
+    fn fake_sha_signatures_are_rejected() {
+        let mut signed = sign_manifest(manifest(), &key()).expect("signed manifest");
+        signed.signature = "sig-sha256:abc123".to_owned();
+
+        assert_eq!(signed.verify(&key()), Err(RegistryError::InvalidSignature));
+    }
+
+    #[test]
+    fn sha256_checksum_uses_standard_digest() {
+        assert_eq!(
+            sha256_checksum(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

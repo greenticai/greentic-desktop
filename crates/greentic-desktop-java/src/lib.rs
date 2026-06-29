@@ -13,6 +13,7 @@ use greentic_desktop_workflow::{
     WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 pub const JAVA_ADAPTER_ID: &str = "greentic.desktop.java-accessibility";
@@ -71,6 +72,56 @@ pub fn stable_java_target(metadata: &JavaComponentMetadata) -> LocatorTarget {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaTargetEvidence {
+    pub app_name: Option<String>,
+    pub process_name: Option<String>,
+    pub executable_path: Option<String>,
+    pub accessibility_class: Option<String>,
+    pub explicit_profile: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaTargetRoute {
+    JavaSpecific,
+    NativeOsAccessibility,
+    AskUser,
+}
+
+pub fn classify_java_target(evidence: &JavaTargetEvidence) -> JavaTargetRoute {
+    if evidence.explicit_profile {
+        return JavaTargetRoute::JavaSpecific;
+    }
+    let joined = [
+        evidence.app_name.as_deref(),
+        evidence.process_name.as_deref(),
+        evidence.executable_path.as_deref(),
+        evidence.accessibility_class.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase();
+
+    if joined.contains("word")
+        || joined.contains("excel")
+        || joined.contains("powerpoint")
+        || joined.contains("winword")
+        || joined.contains("microsoft office")
+    {
+        JavaTargetRoute::NativeOsAccessibility
+    } else if joined.contains("java")
+        || joined.contains("javax.swing")
+        || joined.contains("javafx")
+        || joined.contains(".jar")
+    {
+        JavaTargetRoute::JavaSpecific
+    } else {
+        JavaTargetRoute::AskUser
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct JavaAccessBridgeRecordingBackend {
     access_bridge_available: bool,
@@ -103,31 +154,39 @@ impl RecordingBackend for JavaAccessBridgeRecordingBackend {
         }
     }
 
-    fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
-        let mut event = RecordingEventEnvelope::new(
-            sink.session_id(),
-            JAVA_RECORDER_BACKEND_ID,
-            RecordingTargetKind::Java,
-            1,
-            "find_window",
+    fn start(&self, request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
+        if let Ok(command) = std::env::var("GREENTIC_JAVA_EVENT_SOURCE_COMMAND") {
+            // Local operator supplied recorder path is invoked directly without a shell.
+            // foxguard: ignore[rs/no-command-injection]
+            let spawn = Command::new(command)
+                .arg(sink.session_id())
+                .arg(&request.out)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            if spawn.is_ok() {
+                let _ = sink.update_heartbeat();
+                return RecordingHandle {
+                    backend_id: JAVA_RECORDER_BACKEND_ID.to_owned(),
+                    capture_state: RecordingCaptureState::Recording,
+                };
+            }
+        }
+        let _ = sink.append_backend_warning(
+            "Java recording requires a real Java Access Bridge event source command; synthetic events are disabled.",
         );
-        event.target_json =
-            r#"{"api":"Java Access Bridge","window":"focused","component_tree":true}"#.to_owned();
-        event.value = Some("focused Java window".to_owned());
-        event.ui_tree_ref = Some("evidence://ui-tree/java/focused.json".to_owned());
-        let _ = sink.append_event(event);
-        let _ = sink.update_heartbeat();
 
         RecordingHandle {
             backend_id: JAVA_RECORDER_BACKEND_ID.to_owned(),
-            capture_state: RecordingCaptureState::Recording,
+            capture_state: RecordingCaptureState::Blocked,
         }
     }
 }
 
 fn java_event_source_configured() -> bool {
-    std::env::var("GREENTIC_JAVA_EVENT_SOURCE")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    std::env::var("GREENTIC_JAVA_EVENT_SOURCE_COMMAND")
+        .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
 }
 
@@ -173,8 +232,6 @@ pub struct JavaDesktopAdapter {
 #[derive(Debug, Clone, Default)]
 struct JavaState {
     access_bridge_enabled: bool,
-    window_title: Option<String>,
-    components: BTreeMap<String, String>,
     recorded: Vec<RecordedEvent>,
 }
 
@@ -214,22 +271,44 @@ impl JavaDesktopAdapter {
             .map(|step| self.execute(step))
             .collect()
     }
+
+    fn require_access_bridge(&self) -> AdapterResult<()> {
+        if self
+            .state
+            .lock()
+            .expect("java adapter mutex poisoned")
+            .access_bridge_enabled
+        {
+            Ok(())
+        } else {
+            Err(AdapterError::ExecutionFailed(
+                "Java Access Bridge is disabled; Java automation cannot execute.".to_owned(),
+            ))
+        }
+    }
 }
 
 impl DesktopAdapter for JavaDesktopAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        java_capabilities()
+        if self
+            .state
+            .lock()
+            .expect("java adapter mutex poisoned")
+            .access_bridge_enabled
+        {
+            java_capabilities()
+        } else {
+            AdapterCapabilities::new(JAVA_ADAPTER_ID, env!("CARGO_PKG_VERSION"), [] as [&str; 0])
+        }
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        let state = self.state.lock().expect("java adapter mutex poisoned");
+        self.require_access_bridge()?;
+        let visible_text = java_sidecar("observe", None)?;
         Ok(Observation {
             adapter_id: JAVA_ADAPTER_ID.to_owned(),
-            summary: format!(
-                "java session {} access_bridge={}",
-                ctx.session_id, state.access_bridge_enabled
-            ),
-            visible_text: state.components.values().cloned().collect(),
+            summary: format!("java session {} access_bridge={}", ctx.session_id, true),
+            visible_text: visible_text.lines().map(str::to_owned).collect(),
         })
     }
 
@@ -240,40 +319,23 @@ impl DesktopAdapter for JavaDesktopAdapter {
             ));
         }
 
-        let mut state = self.state.lock().expect("java adapter mutex poisoned");
-        match step.required_capability.as_str() {
-            "java.find_window" => state.window_title = step.value.clone(),
-            "java.find_component" | "java.assert_visible" => {
-                state
-                    .components
-                    .entry(target_key(&step.target))
-                    .or_default();
-            }
-            "java.type_text" => {
-                state.components.insert(
-                    target_key(&step.target),
-                    step.value.clone().unwrap_or_default(),
-                );
-            }
-            "java.click" | "java.click_component" | "java.select" => {}
-            "java.read_text" | "java.capture_tree" | "java.assert_text" => {}
-            _ => {}
-        }
+        self.require_access_bridge()?;
+        let message = java_sidecar("execute", Some(&java_step_json(&step)))?;
 
-        state.recorded.push(RecordedEvent {
-            action: step.action.clone(),
-            target: step.target,
-            value: step.value,
-        });
+        self.state
+            .lock()
+            .expect("java adapter mutex poisoned")
+            .recorded
+            .push(RecordedEvent {
+                action: step.action.clone(),
+                target: step.target,
+                value: step.value,
+            });
 
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: if state.access_bridge_enabled {
-                "java accessibility step accepted".to_owned()
-            } else {
-                "java fallback step accepted".to_owned()
-            },
+            message,
         })
     }
 
@@ -284,21 +346,12 @@ impl DesktopAdapter for JavaDesktopAdapter {
             ));
         }
 
-        let state = self.state.lock().expect("java adapter mutex poisoned");
+        self.require_access_bridge()?;
+        let observed = java_sidecar("observe", None)?;
         let passed = match assertion.required_capability.as_str() {
-            "java.assert_visible" | "java.assert_text" => {
-                state
-                    .components
-                    .values()
-                    .any(|value| value == &assertion.expected)
-                    || state
-                        .components
-                        .contains_key(&target_key(&assertion.target))
+            "java.assert_visible" | "java.assert_text" | "java.find_window" => {
+                observed.contains(&assertion.expected)
             }
-            "java.find_window" => state
-                .window_title
-                .as_ref()
-                .is_some_and(|title| title.contains(&assertion.expected)),
             _ => true,
         };
 
@@ -344,6 +397,43 @@ fn target_key(target: &LocatorTarget) -> String {
         })
         .unwrap_or_else(|| "target".to_owned())
         .to_lowercase()
+}
+
+fn java_sidecar(action: &str, payload: Option<&str>) -> AdapterResult<String> {
+    let command = std::env::var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND").map_err(|_| {
+        AdapterError::ExecutionFailed(
+            "Java Access Bridge sidecar command is not configured in GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND.".to_owned(),
+        )
+    })?;
+    // Local operator supplied Java Access Bridge sidecar is invoked directly without a shell.
+    // foxguard: ignore[rs/no-command-injection]
+    let mut command = Command::new(command);
+    command.arg(action);
+    if let Some(payload) = payload {
+        command.arg(payload);
+    }
+    let output = command.stdin(Stdio::null()).output().map_err(|err| {
+        AdapterError::ExecutionFailed(format!("failed to run Java Access Bridge sidecar: {err}"))
+    })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(AdapterError::ExecutionFailed(format!(
+            "Java Access Bridge sidecar failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn java_step_json(step: &RunnerStep) -> String {
+    format!(
+        r#"{{"id":"{}","action":"{}","required_capability":"{}","target":"{}","value":{}}}"#,
+        escape_json(&step.id),
+        escape_json(&step.action),
+        escape_json(&step.required_capability),
+        escape_json(&target_key(&step.target)),
+        json_option(step.value.as_deref())
+    )
 }
 
 fn redact_java_value(metadata: &JavaComponentMetadata, value: &str) -> String {
@@ -433,16 +523,6 @@ pub fn run_java_app_workflow(
     let steps = compiled.steps;
 
     let results = adapter.replay(&steps)?;
-    for output in &output_specs {
-        if let Some(expected) = &output.expected {
-            adapter
-                .state
-                .lock()
-                .expect("java adapter mutex poisoned")
-                .components
-                .insert(target_key(&output.target), expected.clone());
-        }
-    }
     let visible = adapter
         .observe(ObserveContext {
             session_id: format!("java-app-workflow-{}", workflow_id_component(&window_title)),
@@ -572,45 +652,76 @@ mod tests {
     }
 
     #[test]
-    fn records_and_replays_form_actions_with_access_bridge() {
-        let adapter = JavaDesktopAdapter::new(true);
-        let target = stable_java_target(&metadata());
-        let steps = vec![
-            RunnerStep {
-                id: "window".to_owned(),
-                action: "find_window".to_owned(),
-                target: LocatorTarget::default(),
-                value: Some("Customer Console".to_owned()),
-                required_capability: "java.find_window".to_owned(),
-            },
-            RunnerStep {
-                id: "type".to_owned(),
-                action: "type_text".to_owned(),
-                target: target.clone(),
-                value: Some("Acme".to_owned()),
-                required_capability: "java.type_text".to_owned(),
-            },
-        ];
+    fn routing_keeps_native_office_apps_out_of_java() {
+        let route = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Microsoft Word".to_owned()),
+            process_name: Some("WINWORD.EXE".to_owned()),
+            executable_path: None,
+            accessibility_class: None,
+            explicit_profile: false,
+        });
 
-        assert!(adapter
-            .replay(&steps)
-            .expect("java replay should pass")
-            .iter()
-            .all(|result| result.success));
-
-        let result = adapter
-            .validate(Assertion {
-                id: "visible".to_owned(),
-                required_capability: "java.assert_visible".to_owned(),
-                target,
-                expected: "Acme".to_owned(),
-            })
-            .expect("assertion should run");
-        assert!(result.passed);
+        assert_eq!(route, JavaTargetRoute::NativeOsAccessibility);
     }
 
     #[test]
-    fn generic_app_workflow_enters_inputs_and_reads_outputs() {
+    fn routing_uses_java_only_for_explicit_or_java_metadata() {
+        let explicit = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Billing".to_owned()),
+            process_name: None,
+            executable_path: None,
+            accessibility_class: None,
+            explicit_profile: true,
+        });
+        let detected = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Billing".to_owned()),
+            process_name: Some("java".to_owned()),
+            executable_path: Some("/apps/billing.jar".to_owned()),
+            accessibility_class: Some("javax.swing.JPanel".to_owned()),
+            explicit_profile: false,
+        });
+        let ambiguous = classify_java_target(&JavaTargetEvidence {
+            app_name: Some("Billing".to_owned()),
+            process_name: None,
+            executable_path: None,
+            accessibility_class: None,
+            explicit_profile: false,
+        });
+
+        assert_eq!(explicit, JavaTargetRoute::JavaSpecific);
+        assert_eq!(detected, JavaTargetRoute::JavaSpecific);
+        assert_eq!(ambiguous, JavaTargetRoute::AskUser);
+    }
+
+    #[test]
+    fn access_bridge_replay_requires_real_sidecar_command() {
+        let adapter = JavaDesktopAdapter::new(true);
+        let target = stable_java_target(&metadata());
+        let step = RunnerStep {
+            id: "type".to_owned(),
+            action: "type_text".to_owned(),
+            target: target.clone(),
+            value: Some("Acme".to_owned()),
+            required_capability: "java.type_text".to_owned(),
+        };
+        let payload = java_step_json(&step);
+
+        assert!(payload.contains("java.type_text"), "{payload}");
+        assert!(payload.contains("customername"), "{payload}");
+
+        let error = adapter
+            .execute(step)
+            .expect_err("missing sidecar should fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generic_app_workflow_fails_without_real_java_fixture() {
         let adapter = JavaDesktopAdapter::new(true);
         let input_target = stable_java_target(&JavaComponentMetadata {
             window_title: Some("Sample".to_owned()),
@@ -657,15 +768,14 @@ mod tests {
                 }],
             },
         )
-        .expect("generic java workflow should pass");
+        .expect_err("missing real Java sidecar/fixture should fail");
 
-        assert_eq!(outcome.outputs.get("result"), Some(&"accepted".to_owned()));
-        assert!(outcome.prompt.contains("Sample"));
-        assert!(outcome.steps.iter().all(|step| step.success));
-        assert!(outcome
-            .steps
-            .iter()
-            .any(|step| step.step_id == "read-output-result"));
+        assert!(
+            outcome
+                .to_string()
+                .contains("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND"),
+            "{outcome}"
+        );
     }
 
     #[test]

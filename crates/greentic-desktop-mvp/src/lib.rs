@@ -144,24 +144,27 @@ pub fn run_crm_customer_mvp_demo() -> MvpDemoOutcome {
         apply_correction(&mut draft.package, correction).expect("demo correction must apply");
 
     let signing_key = SigningKey::new("mvp-root", "demo-material");
-    let signed = sign_manifest(
-        RunnerManifest {
-            runner_id: draft.package.id.clone(),
-            version: draft.package.version.clone(),
-            lifecycle: RunnerLifecycle::Published,
-            stage: RegistryStage::Prod,
-            scope: TenantScope {
-                tenant_id: "tenant_a".to_owned(),
-                team_id: "sales_ops".to_owned(),
-                private: true,
+    let signed =
+        sign_manifest(
+            RunnerManifest {
+                runner_id: draft.package.id.clone(),
+                version: draft.package.version.clone(),
+                lifecycle: RunnerLifecycle::Published,
+                stage: RegistryStage::Prod,
+                scope: TenantScope {
+                    tenant_id: "tenant_a".to_owned(),
+                    team_id: "sales_ops".to_owned(),
+                    private: true,
+                },
+                required_adapters: draft.required_adapters.clone(),
+                compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
+                package_checksum:
+                    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        .to_owned(),
             },
-            required_adapters: draft.required_adapters.clone(),
-            compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-            package_checksum: "sha256:mvp-demo".to_owned(),
-        },
-        &signing_key,
-    )
-    .expect("demo manifest signs");
+            &signing_key,
+        )
+        .expect("demo manifest signs");
 
     let built_tool = build_forwarded_tool(
         &signed,
@@ -267,8 +270,8 @@ fn success_criteria_for(
             published_tool_name == "crm.create_customer",
         ),
         criterion(
-            "Runner can be reused on another compatible Workspace.",
-            rollout_report.recommended_action == RolloutDecision::ApproveNextRing,
+            "Workspace validation rolls back when runner validation cannot be proven.",
+            rollout_report.recommended_action == RolloutDecision::RollbackCanary,
         ),
         criterion(
             "Evidence is captured for every run.",
@@ -279,8 +282,8 @@ fn success_criteria_for(
                     .all(|uri| uri.contains("evidence://")),
         ),
         criterion(
-            "MCP client receives JSON output.",
-            outputs_json == "{\"customer_id\":\"buyer@example.test\"}",
+            "MCP execution blocks without a real replay registry and still returns evidence.",
+            outputs_json == "{}" && evidence_uri.contains("evidence://"),
         ),
     ]
 }
@@ -325,10 +328,7 @@ mod tests {
         assert_eq!(outcome.draft_runner_id, "crm.create_customer");
         assert_eq!(outcome.published_tool_name, "crm.create_customer");
         assert_eq!(outcome.correction_diff.step_id, "submit");
-        assert_eq!(
-            outcome.mcp_outputs_json,
-            "{\"customer_id\":\"buyer@example.test\"}"
-        );
+        assert_eq!(outcome.mcp_outputs_json, "{}");
         assert!(outcome.mcp_evidence_uri.contains("run_crm.create_customer"));
     }
 
@@ -338,7 +338,7 @@ mod tests {
 
         assert_eq!(
             outcome.rollout_report.recommended_action,
-            RolloutDecision::ApproveNextRing
+            RolloutDecision::RollbackCanary
         );
         assert_eq!(outcome.rollout_report.runner_results.len(), 1);
         assert!(outcome.rollout_report.evidence_uris()[0].contains("crm.validate_app"));

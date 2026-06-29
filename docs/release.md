@@ -35,11 +35,11 @@ irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.p
 The installers use the GitHub Releases API to discover the latest release by default. They also support exact tags:
 
 ```bash
-GREENTIC_DESKTOP_VERSION=v0.1.7 curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
+GREENTIC_DESKTOP_VERSION=v0.1.10 curl -fsSL https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.sh | sh
 ```
 
 ```powershell
-$env:GREENTIC_DESKTOP_VERSION="v0.1.7"; irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
+$env:GREENTIC_DESKTOP_VERSION="v0.1.10"; irm https://raw.githubusercontent.com/greenticai/greentic-desktop/main/install.ps1 | iex
 ```
 
 Supported targets:
@@ -81,6 +81,15 @@ Public unauthenticated binstall requires:
 If the repository or release assets remain private, normal unauthenticated `cargo binstall greentic-desktop` cannot fetch them. Private distribution should use an authenticated download path or a private package registry and should not be described as standard public binstall.
 
 ## Release Smoke Checks
+
+Before cutting a release, run:
+
+```bash
+bash ci/no_mock_production_check.sh
+bash ci/local_check.sh
+```
+
+Confirm the support matrix in [Production Readiness Matrix](production-readiness.md) still matches `/api/v1/adapters/health`.
 
 The publish workflow starts the target `greentic-desktop` binary with:
 

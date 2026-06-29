@@ -1,8 +1,10 @@
-use greentic_desktop_adapter::{LocatorTarget, RecordedEvent, RunnerStep};
+use greentic_desktop_adapter::{LocatorStrategy, LocatorTarget, RecordedEvent, RunnerStep};
 use greentic_desktop_workflow::{
-    compile_workflow, DesktopWorkflow, NativePlatform, WorkflowAction, WorkflowActionKind,
-    WorkflowAssertion, WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput,
-    WorkflowOutputExtractor, WorkflowRisk, WorkflowTarget, WorkflowValueType,
+    compile_workflow, CommandReference, DesktopPrimitive, DesktopWorkflow, NativePlatform,
+    OutputExtractorReference, PrimitiveWorkflow, ResourceReference, ResourceType, SavePolicy,
+    TargetQuery, WorkflowAction, WorkflowActionKind, WorkflowAssertion, WorkflowCondition,
+    WorkflowEvidencePolicy, WorkflowInput, WorkflowOutput, WorkflowOutputExtractor, WorkflowRisk,
+    WorkflowTarget, WorkflowValueType,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -277,22 +279,14 @@ pub trait RecordingBackend: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct FakeRecordingBackend {
+pub struct BlockingRecordingBackend {
     id: &'static str,
     target_kind: RecordingTargetKind,
-    blocked_reason: Option<String>,
+    blocked_reason: String,
 }
 
-impl FakeRecordingBackend {
-    pub fn ready(id: &'static str, target_kind: RecordingTargetKind) -> Self {
-        Self {
-            id,
-            target_kind,
-            blocked_reason: None,
-        }
-    }
-
-    pub fn blocked(
+impl BlockingRecordingBackend {
+    pub fn new(
         id: &'static str,
         target_kind: RecordingTargetKind,
         reason: impl Into<String>,
@@ -300,12 +294,12 @@ impl FakeRecordingBackend {
         Self {
             id,
             target_kind,
-            blocked_reason: Some(reason.into()),
+            blocked_reason: reason.into(),
         }
     }
 }
 
-impl RecordingBackend for FakeRecordingBackend {
+impl RecordingBackend for BlockingRecordingBackend {
     fn id(&self) -> &'static str {
         self.id
     }
@@ -315,16 +309,49 @@ impl RecordingBackend for FakeRecordingBackend {
     }
 
     fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
-        self.blocked_reason
-            .as_ref()
-            .map(|reason| RecordingPreflight::blocked(reason.clone()))
-            .unwrap_or_else(RecordingPreflight::ready)
+        RecordingPreflight::blocked(self.blocked_reason.clone())
+    }
+
+    fn start(&self, _request: RecordingStartRequest, _sink: RecordingEventSink) -> RecordingHandle {
+        RecordingHandle {
+            backend_id: self.id.to_owned(),
+            capture_state: RecordingCaptureState::Blocked,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct FixtureRecordingBackend {
+    id: &'static str,
+    target_kind: RecordingTargetKind,
+}
+
+#[cfg(test)]
+impl FixtureRecordingBackend {
+    pub fn ready(id: &'static str, target_kind: RecordingTargetKind) -> Self {
+        Self { id, target_kind }
+    }
+}
+
+#[cfg(test)]
+impl RecordingBackend for FixtureRecordingBackend {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn target_kind(&self) -> RecordingTargetKind {
+        self.target_kind
+    }
+
+    fn preflight(&self, _request: &RecordingStartRequest) -> RecordingPreflight {
+        RecordingPreflight::ready()
     }
 
     fn start(&self, _request: RecordingStartRequest, sink: RecordingEventSink) -> RecordingHandle {
         let mut event =
-            RecordingEventEnvelope::new(sink.session_id(), self.id, self.target_kind, 1, "observe");
-        event.value = Some("fake backend heartbeat".to_owned());
+            RecordingEventEnvelope::new(sink.session_id(), self.id, self.target_kind, 1, "fill");
+        event.value = Some("inputs.fixture_value".to_owned());
         let _ = sink.append_event(event);
         let _ = sink.update_heartbeat();
         RecordingHandle {
@@ -1491,6 +1518,172 @@ pub fn normalise_recording_workflow(
     Ok(workflow)
 }
 
+pub fn normalise_recorded_events_to_primitives(
+    runner_id: &str,
+    target_kind: RecordingTargetKind,
+    events: &[RecordedEvent],
+) -> Result<PrimitiveWorkflow, RecordingLifecycleError> {
+    let mut primitives = Vec::new();
+    let mut outputs = Vec::new();
+
+    for (index, event) in events.iter().enumerate() {
+        match event.action.as_str() {
+            "open_app" | "activate_app" | "find_window" => {
+                primitives.push(DesktopPrimitive::OpenApp {
+                    app: greentic_desktop_workflow::AppReference {
+                        name: event
+                            .value
+                            .clone()
+                            .unwrap_or_else(|| "Recorded app".to_owned()),
+                        bundle_id: None,
+                        executable: None,
+                        window_title: event.value.clone(),
+                    },
+                });
+            }
+            "goto" | "navigate" | "open_resource" => {
+                primitives.push(DesktopPrimitive::OpenResource {
+                    resource: ResourceReference {
+                        path_template: event
+                            .value
+                            .clone()
+                            .unwrap_or_else(|| "about:blank".to_owned()),
+                        resource_type: if target_kind == RecordingTargetKind::Web {
+                            ResourceType::BrowserPage
+                        } else {
+                            ResourceType::Unknown
+                        },
+                    },
+                    create_if_missing: false,
+                });
+            }
+            "fill" | "type_text" | "send_text" => primitives.push(DesktopPrimitive::EnterText {
+                target: target_query_from_event(event, index),
+                value_template: event.value.clone().unwrap_or_default(),
+            }),
+            "click" | "click_region" | "press_key" | "send_keys" | "press_shortcut" => {
+                primitives.push(DesktopPrimitive::InvokeCommand {
+                    command: CommandReference {
+                        name: event.action.clone(),
+                        shortcut: event.value.clone(),
+                        menu_path: Vec::new(),
+                    },
+                });
+            }
+            "save" => primitives.push(DesktopPrimitive::SaveResource {
+                path_template: event.value.clone(),
+                policy: SavePolicy::CreateOrUpdate,
+            }),
+            "read" | "read_text" | "extract_text" | "extract_field" => {
+                let name = format!("recorded_output_{}", index + 1);
+                primitives.push(DesktopPrimitive::ObserveOutput {
+                    name: name.clone(),
+                    extractor: OutputExtractorReference {
+                        target: target_query_from_event(event, index),
+                        pattern: event.value.clone(),
+                    },
+                });
+                outputs.push(WorkflowOutput {
+                    name,
+                    value_type: WorkflowValueType::String,
+                    extractor: WorkflowOutputExtractor::TargetText(Box::new(locator_from_event(
+                        event, index,
+                    ))),
+                    required: true,
+                    expected: event.value.clone(),
+                });
+            }
+            "assert_text" => primitives.push(DesktopPrimitive::AssertState {
+                condition: WorkflowCondition::VisibleText {
+                    text_template: event.value.clone().unwrap_or_default(),
+                },
+            }),
+            _ => {}
+        }
+    }
+
+    if primitives.is_empty() {
+        return Err(RecordingLifecycleError::InvalidSession(
+            "recording has no semantic events to normalise".to_owned(),
+        ));
+    }
+
+    Ok(PrimitiveWorkflow {
+        id: runner_id.to_owned(),
+        summary: "Recorded desktop automation".to_owned(),
+        target: workflow_target_for(target_kind.as_str(), ""),
+        inputs: Vec::new(),
+        primitives,
+        outputs,
+        assertions: Vec::new(),
+        evidence_policy: WorkflowEvidencePolicy::default(),
+    })
+}
+
+fn target_query_from_event(event: &RecordedEvent, index: usize) -> TargetQuery {
+    target_query_from_locator(&locator_from_event(event, index))
+}
+
+fn target_query_from_locator(target: &LocatorTarget) -> TargetQuery {
+    let preferred = target.preferred.as_ref();
+    TargetQuery {
+        label: preferred.and_then(|locator| locator.label.clone().or(locator.name.clone())),
+        role: preferred.and_then(|locator| locator.role.clone()),
+        text: preferred.and_then(|locator| locator.text.clone()),
+        automation_id: preferred.and_then(|locator| locator.automation_id.clone()),
+        shortcut: preferred.and_then(|locator| locator.keyboard_shortcut.clone()),
+    }
+}
+
+fn locator_from_event(event: &RecordedEvent, index: usize) -> LocatorTarget {
+    if locator_has_stable_identity(&event.target) {
+        return event.target.clone();
+    }
+    let label = event
+        .value
+        .as_deref()
+        .and_then(|value| input_name_from_value(Some(value)))
+        .or_else(|| {
+            event
+                .value
+                .as_deref()
+                .map(normalize_field_name)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| format!("recorded_{}_{}", event.action, index + 1));
+    LocatorTarget {
+        preferred: Some(LocatorStrategy {
+            label: Some(label.clone()),
+            name: Some(label),
+            ..LocatorStrategy::default()
+        }),
+        ..LocatorTarget::default()
+    }
+}
+
+fn locator_has_stable_identity(target: &LocatorTarget) -> bool {
+    [target.preferred.as_ref(), target.fallback.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|locator| {
+            [
+                locator.data_testid.as_deref(),
+                locator.name.as_deref(),
+                locator.automation_id.as_deref(),
+                locator.text.as_deref(),
+                locator.label.as_deref(),
+                locator.css.as_deref(),
+                locator.xpath.as_deref(),
+                locator.class_name.as_deref(),
+                locator.control_type.as_deref(),
+                locator.keyboard_shortcut.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.trim().is_empty())
+        })
+}
+
 fn workflow_target_for(target_kind: &str, contents: &str) -> WorkflowTarget {
     match target_kind {
         "web" => WorkflowTarget::web(
@@ -2292,12 +2485,12 @@ mod tests {
     }
 
     #[test]
-    fn fake_backend_writes_event_and_lifecycle_transitions() {
+    fn fixture_backend_writes_semantic_event_and_lifecycle_transitions() {
         let runtime_home = temp_dir("greentic-record-home-active");
         let out = temp_dir("greentic-recording-active");
         let mut registry = RecordingBackendRegistry::new();
-        registry.register(FakeRecordingBackend::ready(
-            "greentic.recording.fake",
+        registry.register(FixtureRecordingBackend::ready(
+            "greentic.recording.fixture",
             RecordingTargetKind::Web,
         ));
         let started = start_recording_session_with_registry(
@@ -2319,10 +2512,11 @@ mod tests {
         assert_eq!(started.capture_state, RecordingCaptureState::Recording);
         assert_eq!(
             started.capture_backend.as_deref(),
-            Some("greentic.recording.fake")
+            Some("greentic.recording.fixture")
         );
         let raw = fs::read_to_string(out.join("raw/events.jsonl")).expect("raw events");
         assert!(raw.contains("\"schema_version\":\"recording.event.v1\""));
+        assert!(raw.contains("inputs.fixture_value"));
 
         let paused =
             pause_recording_session(&runtime_home, &started.session_id).expect("recording pauses");
@@ -2405,6 +2599,100 @@ mod tests {
         assert_eq!(package.steps[1].required_capability, "web.fill");
         assert_eq!(package.steps[2].required_capability, "web.click");
         assert_eq!(package.inputs, vec!["inputs.number_1"]);
+    }
+
+    #[test]
+    fn normalises_recorded_events_into_primitives() {
+        let events = vec![
+            RecordedEvent {
+                action: "navigate".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("https://example.test".to_owned()),
+            },
+            event("type_text", Some("{{inputs.search}}")),
+            event("read_text", Some("Result")),
+        ];
+
+        let workflow = normalise_recorded_events_to_primitives(
+            "recorded.web",
+            RecordingTargetKind::Web,
+            &events,
+        )
+        .expect("events should normalise");
+
+        assert!(matches!(
+            workflow.primitives[0],
+            DesktopPrimitive::OpenResource { .. }
+        ));
+        assert!(matches!(
+            workflow.primitives[1],
+            DesktopPrimitive::EnterText { .. }
+        ));
+        assert!(matches!(
+            workflow.primitives[2],
+            DesktopPrimitive::ObserveOutput { .. }
+        ));
+    }
+
+    #[test]
+    fn normalised_primitives_synthesize_stable_locators_for_empty_recorded_targets() {
+        let events = vec![
+            RecordedEvent {
+                action: "type_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("{{inputs.search}}".to_owned()),
+            },
+            RecordedEvent {
+                action: "read_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("Completed".to_owned()),
+            },
+        ];
+
+        let workflow = normalise_recorded_events_to_primitives(
+            "recorded.web.form",
+            RecordingTargetKind::Web,
+            &events,
+        )
+        .expect("events should normalise");
+
+        let DesktopPrimitive::EnterText { target, .. } = &workflow.primitives[0] else {
+            panic!("expected enter text primitive");
+        };
+        assert_eq!(target.label.as_deref(), Some("search"));
+        let DesktopPrimitive::ObserveOutput { extractor, .. } = &workflow.primitives[1] else {
+            panic!("expected output primitive");
+        };
+        assert_eq!(extractor.target.label.as_deref(), Some("completed"));
+        let WorkflowOutputExtractor::TargetText(target) = &workflow.outputs[0].extractor else {
+            panic!("expected target text output");
+        };
+        assert!(target
+            .preferred
+            .as_ref()
+            .and_then(|locator| locator.name.as_ref())
+            .is_some());
+    }
+
+    #[test]
+    fn normalise_rejects_lifecycle_and_backend_warning_only_captures() {
+        let root = temp_dir("greentic-normalise-non-semantic");
+        let raw = root.join("raw");
+        fs::create_dir_all(&raw).expect("raw dir");
+        fs::write(
+            raw.join("events.jsonl"),
+            concat!(
+                r#"{"type":"session_started","timestamp":"1","adapter":"greentic.desktop.playwright","capture_state":"recording"}"#,
+                "\n",
+                r#"{"schema_version":"recording.event.v1","session_id":"rec","backend":"greentic.recording.fixture","target_kind":"web","timestamp":"2","sequence":0,"event":{"kind":"backend_warning","target":{},"value":"source unavailable","redaction":"none"},"evidence":{"screenshot_ref":null,"dom_snapshot_ref":null,"ui_tree_ref":null,"terminal_buffer_ref":null}}"#,
+                "\n"
+            ),
+        )
+        .expect("events should write");
+
+        let err = normalise_recording(&raw, &root.join("runner.yaml"))
+            .expect_err("non-semantic capture should not normalise");
+        assert!(err.to_string().contains("no semantic events"), "{err}");
     }
 
     #[test]

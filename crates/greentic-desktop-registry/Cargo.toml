@@ -14,3 +14,7 @@ include = ["src/**", "Cargo.toml", "../../README.md", "../../LICENSE"]
 [lib]
 name = "greentic_desktop_registry"
 path = "src/lib.rs"
+
+[dependencies]
+ed25519-dalek.workspace = true
+sha2.workspace = true

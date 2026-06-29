@@ -135,6 +135,25 @@ greentic-desktop runner list
 
 The runtime looks for `.gtpack` files under the local Greentic Desktop runner directory.
 
+Package a reviewed runner through `greentic-pack`:
+
+```bash
+greentic-desktop runner pack crm.create_customer --out ./dist/crm.create_customer.gtpack
+```
+
+Greentic Desktop writes a temporary `answers.json` and invokes:
+
+```bash
+greentic-pack --answers /path/to/answers.json
+```
+
+Verify or install a package through `greentic-pack`:
+
+```bash
+greentic-desktop runner verify-pack ./dist/crm.create_customer.gtpack
+greentic-desktop runner install-pack ./dist/crm.create_customer.gtpack
+```
+
 Create a draft runner from a prompt:
 
 ```bash
@@ -192,16 +211,12 @@ greentic-desktop record finalise \
 
 ## MCP Server
 
-Start the MCP endpoint on the default address:
+The production MCP server is managed by Automate Hub from **My Runners**. Each saved ready runner is exposed as an MCP tool, and MCP calls use the same execution path as the Run button.
+
+The standalone CLI command is intentionally disabled until the runtime can load and execute installed `.gtpack` runner packages without the GUI runner store:
 
 ```bash
 greentic-desktop mcp serve
-```
-
-Start it on a specific address:
-
-```bash
-greentic-desktop mcp serve --bind 127.0.0.1:8799
 ```
 
 ## `gtc desktop` Form

@@ -92,11 +92,7 @@ Do not design Wayland runners around global coordinates, arbitrary pointer click
 
 ## Use As An MCP Tool
 
-After approval, expose the runner and start MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After approval, expose the runner and start the managed MCP endpoint from Automate Hub **My Runners**.
 
 Example MCP call:
 
@@ -121,3 +117,5 @@ The built-in manifest requests:
 - `desktop.accessibility`
 
 If a workflow needs arbitrary click/type control, use an X11 session, a supported native app integration, or a managed environment that explicitly permits those operations.
+
+Wayland screen and remote-control flows must go through desktop portals such as `ashpd`/XDG RemoteDesktop and ScreenCast. The adapter should keep returning explicit pending, denied, or unavailable states whenever the compositor has not granted those capabilities.

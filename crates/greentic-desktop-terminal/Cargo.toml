@@ -19,3 +19,5 @@ path = "src/lib.rs"
 greentic-desktop-adapter.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-workflow.workspace = true
+portable-pty.workspace = true
+vte.workspace = true

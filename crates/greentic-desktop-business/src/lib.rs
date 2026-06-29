@@ -304,16 +304,12 @@ mod tests {
             true,
         );
 
-        assert!(outcome.success);
-        let billing = outcome
-            .step_outcomes
-            .iter()
-            .find(|step| step.step_id == "billing")
-            .expect("billing step");
-        assert_eq!(
-            billing.resolved_inputs.get("customer_id"),
-            Some(&"buyer@example.test".to_owned())
-        );
+        assert!(!outcome.success);
+        assert!(outcome
+            .failure_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("real adapter registry is required"));
     }
 
     #[test]
@@ -343,12 +339,12 @@ mod tests {
             true,
         );
 
-        assert_eq!(outcome.evidence_uris.len(), 2);
+        assert_eq!(outcome.evidence_uris.len(), 1);
         assert!(outcome
             .evidence_uris
             .iter()
             .any(|uri| uri.contains("run_crm.create_customer")));
-        assert!(outcome.confirmation_sent);
+        assert!(!outcome.confirmation_sent);
     }
 
     #[test]

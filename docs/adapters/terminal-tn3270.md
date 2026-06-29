@@ -107,11 +107,7 @@ Avoid timing-only waits. Prefer `terminal.wait_for_screen` with expected text.
 
 ## Use As An MCP Tool
 
-After review and approval, expose the runner through MCP:
-
-```bash
-greentic-desktop mcp serve
-```
+After review and approval, expose the runner through the managed MCP endpoint in Automate Hub **My Runners**.
 
 An MCP client can call a terminal runner with business inputs:
 
@@ -132,3 +128,5 @@ An MCP client can call a terminal runner with business inputs:
 ## Permissions And Notes
 
 The built-in manifest requests `network.tenant`. Store terminal hosts and credentials as profile configuration or secrets; do not record passwords or tokens into runner steps.
+
+Terminal automation must own the session. Local terminal fixtures use `portable-pty` and parse ANSI output through `vte`; SSH and TN3270 runners should use maintained transports behind the same owned-session boundary. Greentic should not claim support for recording arbitrary existing Terminal, iTerm, Windows Terminal, or emulator tabs.

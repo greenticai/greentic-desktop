@@ -14,6 +14,20 @@ pub trait DesktopAdapter: Send + Sync {
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>>;
 }
 
+pub trait AdapterRuntime: Send + Sync {
+    fn manifest(&self) -> AdapterRuntimeManifest;
+    fn health(&self) -> AdapterHealth;
+    fn preflight(&self, session: AdapterSessionRequest) -> AdapterPreflight;
+    fn execute(&self, step: RunnerStep) -> AdapterResult<StepResult>;
+    fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation>;
+    fn extract(&self, output: OutputExtractionRequest) -> AdapterResult<OutputExtractionResult>;
+    fn start_recording(
+        &self,
+        session: AdapterSessionRequest,
+    ) -> AdapterResult<RecordingStartResult>;
+    fn stop_recording(&self, session_id: &str) -> AdapterResult<RecordingStopResult>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterCapabilities {
     pub adapter_id: String,
@@ -59,6 +73,216 @@ impl AdapterCapabilities {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterRuntimeManifest {
+    pub adapter_id: String,
+    pub version: String,
+    pub runtime_kind: AdapterRuntimeKind,
+    pub executable_capabilities: Vec<String>,
+    pub recordable_targets: Vec<String>,
+}
+
+impl AdapterRuntimeManifest {
+    pub fn from_capabilities(
+        capabilities: AdapterCapabilities,
+        runtime_kind: AdapterRuntimeKind,
+    ) -> Self {
+        Self {
+            adapter_id: capabilities.adapter_id,
+            version: capabilities.version,
+            runtime_kind,
+            executable_capabilities: capabilities.capabilities,
+            recordable_targets: Vec::new(),
+        }
+    }
+
+    pub fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::new(
+            &self.adapter_id,
+            &self.version,
+            self.executable_capabilities.iter().cloned(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdapterRuntimeKind {
+    InProcess,
+    SidecarStdio,
+    SidecarJsonRpc,
+}
+
+impl AdapterRuntimeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProcess => "in_process",
+            Self::SidecarStdio => "sidecar_stdio",
+            Self::SidecarJsonRpc => "sidecar_json_rpc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdapterReadiness {
+    Installed,
+    Healthy,
+    PermissionBlocked,
+    SidecarMissing,
+    UnsupportedPlatform,
+    NotImplemented,
+}
+
+impl AdapterReadiness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Healthy => "healthy",
+            Self::PermissionBlocked => "permission_blocked",
+            Self::SidecarMissing => "sidecar_missing",
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::NotImplemented => "not_implemented",
+        }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterHealth {
+    pub adapter_id: String,
+    pub readiness: AdapterReadiness,
+    pub message: String,
+    pub executable_capabilities: Vec<String>,
+    pub recordable_targets: Vec<String>,
+    pub log_path: Option<String>,
+}
+
+impl AdapterHealth {
+    pub fn healthy(
+        adapter_id: impl Into<String>,
+        executable_capabilities: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            adapter_id: adapter_id.into(),
+            readiness: AdapterReadiness::Healthy,
+            message: "Adapter is healthy.".to_owned(),
+            executable_capabilities: sorted_strings(executable_capabilities),
+            recordable_targets: Vec::new(),
+            log_path: None,
+        }
+    }
+
+    pub fn unavailable(
+        adapter_id: impl Into<String>,
+        readiness: AdapterReadiness,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            adapter_id: adapter_id.into(),
+            readiness,
+            message: message.into(),
+            executable_capabilities: Vec::new(),
+            recordable_targets: Vec::new(),
+            log_path: None,
+        }
+    }
+
+    pub fn capabilities_if_healthy(
+        &self,
+        version: impl Into<String>,
+    ) -> Option<AdapterCapabilities> {
+        self.readiness.is_healthy().then(|| {
+            AdapterCapabilities::new(
+                self.adapter_id.clone(),
+                version.into(),
+                self.executable_capabilities.iter().cloned(),
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterPreflight {
+    pub ready: bool,
+    pub reasons: Vec<String>,
+}
+
+impl AdapterPreflight {
+    pub fn ready() -> Self {
+        Self {
+            ready: true,
+            reasons: Vec::new(),
+        }
+    }
+
+    pub fn blocked(reason: impl Into<String>) -> Self {
+        Self {
+            ready: false,
+            reasons: vec![reason.into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterSessionRequest {
+    pub session_id: String,
+    pub target_kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputExtractionRequest {
+    pub name: String,
+    pub extractor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputExtractionResult {
+    pub name: String,
+    pub value: Option<String>,
+    pub proof_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStartResult {
+    pub session_id: String,
+    pub backend_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStopResult {
+    pub session_id: String,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterSidecarRequest {
+    pub id: String,
+    pub method: String,
+    pub params_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterSidecarResponse {
+    pub id: String,
+    pub ok: bool,
+    pub result_json: Option<String>,
+    pub error: Option<String>,
+}
+
+fn sorted_strings(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<String> {
+    let mut values = values
+        .into_iter()
+        .map(Into::into)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,17 +438,20 @@ pub fn select_best_adapter(
         .max_by_key(|adapter| adapter.capabilities.len())
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct StaticAdapter {
     capabilities: AdapterCapabilities,
 }
 
+#[cfg(test)]
 impl StaticAdapter {
     pub fn new(capabilities: AdapterCapabilities) -> Self {
         Self { capabilities }
     }
 }
 
+#[cfg(test)]
 impl DesktopAdapter for StaticAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         self.capabilities.clone()
@@ -248,7 +475,7 @@ impl DesktopAdapter for StaticAdapter {
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: "step accepted".to_owned(),
+            message: "fixture step completed".to_owned(),
         })
     }
 

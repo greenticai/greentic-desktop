@@ -19,6 +19,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/automate-hub/package-lock.json
+      - name: Install Linux native automation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libxi-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxdo-dev \
+            libxrandr-dev \
+            libxtst-dev \
+            pkg-config \
+            wmctrl \
+            xdotool
+      - name: Install frontend automation dependencies
+        run: |
+          cd frontend/automate-hub
+          npm ci
+          npx playwright install --with-deps chromium
       - uses: Swatinem/rust-cache@v2
       - name: Run command
         shell: bash

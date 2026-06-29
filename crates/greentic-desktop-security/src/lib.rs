@@ -185,20 +185,93 @@ impl SecretsManager {
 }
 
 pub fn redact_sensitive_text(value: &str) -> String {
-    let mut redacted = Vec::new();
-    for token in value.split_whitespace() {
-        let lower = token.to_ascii_lowercase();
-        if lower.contains("password")
-            || lower.contains("secret")
-            || lower.contains("token")
-            || lower.starts_with("{{secrets.")
-        {
-            redacted.push("[REDACTED]");
-        } else {
-            redacted.push(token);
+    redact_sensitive_text_with_values(value, &[])
+}
+
+pub fn redact_sensitive_text_with_values(value: &str, known_secret_values: &[String]) -> String {
+    let redacted = redact_known_secret_values(value, known_secret_values);
+    redact_secretish_tokens(&redact_bearer_segments(&redacted))
+}
+
+pub fn redact_known_secret_values(value: &str, known_secret_values: &[String]) -> String {
+    let mut redacted = value.to_owned();
+    for secret in known_secret_values {
+        let secret = secret.trim();
+        if secret.len() >= 4 {
+            redacted = redacted.replace(secret, "[REDACTED]");
         }
     }
-    redacted.join(" ")
+    redacted
+}
+
+pub fn command_display(command: &str, args: &[String], known_secret_values: &[String]) -> String {
+    redact_sensitive_text_with_values(
+        &std::iter::once(command.to_owned())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" "),
+        known_secret_values,
+    )
+}
+
+fn redact_bearer_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let remaining = &value[index..];
+        if remaining
+            .get(..7)
+            .map(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+            .unwrap_or(false)
+        {
+            output.push_str("Bearer [REDACTED]");
+            index += 7;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+        } else {
+            let ch = remaining.chars().next().expect("non-empty remaining text");
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    output
+}
+
+fn redact_secretish_tokens(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut token = String::new();
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            push_redacted_token(&mut output, &token);
+            token.clear();
+            output.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    push_redacted_token(&mut output, &token);
+    output
+}
+
+fn push_redacted_token(output: &mut String, token: &str) {
+    if token.is_empty() {
+        return;
+    }
+    let lower = token.to_ascii_lowercase();
+    if lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("api-key")
+        || lower.contains("apikey")
+        || lower.starts_with("{{secrets.")
+    {
+        output.push_str("[REDACTED]");
+    } else {
+        output.push_str(token);
+    }
 }
 
 fn permission_allows(policy: &PermissionPolicy, actions: &ActionRequest) -> bool {
@@ -296,6 +369,35 @@ mod tests {
     }
 
     #[test]
+    fn known_secret_values_and_bearer_headers_are_redacted() {
+        let raw = "request failed Authorization: Bearer sk-live-abc123 body=topsecret";
+
+        let redacted = redact_sensitive_text_with_values(raw, &["topsecret".to_owned()]);
+
+        assert!(redacted.contains("Bearer [REDACTED]"));
+        assert!(!redacted.contains("sk-live-abc123"));
+        assert!(!redacted.contains("topsecret"));
+    }
+
+    #[test]
+    fn command_display_redacts_secret_arguments() {
+        let rendered = command_display(
+            "curl",
+            &[
+                "-H".to_owned(),
+                "Authorization: Bearer sk-test-1234".to_owned(),
+                "--data".to_owned(),
+                "api_key=cleartext".to_owned(),
+            ],
+            &["cleartext".to_owned()],
+        );
+
+        assert!(!rendered.contains("sk-test-1234"));
+        assert!(!rendered.contains("cleartext"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn published_runner_signature_policy_is_explicit() {
         let key = SigningKey::new("local-dev", "material");
         let signed = sign_manifest(
@@ -311,7 +413,9 @@ mod tests {
                 },
                 required_adapters: vec!["greentic.desktop.playwright".to_owned()],
                 compatibility: vec!["greentic-desktop>=0.1.0".to_owned()],
-                package_checksum: "sha256:abc123".to_owned(),
+                package_checksum:
+                    "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        .to_owned(),
             },
             &key,
         )

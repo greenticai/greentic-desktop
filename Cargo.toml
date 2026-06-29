@@ -4,6 +4,7 @@ members = [
   "crates/greentic-desktop-core",
   "crates/greentic-desktop-config",
   "crates/greentic-desktop-adapter",
+  "crates/greentic-desktop-automation-foundation",
   "crates/greentic-desktop-workflow",
   "crates/greentic-desktop-extension",
   "crates/greentic-distributor-client",
@@ -45,7 +46,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.10"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/greenticai/greentic-desktop"
@@ -56,9 +57,11 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 criterion = "0.8"
+greentic-llm = "1.2.6-research"
 greentic-desktop-core = { path = "crates/greentic-desktop-core", version = "0.1" }
 greentic-desktop-config = { path = "crates/greentic-desktop-config", version = "0.1" }
 greentic-desktop-adapter = { path = "crates/greentic-desktop-adapter", version = "0.1" }
+greentic-desktop-automation-foundation = { path = "crates/greentic-desktop-automation-foundation", version = "0.1" }
 greentic-desktop-workflow = { path = "crates/greentic-desktop-workflow", version = "0.1" }
 greentic-desktop-extension = { path = "crates/greentic-desktop-extension", version = "0.1" }
 greentic-distributor-client = { path = "crates/greentic-distributor-client", version = "0.1" }
@@ -98,3 +101,18 @@ greentic-desktop-gui-assets = { path = "crates/greentic-desktop-gui-assets", ver
 greentic-desktop-gui = { path = "crates/greentic-desktop-gui", version = "0.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+reqwest = { version = "0.13", features = ["json"] }
+axum = "0.8"
+hyper = "1"
+rmcp = { version = "2", features = ["client", "server", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
+rdev = "0.5"
+enigo = "0.6"
+xcap = { version = "0.9", features = ["image"] }
+schemars = "1.2"
+jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
+ed25519-dalek = "2.2"
+portable-pty = "0.9"
+vte = "0.15"

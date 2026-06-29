@@ -24,3 +24,5 @@ greentic-desktop-runner-schema.workspace = true
 greentic-desktop-security.workspace = true
 greentic-desktop-session.workspace = true
 greentic-desktop-workflow.workspace = true
+rmcp.workspace = true
+serde_json.workspace = true

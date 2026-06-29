@@ -16,6 +16,7 @@ name = "greentic_desktop_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+axum.workspace = true
 greentic-desktop-adapter.workspace = true
 greentic-desktop-config.workspace = true
 greentic-desktop-core.workspace = true
@@ -25,3 +26,6 @@ greentic-desktop-mcp.workspace = true
 greentic-desktop-registry.workspace = true
 greentic-desktop-session.workspace = true
 greentic-desktop-telemetry.workspace = true
+rmcp.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
