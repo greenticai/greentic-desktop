@@ -86,7 +86,7 @@ jobs:
             xdotool \
             xvfb
       - name: Run X11 harness tests
-        run: xvfb-run -a cargo test -p greentic-desktop-linux can_detect_x11_session && xvfb-run -a cargo test -p greentic-desktop-linux can_list_windows_and_inspect_at_spi_tree && cargo test -p greentic-desktop-test-harness linux_x11_app_workflow_e2e_installs_extension_and_returns_output
+        run: xvfb-run -a cargo test -p greentic-desktop-linux can_detect_x11_session && xvfb-run -a cargo test -p greentic-desktop-linux can_list_windows_and_inspect_at_spi_tree && xvfb-run -a cargo test -p greentic-desktop-test-harness linux_x11_app_workflow_e2e_installs_extension_and_returns_output
 
   harness-plan:
     runs-on: ubuntu-latest

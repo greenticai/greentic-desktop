@@ -645,13 +645,20 @@ pub fn run_windows_app_workflow(
         .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
     let steps = compiled.steps;
 
-    let results = adapter.replay(&steps)?;
-    let visible = adapter
+    let results = adapter.replay(&steps).map_err(|err| {
+        AdapterError::ExecutionFailed(format!("Windows UI Automation app workflow failed: {err}"))
+    })?;
+    let observation = adapter
         .observe(ObserveContext {
             session_id: format!("windows-app-workflow-{}", workflow_id_component(&app_name)),
             target: output_specs.first().map(|output| output.target.clone()),
-        })?
-        .visible_text;
+        })
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!(
+                "Windows UI Automation app workflow failed: {err}"
+            ))
+        })?;
+    let visible = observation.visible_text;
 
     let mut outputs = BTreeMap::new();
     for output in output_specs {

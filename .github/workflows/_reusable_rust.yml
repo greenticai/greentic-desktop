@@ -39,7 +39,9 @@ jobs:
             libxdo-dev \
             libxrandr-dev \
             libxtst-dev \
-            pkg-config
+            pkg-config \
+            wmctrl \
+            xdotool
       - name: Install frontend automation dependencies
         run: |
           cd frontend/automate-hub

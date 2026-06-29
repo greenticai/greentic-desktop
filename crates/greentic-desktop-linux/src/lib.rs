@@ -911,16 +911,21 @@ pub fn run_linux_x11_app_workflow(
         .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
     let steps = compiled.steps;
 
-    let results = adapter.replay(&steps)?;
-    let visible = adapter
+    let results = adapter.replay(&steps).map_err(|err| {
+        AdapterError::ExecutionFailed(format!("Linux X11 app workflow failed: {err}"))
+    })?;
+    let observation = adapter
         .observe(ObserveContext {
             session_id: format!(
                 "linux-x11-app-workflow-{}",
                 workflow_id_component(&window_title)
             ),
             target: output_specs.first().map(|output| output.target.clone()),
-        })?
-        .visible_text;
+        })
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("Linux X11 app workflow failed: {err}"))
+        })?;
+    let visible = observation.visible_text;
 
     let mut outputs = BTreeMap::new();
     for output in output_specs {
