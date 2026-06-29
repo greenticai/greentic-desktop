@@ -40,6 +40,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install Linux native automation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libxi-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxdo-dev \
+            libxrandr-dev \
+            libxtst-dev \
+            pkg-config \
+            wmctrl \
+            xdotool
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -156,6 +174,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install Linux native automation dependencies
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libxi-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxdo-dev \
+            libxrandr-dev \
+            libxtst-dev \
+            pkg-config \
+            wmctrl \
+            xdotool
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -349,6 +386,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux native automation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libxi-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxdo-dev \
+            libxrandr-dev \
+            libxtst-dev \
+            pkg-config \
+            wmctrl \
+            xdotool
       - uses: Swatinem/rust-cache@v2
       - name: Publish crates
         env:

@@ -45,6 +45,28 @@ ensure_frontend_node() {
   exit 1
 }
 
+check_linux_native_deps() {
+  if [ "$(uname -s)" != "Linux" ]; then
+    return
+  fi
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    printf 'pkg-config is required for Linux native automation dependencies.\n' >&2
+    printf 'On Ubuntu, install: sudo apt-get install pkg-config libwayland-dev libx11-dev libxtst-dev libxdo-dev\n' >&2
+    exit 1
+  fi
+  missing=()
+  for package in wayland-client x11 xtst xdo; do
+    if ! pkg-config --exists "$package"; then
+      missing+=("$package")
+    fi
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    printf 'Missing Linux native automation pkg-config packages: %s\n' "${missing[*]}" >&2
+    printf 'On Ubuntu, install: sudo apt-get install libwayland-dev libx11-dev libxtst-dev libxdo-dev\n' >&2
+    exit 1
+  fi
+}
+
 locally_packageable_crates() {
   # Before the first release, crates.io cannot resolve workspace-internal
   # dependencies for downstream crates. Full ordered publish dry-runs happen in
@@ -77,6 +99,9 @@ validate_publish_crate_order
 
 header "workspace dependency policy"
 bash ci/workspace_dependency_policy_check.sh
+
+header "Linux native automation dependencies"
+check_linux_native_deps
 
 header "no-mock production check"
 bash ci/no_mock_production_check.sh
