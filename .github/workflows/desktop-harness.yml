@@ -54,6 +54,7 @@ jobs:
             libxcb1-dev \
             libxdo-dev \
             libxrandr-dev \
+            libxtst-dev \
             pkg-config
       - run: ${{ matrix.command }}
 
@@ -75,6 +76,7 @@ jobs:
             libxcb1-dev \
             libxdo-dev \
             libxrandr-dev \
+            libxtst-dev \
             pkg-config \
             xvfb
       - name: Run X11 harness tests
@@ -98,5 +100,6 @@ jobs:
             libxcb1-dev \
             libxdo-dev \
             libxrandr-dev \
+            libxtst-dev \
             pkg-config
       - run: cargo test -p greentic-desktop-test-harness

@@ -32,6 +32,7 @@ jobs:
             libxcb1-dev \
             libxdo-dev \
             libxrandr-dev \
+            libxtst-dev \
             pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: Run command
