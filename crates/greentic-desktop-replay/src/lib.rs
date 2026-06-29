@@ -242,13 +242,14 @@ pub fn replay_with_context(
             .as_deref()
             .unwrap_or_default()
             .contains("{{missing");
-        let adapter = selector.select(&step.required_capability);
+        let executable_step = executable_step_for_replay(step);
+        let adapter = selector.select(&executable_step.required_capability);
         let result = if unresolved {
             Err(AdapterError::ExecutionFailed(
                 "unresolved input or secret".to_owned(),
             ))
         } else if let Some(adapter) = adapter {
-            let mut executable = step.clone();
+            let mut executable = executable_step;
             executable.value = resolved;
             execute_step_with_timeout(
                 adapter,
@@ -286,7 +287,7 @@ pub fn replay_with_context(
         });
         tool_trace.push(ToolTraceEntry {
             step_id: step.id.clone(),
-            capability: step.required_capability.clone(),
+            capability: executable_step_for_replay(step).required_capability,
             status: if success {
                 EvidenceStatus::Success
             } else {
@@ -435,6 +436,42 @@ impl ReplayOutcome {
             .join(",");
         format!("{{{body}}}")
     }
+}
+
+fn executable_step_for_replay(step: &RunnerStep) -> RunnerStep {
+    if step.action == "press_shortcut"
+        && step.required_capability.ends_with(".click_element")
+        && step
+            .value
+            .as_deref()
+            .is_some_and(|value| looks_like_shortcut(value))
+    {
+        let mut executable = step.clone();
+        if let Some((prefix, _)) = step.required_capability.split_once('.') {
+            executable.required_capability = format!("{prefix}.press_shortcut");
+        }
+        return executable;
+    }
+    step.clone()
+}
+
+fn looks_like_shortcut(value: &str) -> bool {
+    let value = value.trim();
+    value.contains('+')
+        && value.split('+').any(|part| {
+            matches!(
+                part.trim().to_ascii_lowercase().as_str(),
+                "cmd"
+                    | "command"
+                    | "ctrl"
+                    | "control"
+                    | "alt"
+                    | "option"
+                    | "shift"
+                    | "meta"
+                    | "win"
+            )
+        })
 }
 
 fn format_step_failure(step: &RunnerStep, reason: Option<&str>) -> String {
@@ -976,6 +1013,23 @@ mod tests {
             outcome.traces[0].reason.as_deref(),
             Some("application 'Microsoft Word' is not installed or could not be launched")
         );
+    }
+
+    #[test]
+    fn replay_repairs_shortcut_steps_with_click_capability() {
+        let step = RunnerStep {
+            id: "primitive-2-invoke-command".to_owned(),
+            action: "press_shortcut".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some("Cmd+N".to_owned()),
+            required_capability: "macos.click_element".to_owned(),
+        };
+
+        let executable = executable_step_for_replay(&step);
+
+        assert_eq!(executable.required_capability, "macos.press_shortcut");
+        assert_eq!(executable.action, "press_shortcut");
+        assert_eq!(executable.value.as_deref(), Some("Cmd+N"));
     }
 
     #[test]

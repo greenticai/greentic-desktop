@@ -644,10 +644,18 @@ fn canonical_native_capability(
         }
     } else if normalized.contains("find") {
         "find_element"
-    } else if normalized.contains("click")
-        || normalized.contains("press")
-        || normalized.contains("save")
+    } else if normalized.contains("press_shortcut")
+        || normalized.contains("shortcut")
+        || normalized.contains("hotkey")
+        || (normalized.contains("press")
+            && [
+                "cmd", "command", "ctrl", "control", "alt", "option", "shift", "meta", "win",
+            ]
+            .iter()
+            .any(|modifier| normalized.split('_').any(|part| part == *modifier)))
     {
+        "press_shortcut"
+    } else if normalized.contains("click") || normalized.contains("save") {
         "click_element"
     } else if normalized.contains("type")
         || normalized.contains("input")
@@ -713,6 +721,7 @@ fn semantic_capability_for_action<'a>(
     let preferred_terms: &[&str] = match normalized_action {
         "open" | "launch" | "activate" | "start" => &["open", "activate", "goto", "find"],
         "enter" | "input" | "type" | "write" | "fill" => &["type", "fill", "send"],
+        "press_shortcut" | "shortcut" | "hotkey" => &["press_shortcut", "shortcut", "press"],
         "press" | "click" | "select" => &["click", "press", "select"],
         "read" | "observe" | "extract" | "return" | "get" => {
             &["read", "extract", "screenshot", "observe"]
@@ -1186,6 +1195,20 @@ mod tests {
             .steps
             .iter()
             .any(|step| step.required_capability == "windows.open_app"));
+    }
+
+    #[test]
+    fn native_shortcut_actions_keep_press_shortcut_capability() {
+        assert_eq!(
+            canonical_native_capability("macos.click_element", Some("macos"), "press_shortcut")
+                .as_deref(),
+            Some("macos.press_shortcut")
+        );
+        assert_eq!(
+            canonical_native_capability("macos.click_element", Some("macos"), "press Cmd+N")
+                .as_deref(),
+            Some("macos.press_shortcut")
+        );
     }
 
     #[test]

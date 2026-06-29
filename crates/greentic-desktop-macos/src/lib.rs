@@ -32,6 +32,7 @@ pub fn macos_capabilities() -> AdapterCapabilities {
             "macos.read_window_tree",
             "macos.find_element",
             "macos.click_element",
+            "macos.open_resource",
             "macos.type_text",
             "macos.press_shortcut",
             "macos.invoke_menu",
@@ -465,6 +466,16 @@ impl MacOsAccessibilityAdapter {
                 macos_type_text(&app, &step.target, value)?;
                 Ok("typed text through macOS Accessibility/System Events".to_owned())
             }
+            "macos.open_resource" => {
+                let path = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "macos.open_resource requires the resource path in step.value.".to_owned(),
+                    )
+                })?;
+                let app = self.active_app_or_frontmost()?;
+                macos_open_resource(&app, path)?;
+                Ok(format!("opened macOS resource {path}"))
+            }
             "macos.click_element" => {
                 let app = self.active_app_or_frontmost()?;
                 macos_click_element(&app, &step.target)?;
@@ -789,6 +800,23 @@ end tell
         return run_osascript(&script).map(|_| ());
     }
 
+    if is_active_document_locator(target) {
+        macos_focus_document(app, target)?;
+        let script = format!(
+            r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    keystroke {value}
+  end tell
+end tell
+"#,
+            app = apple_quote(app),
+            value = apple_quote(value)
+        );
+        return run_osascript(&script).map(|_| ());
+    }
+
     let predicate = macos_locator_predicate(target, None)?;
     let script = format!(
         r#"
@@ -811,6 +839,35 @@ end tell
         value = apple_quote(value)
     );
     run_osascript(&script).map(|_| ())
+}
+
+fn macos_open_resource(app: &str, path: &str) -> AdapterResult<()> {
+    if path.trim().is_empty() {
+        return Err(AdapterError::ExecutionFailed(
+            "macos.open_resource requires a non-empty file path.".to_owned(),
+        ));
+    }
+
+    let expanded = expand_user_path(path);
+    if expanded.exists() {
+        let expanded_path = expanded.to_string_lossy().into_owned();
+        run_command("open", ["-a", app, &expanded_path])?;
+        activate_macos_app(app)?;
+        return Ok(());
+    }
+
+    if let Some(parent) = expanded.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AdapterError::ExecutionFailed(format!(
+                "failed to create resource parent directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    activate_macos_app(app)?;
+    macos_press_shortcut(app, "Cmd+N")?;
+    run_osascript("delay 0.8")?;
+    Ok(())
 }
 
 fn macos_click_element(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
@@ -891,10 +948,15 @@ end tell
 }
 
 fn macos_focus_document(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
-    let predicate = macos_locator_predicate(target, None).unwrap_or_else(|_| {
-        "(its role is \"AXTextArea\") or (its role is \"AXWebArea\") or (its role is \"AXScrollArea\")"
-            .to_owned()
-    });
+    if is_active_document_locator(target) {
+        return macos_focus_active_document(app);
+    }
+
+    let predicate = if is_active_document_locator(target) {
+        macos_document_area_predicate()
+    } else {
+        macos_locator_predicate(target, None).unwrap_or_else(|_| macos_document_area_predicate())
+    };
     let script = format!(
         r#"
 tell application "System Events"
@@ -916,12 +978,81 @@ end tell
     run_osascript(&script).map(|_| ())
 }
 
+fn macos_focus_active_document(app: &str) -> AdapterResult<()> {
+    let script = macos_focus_active_document_script(app);
+    let output = run_osascript(&script)?;
+    let status = output.trim();
+    if matches!(status, "focused" | "focused-window-center") {
+        Ok(())
+    } else {
+        Err(AdapterError::ExecutionFailed(
+            "No focusable macOS document area was available in the front window.".to_owned(),
+        ))
+    }
+}
+
+fn macos_focus_active_document_script(app: &str) -> String {
+    format!(
+        r#"
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    delay 0.2
+    try
+      set targetWindow to front window
+    on error
+      return "missing-window"
+    end try
+
+    try
+      repeat with candidate in (entire contents of targetWindow)
+        try
+          set candidateRole to role of candidate as text
+          if candidateRole is "AXTextArea" or candidateRole is "AXWebArea" or candidateRole is "AXScrollArea" then
+            try
+              set focused of candidate to true
+            end try
+            try
+              click candidate
+            end try
+            return "focused"
+          end if
+        end try
+      end repeat
+    end try
+
+    try
+      set windowPosition to position of targetWindow
+      set windowSize to size of targetWindow
+      set clickX to (item 1 of windowPosition) + ((item 1 of windowSize) / 2)
+      set clickY to (item 2 of windowPosition) + ((item 2 of windowSize) / 2)
+      click at {{clickX, clickY}}
+      return "focused-window-center"
+    end try
+  end tell
+end tell
+return "not-focused"
+"#,
+        app = apple_quote(app)
+    )
+}
+
 fn macos_save_as(app: &str, path: &str) -> AdapterResult<()> {
     if path.trim().is_empty() {
         return Err(AdapterError::ExecutionFailed(
             "macos.save_as requires a non-empty file path.".to_owned(),
         ));
     }
+    let expanded = expand_user_path(path);
+    if let Some(parent) = expanded.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AdapterError::ExecutionFailed(format!(
+                "failed to create save parent directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    let path = expanded.to_string_lossy();
     let script = format!(
         r#"
 tell application "System Events"
@@ -939,7 +1070,7 @@ tell application "System Events"
 end tell
 "#,
         app = apple_quote(app),
-        path = apple_quote(path)
+        path = apple_quote(&path)
     );
     run_osascript(&script).map(|_| ())
 }
@@ -1013,7 +1144,7 @@ fn macos_locator_predicate(
             predicates.push(format!("its name contains {}", apple_quote(name)));
         }
         if let Some(role) = non_empty(strategy.role.as_deref()) {
-            predicates.push(format!("its role is {}", apple_quote(role)));
+            predicates.push(macos_role_predicate(role));
         }
         if let Some(text) = non_empty(strategy.text.as_deref()) {
             predicates.push(format!("its value as text contains {}", apple_quote(text)));
@@ -1033,6 +1164,50 @@ fn macos_locator_predicate(
         ));
     }
     Ok(predicates.join(" or "))
+}
+
+fn macos_role_predicate(role: &str) -> String {
+    if role.eq_ignore_ascii_case("document") {
+        return macos_document_area_predicate();
+    }
+    format!("its role is {}", apple_quote(role))
+}
+
+fn macos_document_area_predicate() -> String {
+    "(its role is \"AXTextArea\") or (its role is \"AXWebArea\") or (its role is \"AXScrollArea\") or (its role is \"AXGroup\")"
+        .to_owned()
+}
+
+fn is_active_document_locator(target: &LocatorTarget) -> bool {
+    [target.preferred.as_ref(), target.fallback.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|strategy| {
+            strategy
+                .name
+                .as_deref()
+                .map(|name| name.eq_ignore_ascii_case("active document"))
+                .unwrap_or(false)
+                || strategy
+                    .label
+                    .as_deref()
+                    .map(|label| label.eq_ignore_ascii_case("active document"))
+                    .unwrap_or(false)
+                || strategy
+                    .role
+                    .as_deref()
+                    .map(|role| role.eq_ignore_ascii_case("document"))
+                    .unwrap_or(false)
+        })
+}
+
+fn expand_user_path(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -1267,6 +1442,7 @@ mod tests {
         assert!(capabilities.supports("macos.press_shortcut"));
         assert!(capabilities.supports("macos.invoke_menu"));
         assert!(capabilities.supports("macos.focus_document"));
+        assert!(capabilities.supports("macos.open_resource"));
         assert!(capabilities.supports("macos.save_as"));
     }
 
@@ -1288,6 +1464,7 @@ mod tests {
         assert!(ready.supports("macos.type_text"));
         assert!(ready.supports("macos.read_text"));
         assert!(ready.supports("macos.press_shortcut"));
+        assert!(ready.supports("macos.open_resource"));
         assert!(ready.supports("macos.save_as"));
     }
 
@@ -1398,6 +1575,33 @@ mod tests {
             "{email_predicate}"
         );
         assert!(save_predicate.contains("AXButton"), "{save_predicate}");
+    }
+
+    #[test]
+    fn generic_document_role_maps_to_macos_document_area_roles() {
+        let target = LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                role: Some("document".to_owned()),
+                name: Some("active document".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+
+        let predicate = macos_locator_predicate(&target, None).expect("predicate");
+
+        assert!(predicate.contains("AXTextArea"), "{predicate}");
+        assert!(predicate.contains("AXWebArea"), "{predicate}");
+        assert!(is_active_document_locator(&target));
+    }
+
+    #[test]
+    fn active_document_focus_script_avoids_brittle_whose_specifier() {
+        let script = macos_focus_active_document_script("Microsoft Word");
+
+        assert!(script.contains("repeat with candidate in (entire contents of targetWindow)"));
+        assert!(script.contains("focused-window-center"));
+        assert!(!script.contains("whose role"));
     }
 
     #[test]

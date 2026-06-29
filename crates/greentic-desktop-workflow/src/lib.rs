@@ -496,15 +496,15 @@ fn semantic_capability_candidates(semantic: SemanticCapability) -> &'static [&'s
         ],
         SemanticCapability::OpenResource => &[
             "web.goto",
+            "macos.open_resource",
             "windows.open_app",
-            "macos.activate_app",
             "linux.find_window",
             "terminal.connect",
         ],
         SemanticCapability::CreateResourceIfMissing => &[
             "web.fill",
+            "macos.open_resource",
             "windows.type_text",
-            "macos.type_text",
             "linux.type_text",
             "terminal.send_text",
         ],
@@ -684,9 +684,18 @@ fn compile_primitive_step(
             target,
             value_template,
         } => {
-            let find_capability = concrete_capability(workflow, context, SemanticCapability::Find)?;
+            let find_capability = if target_is_macos(workflow) && is_active_document_query(target) {
+                "macos.focus_document".to_owned()
+            } else {
+                concrete_capability(workflow, context, SemanticCapability::Find)?
+            };
+            let find_step_suffix = if find_capability == "macos.focus_document" {
+                "focus-target"
+            } else {
+                "find-target"
+            };
             compiler.push(
-                step_id("find-target"),
+                step_id(find_step_suffix),
                 action_for_capability(&find_capability, "find"),
                 locator_for_query(target),
                 None,
@@ -810,6 +819,19 @@ fn target_is_macos(workflow: &PrimitiveWorkflow) -> bool {
         workflow.target.kind,
         WorkflowTargetKind::NativeApp(NativePlatform::MacOs)
     )
+}
+
+fn is_active_document_query(target: &TargetQuery) -> bool {
+    target
+        .label
+        .as_deref()
+        .map(|label| label.eq_ignore_ascii_case("active document"))
+        .unwrap_or(false)
+        || target
+            .role
+            .as_deref()
+            .map(|role| role.eq_ignore_ascii_case("document"))
+            .unwrap_or(false)
 }
 
 fn concrete_capability(
@@ -1589,8 +1611,8 @@ mod tests {
             .find(|step| step.id == "primitive-2-open-resource")
             .expect("open resource step");
 
-        assert_eq!(open_resource.action, "type_text");
-        assert_eq!(open_resource.required_capability, "macos.type_text");
+        assert_eq!(open_resource.action, "open_resource");
+        assert_eq!(open_resource.required_capability, "macos.open_resource");
         assert_eq!(
             open_resource
                 .target
@@ -1653,6 +1675,7 @@ mod tests {
             [
                 "macos.activate_app",
                 "macos.find_element",
+                "macos.open_resource",
                 "macos.type_text",
                 "macos.click_element",
                 "macos.read_text",
@@ -1670,6 +1693,12 @@ mod tests {
                 .expect("input should route")
                 .concrete_capability,
             "macos.type_text"
+        );
+        assert_eq!(
+            route_semantic_capability(SemanticCapability::CreateResourceIfMissing, &adapters)
+                .expect("create resource should route")
+                .concrete_capability,
+            "macos.open_resource"
         );
         assert_eq!(
             route_semantic_capability(SemanticCapability::Extract, &adapters)
@@ -1739,6 +1768,8 @@ mod tests {
                 "1.0.0",
                 [
                     "macos.activate_app",
+                    "macos.open_resource",
+                    "macos.focus_document",
                     "macos.find_element",
                     "macos.type_text",
                     "macos.click_element",
@@ -1760,7 +1791,7 @@ mod tests {
             capabilities,
             vec![
                 "macos.activate_app",
-                "macos.find_element",
+                "macos.focus_document",
                 "macos.type_text",
                 "macos.save_as",
             ]
