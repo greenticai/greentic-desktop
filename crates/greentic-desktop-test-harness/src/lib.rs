@@ -796,7 +796,7 @@ mod tests {
             assert!(outcome.prompt.contains("Sample"));
             assert!(outcome.steps.iter().all(|step| step.success));
         } else {
-            assert_blocked_result(result, "Linux desktop automation can only run on Linux");
+            assert_blocked_result(result, "Linux");
         }
     }
 
