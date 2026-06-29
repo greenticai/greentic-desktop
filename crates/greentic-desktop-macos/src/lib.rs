@@ -915,7 +915,7 @@ end tell
 }
 
 fn shortcut_is_new_document(key: &str, modifiers: &[&str]) -> bool {
-    key.eq_ignore_ascii_case("n") && modifiers.iter().any(|modifier| *modifier == "command down")
+    key.eq_ignore_ascii_case("n") && modifiers.contains(&"command down")
 }
 
 fn macos_confirm_default_new_document_if_needed(app: &str) -> AdapterResult<()> {

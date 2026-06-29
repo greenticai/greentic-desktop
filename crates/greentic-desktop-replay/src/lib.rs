@@ -1,6 +1,6 @@
 use greentic_desktop_adapter::{
     validate_required_capabilities, AdapterCapabilities, AdapterError, Assertion, DesktopAdapter,
-    LocatorStrategy, LocatorTarget, Observation, ObserveContext, RunnerStep, StepResult,
+    LocatorTarget, Observation, ObserveContext, RunnerStep, StepResult,
 };
 use greentic_desktop_evidence::{
     EvidenceArtifact, EvidenceArtifactKind, EvidenceBundle, EvidenceRef, EvidenceStatus,
@@ -451,10 +451,7 @@ impl ReplayOutcome {
 fn executable_step_for_replay(step: &RunnerStep) -> RunnerStep {
     if step.action == "press_shortcut"
         && step.required_capability.ends_with(".click_element")
-        && step
-            .value
-            .as_deref()
-            .is_some_and(|value| looks_like_shortcut(value))
+        && step.value.as_deref().is_some_and(looks_like_shortcut)
     {
         let mut executable = step.clone();
         if let Some((prefix, _)) = step.required_capability.split_once('.') {
@@ -742,7 +739,9 @@ fn evidence_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_desktop_adapter::{AdapterResult, AssertionResult, RecordedEvent};
+    use greentic_desktop_adapter::{
+        AdapterResult, AssertionResult, LocatorStrategy, RecordedEvent,
+    };
     use greentic_desktop_recorder::RecordingMode;
     use greentic_desktop_session::{BootstrapAction, BrowserKind};
     use std::fs;
