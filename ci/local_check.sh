@@ -119,6 +119,14 @@ if rg -n \
   exit 1
 fi
 
+if [ "${GREENTIC_LIVE_DESKTOP_TESTS:-0}" = "1" ]; then
+  header "live desktop validation"
+  bash ci/live_desktop_check.sh
+else
+  header "live desktop validation"
+  printf 'Skipped. Set GREENTIC_LIVE_DESKTOP_TESTS=1 to run real desktop app validation on this machine.\n'
+fi
+
 header "cargo build"
 cargo build --all-features
 

@@ -34,6 +34,7 @@ pub fn linux_x11_capabilities() -> AdapterCapabilities {
             "linux.find_element",
             "linux.click_element",
             "linux.type_text",
+            "linux.press_shortcut",
             "linux.read_text",
             "linux.assert_visible",
             "linux.screenshot",
@@ -698,6 +699,17 @@ fn execute_x11_step(step: &RunnerStep) -> AdapterResult<String> {
             run_command("xdotool", ["type", "--clearmodifiers", value])?;
             Ok("typed through XTest/xdotool".to_owned())
         }
+        "linux.press_shortcut" => {
+            let shortcut = step.value.as_deref().ok_or_else(|| {
+                AdapterError::ExecutionFailed(
+                    "linux.press_shortcut requires a shortcut such as Ctrl+N in step.value."
+                        .to_owned(),
+                )
+            })?;
+            let sequence = linux_xdotool_key_sequence(shortcut)?;
+            run_command("xdotool", ["key", "--clearmodifiers", sequence.as_str()])?;
+            Ok(format!("pressed Linux shortcut {shortcut}"))
+        }
         "linux.click_element" => {
             run_command("xdotool", ["click", "1"])?;
             Ok("clicked through XTest/xdotool".to_owned())
@@ -771,6 +783,60 @@ fn read_at_spi_text() -> AdapterResult<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+fn linux_xdotool_key_sequence(shortcut: &str) -> AdapterResult<String> {
+    let parts = shortcut
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some(key) = parts.last() else {
+        return Err(AdapterError::ExecutionFailed(
+            "shortcut must include a key, for example Ctrl+N.".to_owned(),
+        ));
+    };
+    let mut sequence = Vec::new();
+    for modifier in &parts[..parts.len().saturating_sub(1)] {
+        sequence.push(match modifier.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "ctrl".to_owned(),
+            "shift" => "shift".to_owned(),
+            "alt" | "option" => "alt".to_owned(),
+            "super" | "meta" | "win" | "windows" => "super".to_owned(),
+            other => {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "unsupported Linux shortcut modifier {other}"
+                )))
+            }
+        });
+    }
+    sequence.push(linux_xdotool_key(key));
+    Ok(sequence.join("+"))
+}
+
+fn linux_xdotool_key(key: &str) -> String {
+    match key
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+        .as_str()
+    {
+        "return" | "enter" => "Return".to_owned(),
+        "tab" => "Tab".to_owned(),
+        "escape" | "esc" => "Escape".to_owned(),
+        "delete" | "del" => "Delete".to_owned(),
+        "backspace" => "BackSpace".to_owned(),
+        "home" => "Home".to_owned(),
+        "end" => "End".to_owned(),
+        "pageup" | "pgup" => "Page_Up".to_owned(),
+        "pagedown" | "pgdn" => "Page_Down".to_owned(),
+        "left" | "leftarrow" => "Left".to_owned(),
+        "right" | "rightarrow" => "Right".to_owned(),
+        "down" | "downarrow" => "Down".to_owned(),
+        "up" | "uparrow" => "Up".to_owned(),
+        key if key.starts_with('f') && key[1..].parse::<u8>().is_ok() => key.to_ascii_uppercase(),
+        key => key.to_owned(),
+    }
 }
 
 fn x11_screenshot(path: &Path) -> AdapterResult<()> {
@@ -1347,6 +1413,22 @@ mod tests {
         assert!(
             error.to_string().contains("intentionally unsupported"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn maps_linux_xdotool_shortcuts_to_key_sequences() {
+        assert_eq!(
+            linux_xdotool_key_sequence("Return").expect("return shortcut"),
+            "Return"
+        );
+        assert_eq!(
+            linux_xdotool_key_sequence("Ctrl+PageUp").expect("page shortcut"),
+            "ctrl+Page_Up"
+        );
+        assert_eq!(
+            linux_xdotool_key_sequence("Ctrl+Shift+N").expect("modified shortcut"),
+            "ctrl+shift+n"
         );
     }
 

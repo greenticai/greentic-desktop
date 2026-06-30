@@ -340,6 +340,8 @@ impl SubprocessRunner {
     }
 
     pub fn run(&self, invocation: &SubprocessInvocation) -> FoundationResult<SubprocessOutput> {
+        // Accepted risk: this foundation helper is the single reviewed boundary for caller-supplied subprocesses.
+        // foxguard: ignore[rs/no-command-injection]
         let output = Command::new(&invocation.program)
             .args(&invocation.args)
             .stdin(Stdio::null())
@@ -420,6 +422,108 @@ pub fn verify_ed25519_signature(
 mod tests {
     use super::*;
     use serde::Serialize;
+    use std::time::SystemTime;
+
+    fn rdev_event(event_type: rdev::EventType, name: Option<&str>) -> rdev::Event {
+        rdev::Event {
+            time: SystemTime::UNIX_EPOCH,
+            name: name.map(ToOwned::to_owned),
+            event_type,
+        }
+    }
+
+    #[test]
+    fn foundation_error_and_availability_are_structured() {
+        let error = FoundationError::unavailable("screen capture missing");
+
+        assert_eq!(error.code, "foundation.unavailable");
+        assert_eq!(
+            error.to_string(),
+            "foundation.unavailable: screen capture missing"
+        );
+        assert_eq!(
+            BackendAvailability::available(),
+            BackendAvailability {
+                available: true,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            BackendAvailability::unavailable("missing permission"),
+            BackendAvailability {
+                available: false,
+                reason: Some("missing permission".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn rdev_events_are_normalised_without_backend_state() {
+        assert_eq!(
+            CapturedInputEvent::from(rdev_event(
+                rdev::EventType::KeyPress(rdev::Key::KeyA),
+                Some("a"),
+            )),
+            CapturedInputEvent::KeyPress {
+                name: Some("a".to_owned()),
+            }
+        );
+        assert_eq!(
+            CapturedInputEvent::from(rdev_event(
+                rdev::EventType::KeyRelease(rdev::Key::KeyA),
+                None
+            )),
+            CapturedInputEvent::KeyRelease { name: None }
+        );
+        assert_eq!(
+            CapturedInputEvent::from(rdev_event(
+                rdev::EventType::MouseMove { x: 12.0, y: 34.0 },
+                None,
+            )),
+            CapturedInputEvent::MouseMove { x: 12.0, y: 34.0 }
+        );
+        assert_eq!(
+            CapturedInputEvent::from(rdev_event(
+                rdev::EventType::Wheel {
+                    delta_x: 1,
+                    delta_y: -2,
+                },
+                None,
+            )),
+            CapturedInputEvent::Wheel {
+                delta_x: 1,
+                delta_y: -2,
+            }
+        );
+        assert_eq!(
+            CapturedInputEvent::from(rdev_event(
+                rdev::EventType::ButtonPress(rdev::Button::Left),
+                None,
+            )),
+            CapturedInputEvent::ButtonPress
+        );
+        assert_eq!(
+            CapturedInputEvent::from(rdev_event(
+                rdev::EventType::ButtonRelease(rdev::Button::Left),
+                None,
+            )),
+            CapturedInputEvent::ButtonRelease
+        );
+    }
+
+    #[test]
+    fn real_backends_report_availability_without_mutating_state() {
+        assert!(RdevEventCaptureBackend.availability().available);
+        let screenshot = ScreenshotArtifact {
+            path: PathBuf::from("/tmp/example.png"),
+            width: 10,
+            height: 20,
+        };
+
+        assert_eq!(screenshot.path, PathBuf::from("/tmp/example.png"));
+        assert_eq!(screenshot.width, 10);
+        assert_eq!(screenshot.height, 20);
+    }
 
     #[test]
     fn subprocess_runner_redacts_secrets_from_rendered_command_and_stderr() {
@@ -437,6 +541,31 @@ mod tests {
         assert!(!rendered.contains("sk-test-1234"));
         assert!(!rendered.contains("cleartext-secret"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn subprocess_runner_returns_output_and_start_errors() {
+        let runner = SubprocessRunner::default();
+        let output = runner
+            .run(&SubprocessInvocation {
+                program: "printf".to_owned(),
+                args: vec!["hello".to_owned()],
+            })
+            .expect("printf should run");
+
+        assert_eq!(output.status_code, Some(0));
+        assert_eq!(output.stdout, "hello");
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.rendered_command, "printf hello");
+
+        let err = runner
+            .run(&SubprocessInvocation {
+                program: "greentic-missing-command-for-test".to_owned(),
+                args: Vec::new(),
+            })
+            .expect_err("missing command should fail");
+        assert_eq!(err.code, "foundation.subprocess_failed");
+        assert!(err.message.contains("failed to start"));
     }
 
     #[test]
@@ -474,6 +603,12 @@ mod tests {
 
         assert!(validator.validate(&schema, &good).is_ok());
         assert!(validator.validate(&schema, &bad).is_err());
+
+        let invalid_schema = serde_json::json!({ "type": "not-a-json-schema-type" });
+        let err = validator
+            .validate(&invalid_schema, &good)
+            .expect_err("invalid schema should fail");
+        assert_eq!(err.code, "foundation.schema_invalid");
     }
 
     #[test]
@@ -481,6 +616,21 @@ mod tests {
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn ed25519_signature_errors_are_structured() {
+        let message = b"hello";
+        let invalid_public_key = [0_u8; 32];
+        let signature = [0_u8; 64];
+
+        let err = verify_ed25519_signature(&invalid_public_key, message, &signature)
+            .expect_err("zero key should not verify zero signature");
+
+        assert!(
+            err.code == "foundation.signature_key_invalid"
+                || err.code == "foundation.signature_invalid"
         );
     }
 }

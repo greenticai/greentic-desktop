@@ -19,6 +19,17 @@ pub struct ResolvedArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRunnerArtifact {
+    pub runner_id: String,
+    pub version: String,
+    pub source_uri: String,
+    pub resolved_uri: String,
+    pub digest: String,
+    pub local_path: PathBuf,
+    pub phases: Vec<ResolutionPhase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionPhase {
     pub phase: String,
     pub status: String,
@@ -244,6 +255,88 @@ impl GreenticDistributorClient {
             ],
         })
     }
+
+    pub fn resolve_runner(
+        &self,
+        source: impl AsRef<str>,
+    ) -> Result<ResolvedRunnerArtifact, DistributorError> {
+        let source = source.as_ref().trim();
+        if source.is_empty() {
+            return Err(DistributorError::InvalidSource(source.to_owned()));
+        }
+
+        let normalized = normalize_source(source);
+        let (runner_id, version, resolved_uri) = match scheme(&normalized) {
+            "store" => {
+                let id = normalized.trim_start_matches("store://");
+                (
+                    store_alias_to_runner_id(id),
+                    "latest".to_owned(),
+                    format!("oci://ghcr.io/greenticai/greentic-desktop/runners/{id}:latest"),
+                )
+            }
+            "oci" => {
+                let (id, version) = runner_id_and_version_from_oci(&normalized)?;
+                (id, version, normalized.clone())
+            }
+            "repo" => {
+                let id = normalized
+                    .rsplit('/')
+                    .next()
+                    .ok_or_else(|| DistributorError::InvalidSource(normalized.clone()))?;
+                let version = "latest".to_owned();
+                (
+                    store_alias_to_runner_id(id),
+                    version.clone(),
+                    format!("oci://registry.greentic.local/runners/{id}:{version}"),
+                )
+            }
+            "file" => {
+                let path = normalized.trim_start_matches("file://");
+                let id = Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("local.runner")
+                    .trim_end_matches(".runner.yaml")
+                    .trim_end_matches(".yaml")
+                    .trim_end_matches(".yml");
+                (
+                    store_alias_to_runner_id(id),
+                    "local".to_owned(),
+                    normalized.clone(),
+                )
+            }
+            other => return Err(DistributorError::UnsupportedScheme(other.to_owned())),
+        };
+
+        let local_path = self.cache_dir.join("runners").join(format!(
+            "{}-{}.yaml",
+            safe_cache_name(&runner_id),
+            version
+        ));
+        let digest = format!("sha256:{:016x}", fnv1a64(resolved_uri.as_bytes()));
+        Ok(ResolvedRunnerArtifact {
+            runner_id,
+            version,
+            source_uri: normalized,
+            resolved_uri,
+            digest,
+            local_path,
+            phases: vec![
+                phase("resolving", "complete", "runner source resolved"),
+                phase(
+                    "downloading",
+                    "pending",
+                    "runner artifact must exist in cache",
+                ),
+                phase(
+                    "verifying",
+                    "pending",
+                    "runner artifact not verified until imported",
+                ),
+            ],
+        })
+    }
 }
 
 impl StoreIndex {
@@ -341,6 +434,14 @@ fn store_alias_to_extension_id(alias: &str) -> String {
     }
 }
 
+fn store_alias_to_runner_id(alias: &str) -> String {
+    alias
+        .trim_end_matches(".runner")
+        .trim_end_matches(".yaml")
+        .trim_end_matches(".yml")
+        .replace('-', ".")
+}
+
 fn extension_id_and_version_from_oci(source: &str) -> Result<(String, String), DistributorError> {
     let artifact = source
         .rsplit('/')
@@ -350,6 +451,30 @@ fn extension_id_and_version_from_oci(source: &str) -> Result<(String, String), D
         .rsplit_once(':')
         .map_or((artifact, "latest"), |(name, version)| (name, version));
     Ok((store_alias_to_extension_id(name), version.to_owned()))
+}
+
+fn runner_id_and_version_from_oci(source: &str) -> Result<(String, String), DistributorError> {
+    let artifact = source
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| DistributorError::InvalidSource(source.to_owned()))?;
+    let (name, version) = artifact
+        .rsplit_once(':')
+        .map_or((artifact, "latest"), |(name, version)| (name, version));
+    Ok((store_alias_to_runner_id(name), version.to_owned()))
+}
+
+fn safe_cache_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn phase(phase: &str, status: &str, message: &str) -> ResolutionPhase {
@@ -444,6 +569,33 @@ mod tests {
             .resolve("file://./playwright.extension.tar.zst")
             .expect("file should resolve");
         assert_eq!(file.extension_id, "greentic.desktop.playwright");
+    }
+
+    #[test]
+    fn resolves_runner_sources_to_cache_paths() {
+        let client = GreenticDistributorClient::new("/tmp/greentic-cache");
+        let store = client
+            .resolve_runner("store://word-hello-bold-save")
+            .expect("store runner should resolve");
+        assert_eq!(store.runner_id, "word.hello.bold.save");
+        assert_eq!(
+            store.resolved_uri,
+            "oci://ghcr.io/greenticai/greentic-desktop/runners/word-hello-bold-save:latest"
+        );
+        assert!(store
+            .local_path
+            .ends_with("runners/word.hello.bold.save-latest.yaml"));
+
+        let oci = client
+            .resolve_runner("oci://ghcr.io/greenticai/greentic-desktop/runners/example.word:0.1.0")
+            .expect("oci runner should resolve");
+        assert_eq!(oci.runner_id, "example.word");
+        assert_eq!(oci.version, "0.1.0");
+
+        let repo = client
+            .resolve_runner("repo://tenant/runners/google-calculator-10x10")
+            .expect("repo runner should resolve");
+        assert_eq!(repo.runner_id, "google.calculator.10x10");
     }
 
     #[test]

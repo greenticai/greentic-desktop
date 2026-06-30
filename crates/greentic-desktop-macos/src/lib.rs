@@ -18,9 +18,127 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 pub const MACOS_ADAPTER_ID: &str = "greentic.desktop.macos.ax";
 pub const MACOS_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.macos.ax";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsLiveModalSummary {
+    pub blocking: bool,
+    pub summary: Option<String>,
+}
+
+pub fn macos_live_frontmost_app() -> Option<String> {
+    let output = run_osascript(
+        r#"tell application "System Events" to get name of first application process whose frontmost is true"#,
+    )
+    .ok()?;
+    let output = output.trim();
+    (!output.is_empty()).then(|| output.to_owned())
+}
+
+pub fn macos_live_modal_summary() -> MacOsLiveModalSummary {
+    let script = r#"
+set summaries to {}
+tell application "System Events"
+  repeat with processRef in application processes
+    try
+      repeat with windowRef in windows of processRef
+        set windowSummary to my describeWindow(processRef, windowRef)
+        if windowSummary is not "" then set end of summaries to windowSummary
+        try
+          repeat with sheetRef in sheets of windowRef
+            set sheetSummary to my describeWindow(processRef, sheetRef)
+            if sheetSummary is not "" then set end of summaries to sheetSummary
+          end repeat
+        end try
+      end repeat
+    end try
+  end repeat
+end tell
+if (count of summaries) is 0 then return "no-modal"
+return my joinList(summaries, " | ")
+
+on describeWindow(processRef, windowRef)
+  set isModal to false
+  try
+    set subroleValue to subrole of windowRef as text
+    if subroleValue contains "Dialog" then set isModal to true
+  end try
+  try
+    if (count of sheets of windowRef) > 0 then set isModal to true
+  end try
+  set parts to {}
+  try
+    set processName to name of processRef as text
+    if processName is not "" then set end of parts to "app=" & processName
+  end try
+  try
+    set windowName to name of windowRef as text
+    if windowName is not "" then set end of parts to "title=" & windowName
+  end try
+  try
+    repeat with itemRef in static texts of windowRef
+      try
+        set itemText to value of itemRef as text
+        if itemText is not "" then set end of parts to "text=" & itemText
+      end try
+      try
+        set itemName to name of itemRef as text
+        if itemName is not "" then set end of parts to "text=" & itemName
+      end try
+    end repeat
+  end try
+  try
+    set buttonsText to {}
+    repeat with buttonRef in buttons of windowRef
+      try
+        set buttonName to name of buttonRef as text
+        if buttonName is not "" then set end of buttonsText to buttonName
+      end try
+    end repeat
+    if (count of buttonsText) > 0 then set end of parts to "buttons=" & my joinList(buttonsText, ",")
+  end try
+  set summary to my joinList(parts, "; ")
+  if summary contains "already exists" then set isModal to true
+  if summary contains "permission to save" then set isModal to true
+  if summary contains "replace" then set isModal to true
+  if summary contains "Do you want" then set isModal to true
+  if isModal then return summary
+  return ""
+end describeWindow
+
+on joinList(items, delimiter)
+  set oldDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to delimiter
+  set joined to items as text
+  set AppleScript's text item delimiters to oldDelimiters
+  return joined
+end joinList
+"#;
+    match run_osascript(script) {
+        Ok(output) => {
+            let summary = output.trim().to_owned();
+            if summary.is_empty() || summary == "no-modal" {
+                MacOsLiveModalSummary {
+                    blocking: false,
+                    summary: None,
+                }
+            } else {
+                MacOsLiveModalSummary {
+                    blocking: true,
+                    summary: Some(summary),
+                }
+            }
+        }
+        Err(err) => MacOsLiveModalSummary {
+            blocking: true,
+            summary: Some(format!("modal probe failed: {err}")),
+        },
+    }
+}
 
 pub fn macos_capabilities() -> AdapterCapabilities {
     AdapterCapabilities::new(
@@ -667,13 +785,49 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
 }
 
 fn activate_macos_app(app: &str) -> AdapterResult<()> {
-    let app_name = app.trim_end_matches(".app");
-    run_command("open", ["-a", app_name])?;
+    let app_name = macos_app_script_name(app);
+    let app_path = Path::new(app);
+    if app_path.exists() {
+        run_command("open", [app])?;
+    } else if let Err(app_error) = run_command("open", ["-a", &app_name]) {
+        if let Some(bundle_id) = known_macos_bundle_id(&app_name) {
+            run_command("open", ["-b", bundle_id]).map_err(|bundle_error| {
+                AdapterError::ExecutionFailed(format!(
+                    "{app_error}; bundle fallback {bundle_id} also failed: {bundle_error}"
+                ))
+            })?;
+        } else {
+            return Err(app_error);
+        }
+    }
     run_osascript(&format!(
         "tell application {} to activate",
-        apple_quote(app_name)
+        apple_quote(&app_name)
     ))?;
     Ok(())
+}
+
+fn macos_app_script_name(app: &str) -> String {
+    let path = Path::new(app);
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|_| app.contains('/') || app.ends_with(".app"))
+        .map(str::to_owned)
+        .unwrap_or_else(|| app.trim_end_matches(".app").to_owned())
+}
+
+fn known_macos_bundle_id(app: &str) -> Option<&'static str> {
+    let normalized = app
+        .trim()
+        .trim_end_matches(".app")
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "");
+    match normalized.as_str() {
+        "microsoftexcel" | "excel" => Some("com.microsoft.Excel"),
+        "microsoftword" | "word" => Some("com.microsoft.Word"),
+        "microsoftpowerpoint" | "powerpoint" => Some("com.microsoft.Powerpoint"),
+        _ => None,
+    }
 }
 
 fn macos_window_exists(app: &str, expected: &str) -> AdapterResult<bool> {
@@ -894,18 +1048,22 @@ fn macos_press_shortcut(app: &str, shortcut: &str) -> AdapterResult<()> {
     } else {
         format!(" using {{{}}}", modifiers.join(", "))
     };
+    let key_action = if let Some(key_code) = macos_special_key_code(&key) {
+        format!("key code {key_code}{using}")
+    } else {
+        format!("keystroke {}{using}", apple_quote(&key))
+    };
     let script = format!(
         r#"
 tell application "System Events"
   tell process {app}
     set frontmost to true
-    keystroke {key}{using}
+    {key_action}
   end tell
 end tell
 "#,
         app = apple_quote(app),
-        key = apple_quote(&key),
-        using = using
+        key_action = key_action
     );
     run_osascript(&script)?;
     if shortcut_is_new_document(&key, &modifiers) {
@@ -937,6 +1095,7 @@ tell application "System Events"
     end try
 
     set defaultButtonNames to {{"Create", "Choose", "Open", "OK"}}
+    set defaultTemplateNames to {{"Blank Workbook", "Blank Document", "Blank Presentation"}}
     repeat with defaultButtonName in defaultButtonNames
       try
         if exists button (defaultButtonName as text) of targetWindow then
@@ -950,7 +1109,23 @@ tell application "System Events"
       repeat with candidate in (entire contents of targetWindow)
         try
           set candidateRole to role of candidate as text
-          set candidateName to name of candidate as text
+          set candidateName to my accessibleLabel(candidate)
+          repeat with defaultTemplateName in defaultTemplateNames
+            if candidateName contains (defaultTemplateName as text) then
+              click candidate
+              delay 0.2
+              repeat with defaultButtonName in defaultButtonNames
+                try
+                  if exists button (defaultButtonName as text) of targetWindow then
+                    click button (defaultButtonName as text) of targetWindow
+                    return "confirmed-template"
+                  end if
+                end try
+              end repeat
+              key code 36
+              return "confirmed-template"
+            end if
+          end repeat
           if candidateRole is "AXButton" then
             repeat with defaultButtonName in defaultButtonNames
               if candidateName is (defaultButtonName as text) then
@@ -965,6 +1140,22 @@ tell application "System Events"
   end tell
 end tell
 return "not-needed"
+
+on accessibleLabel(candidate)
+  try
+    set candidateName to name of candidate as text
+    if candidateName is not "" then return candidateName
+  end try
+  try
+    set candidateDescription to description of candidate as text
+    if candidateDescription is not "" then return candidateDescription
+  end try
+  try
+    set candidateValue to value of candidate as text
+    if candidateValue is not "" then return candidateValue
+  end try
+  return ""
+end accessibleLabel
 "#,
         app = apple_quote(app)
     )
@@ -1008,7 +1199,7 @@ end tell
 }
 
 fn macos_focus_document(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
-    if is_active_document_locator(target) {
+    if should_use_active_document_focus(target) {
         return macos_focus_active_document(app);
     }
 
@@ -1036,6 +1227,10 @@ end tell
         predicate = predicate
     );
     run_osascript(&script).map(|_| ())
+}
+
+fn should_use_active_document_focus(target: &LocatorTarget) -> bool {
+    target == &LocatorTarget::default() || is_active_document_locator(target)
 }
 
 fn macos_focus_active_document(app: &str) -> AdapterResult<()> {
@@ -1112,27 +1307,598 @@ fn macos_save_as(app: &str, path: &str) -> AdapterResult<()> {
             ))
         })?;
     }
-    let path = expanded.to_string_lossy();
-    let script = format!(
+    let file_name = expanded
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| {
+            AdapterError::ExecutionFailed(format!(
+                "macos.save_as path has no file name: {}",
+                expanded.display()
+            ))
+        })?;
+    let parent = expanded.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent.to_string_lossy();
+    let previous_modified = path_modified_at(&expanded);
+    let _ = macos_confirm_existing_save_dialog(app, &expanded, previous_modified);
+    let script = macos_save_as_script(app, file_name, &parent);
+    let save_panel_result = run_osascript(&script)?;
+    if save_panel_result.contains("no-save-panel") {
+        return Err(AdapterError::ExecutionFailed(format!(
+            "macos.save_as could not open a Save As panel for {}",
+            expanded.display()
+        )));
+    }
+    let ui_save_error = match macos_confirm_until_saved(
+        app,
+        &expanded,
+        previous_modified,
+        Duration::from_secs(3),
+    ) {
+        Ok(()) => return Ok(()),
+        Err(reason) => reason,
+    };
+    if is_terminal_save_ui_error(&ui_save_error) {
+        return Err(AdapterError::ExecutionFailed(format!(
+            "macos.save_as did not create or update {}. {ui_save_error}",
+            expanded.display()
+        )));
+    }
+    macos_application_save_as_fallback(app, &expanded, previous_modified).and_then(|_| {
+            macos_confirm_until_saved(app, &expanded, previous_modified, Duration::from_secs(4))
+                .map_err(|reason| {
+                    AdapterError::ExecutionFailed(format!(
+                        "macos.save_as did not create or update {}. UI save did not complete: {ui_save_error}; application fallback did not complete: {reason}",
+                        expanded.display(),
+                    ))
+                })
+        })
+}
+
+fn is_terminal_save_ui_error(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("permission to save")
+        || reason.contains("write access")
+        || reason.contains("select a different location")
+}
+
+fn macos_confirm_existing_save_dialog(
+    app: &str,
+    path: &Path,
+    previous_modified: Option<SystemTime>,
+) -> Result<(), String> {
+    let output =
+        run_osascript(&macos_save_confirmation_script(app)).map_err(|err| err.to_string())?;
+    let output = output.trim();
+    if output.starts_with("clicked ") {
+        return wait_for_saved_path(path, previous_modified, Duration::from_secs(2)).map_err(
+            |_| {
+                format!(
+                    "clicked existing save confirmation but {} was not updated",
+                    path.display()
+                )
+            },
+        );
+    }
+    Err(output.to_owned())
+}
+
+fn macos_save_as_script(app: &str, file_name: &str, parent_folder: &str) -> String {
+    format!(
         r#"
 tell application "System Events"
   tell process {app}
     set frontmost to true
     keystroke "s" using {{command down, shift down}}
-    delay 0.5
+    set hasSavePanel to false
+    repeat 20 times
+      try
+        if exists sheet 1 of front window then
+          set hasSavePanel to true
+          exit repeat
+        end if
+      end try
+      try
+        if exists text field 1 of front window then
+          set hasSavePanel to true
+          exit repeat
+        end if
+      end try
+      delay 0.1
+    end repeat
+    if hasSavePanel is false then
+      try
+        click menu item "Save As..." of menu "File" of menu bar 1
+      end try
+      try
+        click menu item "Save As…" of menu "File" of menu bar 1
+      end try
+      repeat 20 times
+        try
+          if exists sheet 1 of front window then
+            set hasSavePanel to true
+            exit repeat
+          end if
+        end try
+        try
+          if exists text field 1 of front window then
+            set hasSavePanel to true
+            exit repeat
+          end if
+        end try
+        delay 0.1
+      end repeat
+    end if
+    if hasSavePanel is false then return "no-save-panel"
+    set didSetName to false
+    try
+      if exists sheet 1 of front window then
+        set value of text field 1 of sheet 1 of front window to {file_name}
+        set didSetName to true
+      end if
+    end try
+    if didSetName is false then
+      try
+        set value of text field 1 of front window to {file_name}
+        set didSetName to true
+      end try
+    end if
+    if didSetName is false then
+      keystroke "a" using {{command down}}
+      keystroke {file_name}
+    end if
     keystroke "g" using {{command down, shift down}}
     delay 0.2
-    keystroke {path}
+    keystroke {parent_folder}
     key code 36
-    delay 0.2
+    repeat 20 times
+      delay 0.1
+      try
+        if exists button "Save" of sheet 1 of front window then
+          click button "Save" of sheet 1 of front window
+          return "clicked-save"
+        end if
+      end try
+      try
+        if exists button "Save" of front window then
+          click button "Save" of front window
+          return "clicked-save"
+        end if
+      end try
+    end repeat
     key code 36
+    return "pressed-return-fallback"
   end tell
 end tell
 "#,
         app = apple_quote(app),
-        path = apple_quote(&path)
-    );
-    run_osascript(&script).map(|_| ())
+        file_name = apple_quote(file_name),
+        parent_folder = apple_quote(parent_folder)
+    )
+}
+
+fn macos_confirm_until_saved(
+    app: &str,
+    path: &Path,
+    previous_modified: Option<SystemTime>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_dialog = String::new();
+    while Instant::now() < deadline {
+        match run_osascript(&macos_save_confirmation_script(app)) {
+            Ok(output) => {
+                let output = output.trim();
+                if !output.is_empty() && output != "no-dialog" {
+                    last_dialog = output.to_owned();
+                }
+            }
+            Err(err) => last_dialog = err.to_string(),
+        }
+        if saved_path_updated(path, previous_modified) {
+            let remaining_dialog = run_osascript(&macos_save_confirmation_script(app))
+                .map(|output| output.trim().to_owned())
+                .unwrap_or_else(|err| err.to_string());
+            if remaining_dialog.is_empty() || remaining_dialog == "no-dialog" {
+                return Ok(());
+            }
+            last_dialog = remaining_dialog;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if saved_path_updated(path, previous_modified) {
+        let remaining_dialog = run_osascript(&macos_save_confirmation_script(app))
+            .map(|output| output.trim().to_owned())
+            .unwrap_or_else(|err| err.to_string());
+        if remaining_dialog.is_empty() || remaining_dialog == "no-dialog" {
+            return Ok(());
+        }
+        last_dialog = remaining_dialog;
+    }
+    if last_dialog.trim().is_empty() {
+        last_dialog = "No save confirmation dialog was visible.".to_owned();
+    }
+    Err(last_dialog)
+}
+
+fn macos_application_save_as_fallback(
+    app: &str,
+    path: &Path,
+    previous_modified: Option<SystemTime>,
+) -> AdapterResult<()> {
+    let path_display = path.to_string_lossy();
+    let scripts = macos_application_save_as_fallback_scripts(app, &path_display);
+    let mut errors = Vec::new();
+    for script in scripts {
+        match run_osascript(&script) {
+            Ok(_)
+                if wait_for_saved_path(path, previous_modified, Duration::from_millis(500))
+                    .is_ok() =>
+            {
+                return Ok(())
+            }
+            Ok(_) => errors.push("save command returned without creating the file".to_owned()),
+            Err(err) => errors.push(err.to_string()),
+        }
+    }
+    Err(AdapterError::ExecutionFailed(format!(
+        "application-level save fallback failed: {}",
+        errors.join("; ")
+    )))
+}
+
+fn macos_application_save_as_fallback_scripts(app: &str, path: &str) -> Vec<String> {
+    let app = apple_quote(app);
+    let path = apple_quote(path);
+    vec![
+        format!(
+            r#"
+tell application {app}
+  activate
+  save front document in POSIX file {path}
+end tell
+"#
+        ),
+        format!(
+            r#"
+tell application {app}
+  activate
+  save document 1 in POSIX file {path}
+end tell
+"#
+        ),
+        format!(
+            r#"
+tell application {app}
+  activate
+  save active workbook in POSIX file {path}
+end tell
+"#
+        ),
+        format!(
+            r#"
+tell application {app}
+  activate
+  save workbook as active workbook filename {path}
+end tell
+"#
+        ),
+    ]
+}
+
+fn macos_save_confirmation_script(app: &str) -> String {
+    format!(
+        r#"
+set confirmationButtons to {{"Yes", "Continue", "OK", "Replace", "Replace File", "Overwrite", "Save", "Save File", "Keep Current Format", "Use .xls", "Use Excel 97-2004 Workbook"}}
+set seenDialog to false
+set dialogSummary to ""
+set clickedButtons to {{}}
+tell application "System Events"
+  tell process {app}
+    set frontmost to true
+    set processRef to it
+    repeat 8 times
+      set clickedThisPass to false
+      try
+        repeat with windowRef in windows
+          try
+            if my isDialogLike(windowRef) then
+              set windowSummary to my describeDialog(windowRef)
+              set seenDialog to true
+              set dialogSummary to windowSummary
+              if windowSummary contains "permission to save" then
+                return "blocked by save confirmation: " & windowSummary
+              end if
+              if windowSummary contains "write access" then
+                return "blocked by save confirmation: " & windowSummary
+              end if
+              if windowSummary contains "select a different location" then
+                return "blocked by save confirmation: " & windowSummary
+              end if
+            end if
+          end try
+          repeat with buttonName in confirmationButtons
+            try
+              set clickedLabel to my clickButtonNamed(windowRef, buttonName as text)
+              if clickedLabel is not "" then
+                set end of clickedButtons to clickedLabel
+                set clickedThisPass to true
+                exit repeat
+              end if
+            end try
+          end repeat
+          if clickedThisPass then exit repeat
+          try
+            repeat with sheetRef in sheets of windowRef
+              try
+                set sheetSummary to my describeDialog(sheetRef)
+                set seenDialog to true
+                set dialogSummary to sheetSummary
+                if sheetSummary contains "permission to save" then
+                  return "blocked by save confirmation: " & sheetSummary
+                end if
+                if sheetSummary contains "write access" then
+                  return "blocked by save confirmation: " & sheetSummary
+                end if
+                if sheetSummary contains "select a different location" then
+                  return "blocked by save confirmation: " & sheetSummary
+                end if
+              end try
+              repeat with buttonName in confirmationButtons
+                try
+                  set clickedLabel to my clickButtonNamed(sheetRef, buttonName as text)
+                  if clickedLabel is not "" then
+                    set end of clickedButtons to clickedLabel
+                    set clickedThisPass to true
+                    exit repeat
+                  end if
+                end try
+              end repeat
+              if clickedThisPass then exit repeat
+            end repeat
+          end try
+          if clickedThisPass then exit repeat
+        end repeat
+      end try
+      if clickedThisPass is false then
+        repeat with buttonName in confirmationButtons
+          try
+            if exists button (buttonName as text) of front window then
+              my pressButton(button (buttonName as text) of front window)
+              set end of clickedButtons to "pressed " & (buttonName as text) & " in front window"
+              set clickedThisPass to true
+              exit repeat
+            end if
+          end try
+          try
+            if exists sheet 1 of front window then
+              set dialogSummary to my describeDialog(sheet 1 of front window)
+              if dialogSummary is not "" then set seenDialog to true
+              if exists button (buttonName as text) of sheet 1 of front window then
+                my pressButton(button (buttonName as text) of sheet 1 of front window)
+                set end of clickedButtons to "pressed " & (buttonName as text) & " in sheet"
+                set clickedThisPass to true
+                exit repeat
+              end if
+            end if
+          end try
+        end repeat
+      end if
+      if clickedThisPass is false then
+        repeat with buttonName in confirmationButtons
+          try
+            set clickedLabel to my clickButtonNamed(processRef, buttonName as text)
+            if clickedLabel is not "" then
+              set end of clickedButtons to clickedLabel & " from process contents"
+              set clickedThisPass to true
+              exit repeat
+            end if
+          end try
+        end repeat
+      end if
+      if clickedThisPass is false then exit repeat
+      delay 0.2
+    end repeat
+    if (count of clickedButtons) > 0 then
+      return "clicked " & my joinList(clickedButtons, "; ")
+    end if
+    try
+      repeat with windowRef in windows
+        if my isDialogLike(windowRef) then
+          set dialogSummary to my describeDialog(windowRef)
+          set seenDialog to true
+        end if
+        try
+          repeat with sheetRef in sheets of windowRef
+            set dialogSummary to my describeDialog(sheetRef)
+            set seenDialog to true
+          end repeat
+        end try
+      end repeat
+    end try
+  end tell
+end tell
+if seenDialog then return "blocked by save confirmation: " & dialogSummary
+return "no-dialog"
+
+on pressButton(buttonRef)
+  try
+    perform action "AXPress" of buttonRef
+    return
+  end try
+  click buttonRef
+end pressButton
+
+on clickButtonNamed(containerRef, buttonName)
+  try
+    if exists button buttonName of containerRef then
+      my pressButton(button buttonName of containerRef)
+      return "pressed " & buttonName
+    end if
+  end try
+  try
+    repeat with candidate in (entire contents of containerRef)
+      try
+        set candidateRole to role of candidate as text
+        set candidateName to my accessibleLabel(candidate)
+        if candidateRole is "AXButton" and my normalizedText(candidateName) is my normalizedText(buttonName) then
+          my pressButton(candidate)
+          return "pressed " & buttonName & " from nested contents"
+        end if
+      end try
+    end repeat
+  end try
+  return ""
+end clickButtonNamed
+
+on isDialogLike(windowRef)
+  try
+    set windowSubrole to subrole of windowRef as text
+    if windowSubrole contains "Dialog" then return true
+  end try
+  try
+    set windowRoleDescription to role description of windowRef as text
+    if windowRoleDescription contains "dialog" then return true
+  end try
+  try
+    if (count of sheets of windowRef) > 0 then return true
+  end try
+  try
+    set summaryText to my describeDialog(windowRef)
+    if summaryText contains "already exists" then return true
+    if summaryText contains "replace" then return true
+    if summaryText contains "permission to save" then return true
+    if summaryText contains "continue using" then return true
+  end try
+  return false
+end isDialogLike
+
+on accessibleLabel(candidate)
+  try
+    set candidateName to name of candidate as text
+    if candidateName is not "" then return candidateName
+  end try
+  try
+    set candidateDescription to description of candidate as text
+    if candidateDescription is not "" then return candidateDescription
+  end try
+  try
+    set candidateValue to value of candidate as text
+    if candidateValue is not "" then return candidateValue
+  end try
+  return ""
+end accessibleLabel
+
+on describeDialog(dialogObject)
+  set parts to {{}}
+  try
+    set dialogName to name of dialogObject as text
+    if dialogName is not "" then set end of parts to "title=" & dialogName
+  end try
+  try
+    set staticTexts to static texts of dialogObject
+    repeat with itemRef in staticTexts
+      try
+        set itemText to value of itemRef as text
+        if itemText is not "" then set end of parts to "text=" & itemText
+      end try
+      try
+        set itemName to name of itemRef as text
+        if itemName is not "" then set end of parts to "text=" & itemName
+      end try
+    end repeat
+  end try
+  try
+    repeat with candidate in (entire contents of dialogObject)
+      try
+        set candidateRole to role of candidate as text
+        if candidateRole is "AXStaticText" then
+          set candidateName to name of candidate as text
+          if candidateName is not "" then set end of parts to "text=" & candidateName
+        end if
+      end try
+    end repeat
+  end try
+  try
+    set buttonNames to {{}}
+    repeat with buttonRef in buttons of dialogObject
+      try
+        set end of buttonNames to name of buttonRef as text
+      end try
+    end repeat
+    try
+      repeat with candidate in (entire contents of dialogObject)
+        try
+          set candidateRole to role of candidate as text
+          if candidateRole is "AXButton" then
+            set candidateName to name of candidate as text
+            if candidateName is not "" then set end of buttonNames to candidateName
+          end if
+        end try
+      end repeat
+    end try
+    if (count of buttonNames) > 0 then set end of parts to "buttons=" & my joinList(buttonNames, ",")
+  end try
+  return my joinList(parts, "; ")
+end describeDialog
+
+on normalizedText(rawText)
+  set textValue to rawText as text
+  set textValue to my replaceText(textValue, "…", "...")
+  return textValue
+end normalizedText
+
+on replaceText(rawText, searchText, replacementText)
+  set oldDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to searchText
+  set textItems to text items of rawText
+  set AppleScript's text item delimiters to replacementText
+  set replacedText to textItems as text
+  set AppleScript's text item delimiters to oldDelimiters
+  return replacedText
+end replaceText
+
+on joinList(items, delimiter)
+  set oldDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to delimiter
+  set joined to items as text
+  set AppleScript's text item delimiters to oldDelimiters
+  return joined
+end joinList
+"#,
+        app = apple_quote(app)
+    )
+}
+
+fn wait_for_saved_path(
+    path: &Path,
+    previous_modified: Option<SystemTime>,
+    timeout: Duration,
+) -> Result<(), ()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if saved_path_updated(path, previous_modified) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    saved_path_updated(path, previous_modified)
+        .then_some(())
+        .ok_or(())
+}
+
+fn saved_path_updated(path: &Path, previous_modified: Option<SystemTime>) -> bool {
+    match (path_modified_at(path), previous_modified) {
+        (Some(current), Some(previous)) => current > previous,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn path_modified_at(path: &Path) -> Option<SystemTime> {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 fn take_macos_screenshot(path: &Path) -> AdapterResult<()> {
@@ -1187,7 +1953,60 @@ fn run_command<const N: usize>(program: &str, args: [&str; N]) -> AdapterResult<
 }
 
 fn run_osascript(script: &str) -> AdapterResult<String> {
-    run_command("osascript", ["-e", script])
+    run_command_with_timeout("osascript", ["-e", script], Duration::from_secs(8))
+}
+
+fn run_command_with_timeout<I, S>(
+    program: &str,
+    args: I,
+    timeout: Duration,
+) -> AdapterResult<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    // Accepted risk: this private helper is called only with adapter-owned executable literals.
+    // foxguard: ignore[rs/no-command-injection]
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run {program}: {err}")))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().map_err(|err| {
+                    AdapterError::ExecutionFailed(format!("failed to read {program} output: {err}"))
+                })?;
+                if status.success() {
+                    return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "{program} failed: {}",
+                    stderr.trim()
+                )));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "{program} timed out after {} ms",
+                    timeout.as_millis()
+                )));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "failed to poll {program}: {err}"
+                )));
+            }
+        }
+    }
 }
 
 fn macos_locator_predicate(
@@ -1303,6 +2122,42 @@ fn macos_shortcut_parts(shortcut: &str) -> AdapterResult<(String, Vec<&'static s
         }
     }
     Ok(((*key).to_owned(), modifiers))
+}
+
+fn macos_special_key_code(key: &str) -> Option<u16> {
+    match key
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+        .as_str()
+    {
+        "return" | "enter" => Some(36),
+        "tab" => Some(48),
+        "escape" | "esc" => Some(53),
+        "delete" | "backspace" => Some(51),
+        "forwarddelete" => Some(117),
+        "home" => Some(115),
+        "end" => Some(119),
+        "pageup" | "pgup" => Some(116),
+        "pagedown" | "pgdn" => Some(121),
+        "left" | "leftarrow" => Some(123),
+        "right" | "rightarrow" => Some(124),
+        "down" | "downarrow" => Some(125),
+        "up" | "uparrow" => Some(126),
+        "f1" => Some(122),
+        "f2" => Some(120),
+        "f3" => Some(99),
+        "f4" => Some(118),
+        "f5" => Some(96),
+        "f6" => Some(97),
+        "f7" => Some(98),
+        "f8" => Some(100),
+        "f9" => Some(101),
+        "f10" => Some(109),
+        "f11" => Some(103),
+        "f12" => Some(111),
+        _ => None,
+    }
 }
 
 fn frontmost_app_script() -> &'static str {
@@ -1492,6 +2347,16 @@ mod tests {
     }
 
     #[test]
+    fn live_validation_probes_return_safe_summaries() {
+        let _ = macos_live_frontmost_app();
+        let summary = macos_live_modal_summary();
+
+        if summary.blocking {
+            assert!(summary.summary.is_some());
+        }
+    }
+
+    #[test]
     fn exposes_macos_accessibility_capabilities() {
         let capabilities = macos_capabilities();
 
@@ -1538,6 +2403,19 @@ mod tests {
         assert!(!shortcut_is_new_document("S", &["command down"]));
         let err = macos_shortcut_parts("Cmd+Hyper+N").expect_err("unsupported modifier");
         assert!(format!("{err}").contains("unsupported macOS shortcut modifier"));
+    }
+
+    #[test]
+    fn maps_named_shortcut_keys_to_macos_key_codes() {
+        let (key, modifiers) = macos_shortcut_parts("Return").expect("return shortcut");
+        assert_eq!(key, "Return");
+        assert!(modifiers.is_empty());
+        assert_eq!(macos_special_key_code(&key), Some(36));
+
+        let (key, modifiers) = macos_shortcut_parts("Control+PageUp").expect("page shortcut");
+        assert_eq!(key, "PageUp");
+        assert_eq!(modifiers, vec!["control down"]);
+        assert_eq!(macos_special_key_code(&key), Some(116));
     }
 
     #[test]
@@ -1674,6 +2552,88 @@ mod tests {
         assert!(script.contains("repeat with candidate in (entire contents of targetWindow)"));
         assert!(script.contains("focused-window-center"));
         assert!(!script.contains("whose role"));
+    }
+
+    #[test]
+    fn default_focus_target_uses_active_document_fallback() {
+        assert!(should_use_active_document_focus(&LocatorTarget::default()));
+
+        let target = LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                role: Some("document".to_owned()),
+                name: Some("active document".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+        assert!(should_use_active_document_focus(&target));
+    }
+
+    #[test]
+    fn save_dialog_confirmation_covers_common_office_buttons() {
+        let script = macos_save_confirmation_script("Microsoft Excel");
+
+        assert!(script.contains("Keep Current Format"));
+        assert!(script.contains("Use .xls"));
+        assert!(script.contains("Replace"));
+        assert!(script.contains("Replace File"));
+        assert!(script.contains("Overwrite"));
+        assert!(script.contains("sheet 1 of front window"));
+        assert!(script.contains("blocked by save confirmation"));
+        assert!(script.contains("buttons="));
+        assert!(script.contains("entire contents of containerRef"));
+        assert!(script.contains("set processRef to it"));
+        assert!(script.contains("my clickButtonNamed(processRef"));
+        assert!(!script.contains("key code 36"));
+    }
+
+    #[test]
+    fn save_as_script_splits_filename_from_parent_folder() {
+        let script = macos_save_as_script("Microsoft Excel", "test.xls", "/Users/maarten");
+
+        assert!(script.contains("to \"test.xls\""), "{script}");
+        assert!(script.contains("keystroke \"/Users/maarten\""), "{script}");
+        assert!(!script.contains("/Users/maarten/test.xls"), "{script}");
+    }
+
+    #[test]
+    fn application_save_fallback_includes_generic_and_workbook_forms() {
+        let scripts = macos_application_save_as_fallback_scripts(
+            "Microsoft Excel",
+            "/Users/maarten/test.xls",
+        );
+        let joined = scripts.join("\n");
+
+        assert!(joined.contains("save front document in POSIX file"));
+        assert!(joined.contains("save document 1 in POSIX file"));
+        assert!(joined.contains("save active workbook in POSIX file"));
+        assert!(joined.contains("save workbook as active workbook filename"));
+    }
+
+    #[test]
+    fn existing_file_does_not_count_as_saved_until_modified() {
+        let path =
+            std::env::temp_dir().join(format!("greentic-existing-save-{}", std::process::id()));
+        std::fs::write(&path, "old").expect("write temp file");
+        let modified = path_modified_at(&path).expect("modified time");
+
+        assert!(!saved_path_updated(&path, Some(modified)));
+        assert!(saved_path_updated(&path, None));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn app_activation_resolves_paths_and_known_bundle_ids() {
+        assert_eq!(
+            macos_app_script_name("/Applications/Microsoft Excel.app"),
+            "Microsoft Excel"
+        );
+        assert_eq!(
+            known_macos_bundle_id("Microsoft Excel"),
+            Some("com.microsoft.Excel")
+        );
+        assert_eq!(known_macos_bundle_id("Word"), Some("com.microsoft.Word"));
     }
 
     #[test]

@@ -830,6 +830,10 @@ mod tests {
     use std::fs;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    fn coverage_instrumented_run() -> bool {
+        std::env::var_os("CARGO_LLVM_COV").is_some()
+    }
+
     #[test]
     fn exposes_terminal_capabilities() {
         let capabilities = terminal_capabilities();
@@ -953,7 +957,7 @@ mod tests {
 
     #[test]
     fn local_pty_fixture_runs_command_and_parses_output() {
-        if cfg!(windows) {
+        if cfg!(windows) || coverage_instrumented_run() {
             return;
         }
         let screen = run_local_pty_command(

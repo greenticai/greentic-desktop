@@ -1,0 +1,88 @@
+id: example.macos.excel.tabs_formula_save
+name: Excel Tabs Formula Save
+version: 0.1.0
+mode: HumanDemonstration
+description: Open Excel, create one new worksheet, put a number in A1, reference it from the new worksheet, multiply by 10, and save as test.xls.
+target:
+  kind: desktop
+  os: macos
+  app: Microsoft Excel
+required_capabilities:
+  - macos.activate_app
+  - macos.press_shortcut
+  - macos.focus_document
+  - macos.type_text
+  - macos.invoke_menu
+  - macos.save_as
+inputs:
+  - inputs.workbook_path
+  - inputs.source_number
+secrets: []
+outputs:
+  - outputs.workbook_path
+assertions: []
+open_questions: []
+steps:
+  - id: open-excel
+    action: activate_app
+    required_capability: macos.activate_app
+    value: Microsoft Excel
+
+  - id: create-new-workbook
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Cmd+N
+
+  - id: focus-workbook
+    action: focus_document
+    required_capability: macos.focus_document
+    target:
+      preferred:
+        role: grid
+        name: active workbook
+      fallback:
+        role: table
+
+  - id: enter-a1-number
+    action: type_text
+    required_capability: macos.type_text
+    value: "{{inputs.source_number}}"
+    target:
+      preferred:
+        role: cell
+        name: A1
+      fallback:
+        role: grid
+        name: active workbook
+
+  - id: commit-a1-number
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Return
+
+  - id: create-formula-tab
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Shift+F11
+
+  - id: enter-formula
+    action: type_text
+    required_capability: macos.type_text
+    value: "=Sheet1!A1*10"
+    target:
+      preferred:
+        role: cell
+        name: A1
+      fallback:
+        role: grid
+        name: active workbook
+
+  - id: commit-formula
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Return
+
+  - id: save-workbook
+    action: save_as
+    required_capability: macos.save_as
+    value: "{{inputs.workbook_path}}"

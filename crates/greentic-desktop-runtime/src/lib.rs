@@ -14,7 +14,8 @@ use greentic_desktop_registry::{RegistryError, SignedRunnerManifest, SigningKey}
 use greentic_desktop_session::DesktopSession;
 use greentic_desktop_telemetry::TelemetryLog;
 use greentic_distributor_client::{
-    DistributorError, GreenticDistributorClient, ResolvedArtifact, StoreExtension,
+    DistributorError, GreenticDistributorClient, ResolvedArtifact, ResolvedRunnerArtifact,
+    StoreExtension,
 };
 use rmcp::{
     model::{
@@ -187,6 +188,14 @@ impl DesktopRuntime {
         let client =
             GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"));
         client.resolve(source).map_err(Into::into)
+    }
+
+    pub fn resolve_runner_source(
+        &self,
+        source: &str,
+    ) -> Result<ResolvedRunnerArtifact, RuntimeError> {
+        let client = GreenticDistributorClient::new(self.config.runner.home.join("runner-cache"));
+        client.resolve_runner(source).map_err(Into::into)
     }
 
     pub fn search_extension_store(&self, query: &str) -> Vec<StoreExtension> {

@@ -230,6 +230,7 @@ pub fn replay_with_context(
     let mut observations = Vec::new();
     let mut step_results = Vec::new();
     let selector = ReplayAdapterSelector::new(&context.registry);
+    let observe_after_steps = package_needs_step_observations(&request.package);
     for step in &request.package.steps {
         let retry = retry_policy(step);
         let attempts = if retry.safe {
@@ -265,11 +266,13 @@ pub fn replay_with_context(
                 adapter,
                 executable,
                 format!("replay-{}", request.package.id),
-                Some(step.target.clone()),
+                observe_after_steps.then_some(step.target.clone()),
                 context.step_timeout,
             )
             .map(|(result, observation)| {
-                observations.push(observation);
+                if let Some(observation) = observation {
+                    observations.push(observation);
+                }
                 result
             })
         } else {
@@ -407,16 +410,31 @@ pub fn replay_with_context(
     }
 }
 
+fn package_needs_step_observations(package: &RunnerPackage) -> bool {
+    !package.outputs.is_empty()
+        && package.outputs.iter().any(|output| {
+            let output = output.to_ascii_lowercase();
+            !(output.contains("path") || output.contains("file"))
+        })
+}
+
 fn execute_step_with_timeout(
     adapter: Arc<dyn DesktopAdapter>,
     executable: RunnerStep,
     session_id: String,
     target: Option<LocatorTarget>,
     timeout: Option<Duration>,
-) -> Result<(StepResult, Observation), AdapterError> {
+) -> Result<(StepResult, Option<Observation>), AdapterError> {
     let execute = move || {
         adapter.execute(executable).and_then(|result| {
-            let observation = adapter.observe(ObserveContext { session_id, target })?;
+            let observation = if let Some(target) = target {
+                Some(adapter.observe(ObserveContext {
+                    session_id,
+                    target: Some(target),
+                })?)
+            } else {
+                None
+            };
             Ok((result, observation))
         })
     };
@@ -628,6 +646,27 @@ fn extract_output_value(
         .map(|result| &result.message);
     if let Some(value) = extract_labeled_output(&name, step_lines) {
         return Some(value);
+    }
+    if name.contains("path") {
+        if let Some(value) = extract_saved_path_output(step_results.iter().rev()) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn extract_saved_path_output<'a>(results: impl Iterator<Item = &'a StepResult>) -> Option<String> {
+    for result in results.filter(|result| result.success) {
+        let message = result.message.trim();
+        let lower = message.to_ascii_lowercase();
+        if let Some(index) = lower.rfind(" saved as ") {
+            return Some(message[index + " saved as ".len()..].trim().to_owned());
+        }
+        if let Some(index) = lower.rfind(" as ") {
+            if lower.starts_with("saved ") || lower.contains(" document as ") {
+                return Some(message[index + " as ".len()..].trim().to_owned());
+            }
+        }
     }
     None
 }
@@ -972,6 +1011,36 @@ mod tests {
             .evidence
             .to_json()
             .contains("\"outputs.customer_id\""));
+    }
+
+    #[test]
+    fn extracts_path_outputs_from_successful_save_steps() {
+        let package = RunnerPackage {
+            outputs: vec!["outputs.workbook_path".to_owned()],
+            ..package()
+        };
+        let outputs = extract_outputs(
+            &package,
+            &[],
+            &[StepResult {
+                step_id: "save-workbook".to_owned(),
+                success: true,
+                message: "saved macOS document as /tmp/greentic-replay-save-test.xls".to_owned(),
+            }],
+        )
+        .expect_err("missing file should still be evidence-checked");
+
+        assert!(outputs.contains("/tmp/greentic-replay-save-test.xls"));
+    }
+
+    #[test]
+    fn path_only_outputs_skip_expensive_step_observations() {
+        let mut package = package();
+        package.outputs = vec!["outputs.workbook_path".to_owned()];
+        assert!(!package_needs_step_observations(&package));
+
+        package.outputs = vec!["outputs.result".to_owned()];
+        assert!(package_needs_step_observations(&package));
     }
 
     #[test]
