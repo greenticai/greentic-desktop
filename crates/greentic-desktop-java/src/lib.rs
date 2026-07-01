@@ -612,6 +612,54 @@ fn java_desktop_workflow(workflow: &JavaAppWorkflow) -> DesktopWorkflow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static JAVA_ACCESS_BRIDGE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct JavaAccessBridgeEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for JavaAccessBridgeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND", previous);
+            } else {
+                std::env::remove_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
+            }
+        }
+    }
+
+    fn java_access_bridge_env(command: Option<&Path>) -> JavaAccessBridgeEnvGuard {
+        let guard = JAVA_ACCESS_BRIDGE_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("java sidecar env lock should not be poisoned");
+        let previous = std::env::var_os("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
+        if let Some(command) = command {
+            std::env::set_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND", command);
+        } else {
+            std::env::remove_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
+        }
+        JavaAccessBridgeEnvGuard {
+            _guard: guard,
+            previous,
+        }
+    }
+
+    fn unique_sidecar_script_path() -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "greentic-java-sidecar-{}-{nanos}.sh",
+            std::process::id()
+        ))
+    }
 
     fn metadata() -> JavaComponentMetadata {
         JavaComponentMetadata {
@@ -698,6 +746,7 @@ mod tests {
 
     #[test]
     fn access_bridge_replay_requires_real_sidecar_command() {
+        let _env = java_access_bridge_env(None);
         let adapter = JavaDesktopAdapter::new(true);
         let target = stable_java_target(&metadata());
         let step = RunnerStep {
@@ -728,8 +777,7 @@ mod tests {
     fn access_bridge_execute_propagates_failed_sidecar_status() {
         use std::os::unix::fs::PermissionsExt;
 
-        let script =
-            std::env::temp_dir().join(format!("greentic-java-sidecar-{}.sh", std::process::id()));
+        let script = unique_sidecar_script_path();
         std::fs::write(&script, "#!/bin/sh\nprintf 'passed:false\\nnot found\\n'\n")
             .expect("script should write");
         let mut permissions = std::fs::metadata(&script)
@@ -738,8 +786,7 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&script, permissions).expect("script chmod");
 
-        let old = std::env::var_os("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
-        std::env::set_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND", &script);
+        let _env = java_access_bridge_env(Some(&script));
         let result = JavaDesktopAdapter::new(true)
             .execute(RunnerStep {
                 id: "find".to_owned(),
@@ -752,16 +799,12 @@ mod tests {
 
         assert!(!result.success);
 
-        if let Some(old) = old {
-            std::env::set_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND", old);
-        } else {
-            std::env::remove_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
-        }
         let _ = std::fs::remove_file(script);
     }
 
     #[test]
     fn generic_app_workflow_fails_without_real_java_fixture() {
+        let _env = java_access_bridge_env(None);
         let adapter = JavaDesktopAdapter::new(true);
         let input_target = stable_java_target(&JavaComponentMetadata {
             window_title: Some("Sample".to_owned()),
