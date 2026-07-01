@@ -3112,7 +3112,7 @@ mod tests {
     fn save_dialog_confirmation_script_compiles_on_macos() {
         let script = macos_save_confirmation_script("Microsoft Excel");
         if !cfg!(target_os = "macos") {
-            assert!(script.contains("on clickButtonNamed(buttonNames)"));
+            assert!(script.contains("on clickButtonNamed(containerRef, buttonName)"));
             return;
         }
 
