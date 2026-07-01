@@ -1062,15 +1062,20 @@ fn render_array(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_home() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "greentic-extension-test-{}",
+            "greentic-extension-test-{}-{}-{}",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock should be after epoch")
-                .as_nanos()
+                .as_nanos(),
+            TEMP_HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
