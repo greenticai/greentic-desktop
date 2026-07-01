@@ -18,7 +18,6 @@ path = "src/lib.rs"
 greentic-desktop-adapter.workspace = true
 greentic-desktop-config.workspace = true
 greentic-desktop-core.workspace = true
-greentic-distributor-client.workspace = true
 greentic-desktop-evidence.workspace = true
 greentic-desktop-extension.workspace = true
 greentic-desktop-gui-assets.workspace = true

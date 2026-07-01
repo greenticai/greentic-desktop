@@ -13,7 +13,6 @@ PUBLISH_CRATE_ORDER=(
   greentic-desktop-adapter
   greentic-desktop-workflow
   greentic-desktop-extension
-  greentic-distributor-client
   greentic-desktop-recorder
   greentic-desktop-platform
   greentic-desktop-web

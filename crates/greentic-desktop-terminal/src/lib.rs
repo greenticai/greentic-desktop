@@ -328,13 +328,18 @@ impl DesktopAdapter for TerminalAdapter {
         }
 
         let output = self.run_runtime(TerminalRuntimeAction::Execute, Some(&step), None)?;
+        let success = output.passed.unwrap_or(true);
 
         Ok(StepResult {
             step_id: step.id,
-            success: true,
-            message: output
-                .message
-                .unwrap_or_else(|| "terminal step completed by owned runtime".to_owned()),
+            success,
+            message: output.message.unwrap_or_else(|| {
+                if success {
+                    "terminal step completed by owned runtime".to_owned()
+                } else {
+                    "terminal runtime reported step failure".to_owned()
+                }
+            }),
         })
     }
 
@@ -581,9 +586,13 @@ fn run_local_pty_command_with_status(
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut status = None;
+    let mut eof = false;
     while Instant::now() < deadline {
         match reader.read(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) => {
+                eof = true;
+                break;
+            }
             Ok(count) => bytes.extend_from_slice(&buffer[..count]),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -600,8 +609,12 @@ fn run_local_pty_command_with_status(
         }
     }
     if status.is_none() {
-        let _ = child.kill();
-        status = child.wait().ok();
+        if eof {
+            status = child.wait().ok();
+        } else {
+            let _ = child.kill();
+            status = child.wait().ok();
+        }
     }
     let output = String::from_utf8_lossy(&bytes);
     Ok(LocalPtyCommandOutput {
@@ -1011,6 +1024,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_execute_propagates_runtime_failed_status() {
+        let adapter = TerminalAdapter::with_runtime_command("echo passed:false");
+        let result = adapter
+            .execute(RunnerStep {
+                id: "runtime-step".to_owned(),
+                action: "send_keys".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("ENTER".to_owned()),
+                required_capability: "terminal.send_keys".to_owned(),
+            })
+            .expect("runtime output should parse");
+
+        assert!(!result.success);
+        assert!(result.message.contains("reported step failure"));
+    }
+
+    #[test]
     fn terminal_run_command_uses_local_pty_and_labels_output() {
         let adapter = TerminalAdapter::new();
         let result = adapter
@@ -1047,6 +1077,22 @@ mod tests {
             .expect_err("non-zero shell exit should fail the step");
 
         assert!(err.to_string().contains("terminal command failed"), "{err}");
+    }
+
+    #[test]
+    fn terminal_pty_collects_exit_status_after_eof() {
+        if cfg!(windows) || coverage_instrumented_run() {
+            return;
+        }
+        let output = run_local_pty_command_with_status(
+            "sh",
+            &["-lc", "printf 'done\\n'"],
+            Duration::from_secs(2),
+        )
+        .expect("local PTY command should run");
+
+        assert!(output.exit_success);
+        assert!(output.lines.iter().any(|line| line.contains("done")));
     }
 
     #[test]

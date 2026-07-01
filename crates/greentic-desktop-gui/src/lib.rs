@@ -54,7 +54,10 @@ use greentic_desktop_replay::{
 use greentic_desktop_runner_schema::{
     OutputFailureBehavior, RedactionPolicy, RunnerDefinition, RunnerInput, RunnerOutput,
 };
-use greentic_desktop_runtime::DesktopRuntime;
+use greentic_desktop_runtime::{
+    find_store_extension, resolve_extension_source, search_extension_store, DesktopRuntime,
+    ResolutionPhase, ResolvedRunnerArtifact,
+};
 use greentic_desktop_security::{redact_known_secret_values, redact_sensitive_text_with_values};
 use greentic_desktop_session::SessionProfile;
 use greentic_desktop_terminal::{
@@ -70,7 +73,6 @@ use greentic_desktop_web::{
 };
 use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend, WINDOWS_ADAPTER_ID};
 use greentic_desktop_workflow::{WorkflowOutputExtractor, WorkflowValueType};
-use greentic_distributor_client::GreenticDistributorClient;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
@@ -147,6 +149,7 @@ impl Default for GuiApiState {
 pub enum GuiError {
     Io(std::io::Error),
     BrowserOpen(std::io::Error),
+    InvalidConfig(String),
 }
 
 impl fmt::Display for GuiError {
@@ -154,6 +157,7 @@ impl fmt::Display for GuiError {
         match self {
             Self::Io(err) => write!(f, "{err}"),
             Self::BrowserOpen(err) => write!(f, "failed to open default browser: {err}"),
+            Self::InvalidConfig(message) => write!(f, "{message}"),
         }
     }
 }
@@ -170,6 +174,12 @@ pub struct GuiHost;
 
 impl GuiHost {
     pub fn start(options: GuiHostOptions) -> Result<GuiHostHandle, GuiError> {
+        #[cfg(not(test))]
+        if options.api_state.gui_token.is_empty() {
+            return Err(GuiError::InvalidConfig(
+                "GUI session token must be configured before starting the host".to_owned(),
+            ));
+        }
         let listener = TcpListener::bind(options.bind)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -1423,9 +1433,7 @@ fn checklist_item_json(id: &str, label: &str, status: &str, help: &str, action: 
 }
 
 fn recommended_extensions_json(query: Option<&str>) -> String {
-    let client = GreenticDistributorClient::new(".greentic/extension-cache");
-    let extensions = client
-        .search(query.unwrap_or(""))
+    let extensions = search_extension_store(query.unwrap_or(""))
         .iter()
         .map(|extension| {
             extension_store_entry_json(
@@ -1692,7 +1700,6 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
     let id = path
         .trim_start_matches("/api/v1/extensions/")
         .trim_end_matches("/versions");
-    let client = GreenticDistributorClient::new(state.runtime_home.join("extension-cache"));
     let records = gui_extension_records(state);
     let installed_record = records
         .iter()
@@ -1710,7 +1717,7 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
     } else {
         "unknown".to_owned()
     };
-    if let Some(extension) = client.store_index().find(id) {
+    if let Some(extension) = find_store_extension(id) {
         return format!(
             r#"{{"extension":{}}}"#,
             extension_store_entry_json(
@@ -1750,8 +1757,9 @@ fn extension_versions_json(path: &str) -> String {
     let id = path
         .trim_start_matches("/api/v1/extensions/")
         .trim_end_matches("/versions");
-    let client = GreenticDistributorClient::new(".greentic/extension-cache");
-    let versions = client.versions(id).unwrap_or_default();
+    let versions = find_store_extension(id)
+        .map(|extension| extension.versions)
+        .unwrap_or_default();
     format!(
         r#"{{"id":"{}","versions":{}}}"#,
         escape_json(id),
@@ -2486,7 +2494,9 @@ fn import_runner_source_json(
         ));
     }
     let path = if let Some(path) = source.strip_prefix("file://") {
-        PathBuf::from(path)
+        let path = PathBuf::from(path);
+        validate_file_runner_import_path(state, &path)?;
+        path
     } else {
         let mut config = RuntimeConfig::default();
         config.runner.home = state.runtime_home.clone();
@@ -2499,6 +2509,7 @@ fn import_runner_source_json(
                 &format!("Could not resolve runner source {source}: {err}"),
             )
         })?;
+        validate_remote_runner_artifact(&artifact)?;
         if !artifact.local_path.exists() {
             return Err(api_error_json(
                 "runner.import_resolution_failed",
@@ -2550,6 +2561,51 @@ fn import_runner_source_json(
         replace,
     )?;
     Ok(imported_runner_json(&imported, Some(source), None))
+}
+
+fn validate_remote_runner_artifact(artifact: &ResolvedRunnerArtifact) -> Result<(), String> {
+    if !artifact.digest.starts_with("sha256:") || artifact.digest.len() <= "sha256:".len() {
+        return Err(api_error_json(
+            "runner.import_unverified_source",
+            "Resolved runner artifact is missing a sha256 content digest.",
+        ));
+    }
+    if artifact.signature_refs.is_empty() {
+        return Err(api_error_json(
+            "runner.import_unverified_source",
+            "Resolved runner artifact has no verified detached signature metadata.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_file_runner_import_path(state: &GuiApiState, path: &Path) -> Result<(), String> {
+    let import_root = state.runtime_home.join("imports");
+    let canonical_root = import_root.canonicalize().map_err(|err| {
+        api_error_json(
+            "runner.import_forbidden_source",
+            &format!(
+                "Runner file imports are restricted to {}: {err}",
+                import_root.display()
+            ),
+        )
+    })?;
+    let canonical_path = path.canonicalize().map_err(|err| {
+        api_error_json(
+            "runner.import_resolution_failed",
+            &format!("Could not resolve runner YAML {}: {err}", path.display()),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(api_error_json(
+            "runner.import_forbidden_source",
+            &format!(
+                "Runner file imports are restricted to {}.",
+                canonical_root.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn supported_runner_source_uri(source: &str) -> bool {
@@ -5422,12 +5478,11 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
     let source = json_string_field(body, "source")
         .or_else(|| json_string_field(body, "id"))
         .unwrap_or_else(|| "store://greentic.desktop.playwright".to_owned());
-    let client = GreenticDistributorClient::new(state.runtime_home.join("extension-cache"));
-    let artifact = client
-        .resolve(&source)
+    let artifact = resolve_extension_source(state.runtime_home.join("extension-cache"), &source)
         .map_err(|err| api_error_json("extension.resolve_failed", &err.to_string()))?;
-    let store_entry = client.store_index().find(&artifact.extension_id);
+    let store_entry = find_store_extension(&artifact.extension_id);
     let permissions = store_entry
+        .as_ref()
         .map(|entry| entry.permissions.clone())
         .unwrap_or_default();
     let metadata = ExtensionPackageMetadata {
@@ -5435,6 +5490,7 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
         name: artifact.extension_id.clone(),
         version: artifact.version.clone(),
         publisher: store_entry
+            .as_ref()
             .map(|entry| entry.publisher.clone())
             .unwrap_or_else(|| "local".to_owned()),
         runtime: ExtensionRuntime::Sidecar,
@@ -5446,6 +5502,7 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
             linux: true,
         },
         capabilities: store_entry
+            .as_ref()
             .map(|entry| entry.capabilities.clone())
             .unwrap_or_else(|| vec!["extension.run".to_owned()]),
         permissions: ExtensionPermissions {
@@ -5514,12 +5571,12 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
         .iter()
         .chain(
             [
-                greentic_distributor_client::ResolutionPhase {
+                ResolutionPhase {
                     phase: "installing".to_owned(),
                     status: "complete".to_owned(),
                     message: "extension metadata written to the local store".to_owned(),
                 },
-                greentic_distributor_client::ResolutionPhase {
+                ResolutionPhase {
                     phase: "complete".to_owned(),
                     status: "complete".to_owned(),
                     message: "extension installed and ready".to_owned(),
@@ -7361,7 +7418,9 @@ steps:
             "{downloaded_body}"
         );
 
-        let source_path = root.join("source-runner.yaml");
+        let source_dir = root.join("imports");
+        std::fs::create_dir_all(&source_dir).expect("source import dir should exist");
+        let source_path = source_dir.join("source-runner.yaml");
         std::fs::write(
             &source_path,
             yaml.replace("import.export.demo", "import.export.source"),
@@ -7379,6 +7438,24 @@ steps:
             "{imported_source}"
         );
 
+        let outside_path = root.join("outside-runner.yaml");
+        std::fs::write(
+            &outside_path,
+            yaml.replace("import.export.demo", "import.export.outside"),
+        )
+        .expect("outside yaml should write");
+        let outside_body = serde_json::json!({
+            "kind": "source",
+            "source": format!("file://{}", outside_path.display())
+        })
+        .to_string();
+        let outside = post(handle.addr(), "/api/v1/runners/import", &outside_body);
+        let outside = String::from_utf8_lossy(&outside);
+        assert!(
+            outside.contains("runner.import_forbidden_source"),
+            "{outside}"
+        );
+
         let unsupported = post(
             handle.addr(),
             "/api/v1/runners/import",
@@ -7391,6 +7468,33 @@ steps:
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_runner_import_requires_signed_digest_metadata() {
+        let artifact = ResolvedRunnerArtifact {
+            runner_id: "unsigned.remote".to_owned(),
+            version: "1.0.0".to_owned(),
+            source_uri: "store://unsigned.remote".to_owned(),
+            resolved_uri: "oci://example.test/runners/unsigned.remote:1.0.0".to_owned(),
+            digest: "sha256:abc123".to_owned(),
+            local_path: PathBuf::from("/tmp/unsigned.remote.yaml"),
+            phases: Vec::new(),
+            signature_refs: Vec::new(),
+            sbom_refs: Vec::new(),
+        };
+
+        let error = validate_remote_runner_artifact(&artifact).expect_err("signature is required");
+        assert!(error.contains("runner.import_unverified_source"), "{error}");
+
+        let mut signed = artifact;
+        signed.signature_refs = vec!["sigstore://example.test/signature".to_owned()];
+        validate_remote_runner_artifact(&signed).expect("signed digest metadata should pass");
+
+        signed.digest = "fnv:abc123".to_owned();
+        let error =
+            validate_remote_runner_artifact(&signed).expect_err("sha256 digest is required");
+        assert!(error.contains("runner.import_unverified_source"), "{error}");
     }
 
     #[test]

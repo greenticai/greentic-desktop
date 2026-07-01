@@ -321,6 +321,9 @@ impl DesktopAdapter for JavaDesktopAdapter {
 
         self.require_access_bridge()?;
         let message = java_sidecar("execute", Some(&java_step_json(&step)))?;
+        let success = !message
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case("passed:false"));
 
         self.state
             .lock()
@@ -334,7 +337,7 @@ impl DesktopAdapter for JavaDesktopAdapter {
 
         Ok(StepResult {
             step_id: step.id,
-            success: true,
+            success,
             message,
         })
     }
@@ -718,6 +721,43 @@ mod tests {
                 .contains("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND"),
             "{error}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn access_bridge_execute_propagates_failed_sidecar_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script =
+            std::env::temp_dir().join(format!("greentic-java-sidecar-{}.sh", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\nprintf 'passed:false\\nnot found\\n'\n")
+            .expect("script should write");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).expect("script chmod");
+
+        let old = std::env::var_os("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
+        std::env::set_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND", &script);
+        let result = JavaDesktopAdapter::new(true)
+            .execute(RunnerStep {
+                id: "find".to_owned(),
+                action: "find_component".to_owned(),
+                target: stable_java_target(&metadata()),
+                value: None,
+                required_capability: "java.find_component".to_owned(),
+            })
+            .expect("sidecar should run");
+
+        assert!(!result.success);
+
+        if let Some(old) = old {
+            std::env::set_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND", old);
+        } else {
+            std::env::remove_var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND");
+        }
+        let _ = std::fs::remove_file(script);
     }
 
     #[test]
