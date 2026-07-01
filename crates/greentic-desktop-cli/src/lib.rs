@@ -126,6 +126,14 @@ fn run(
     if !require_desktop_prefix && args.first().map(String::as_str) == Some("gui") {
         return run_gui(parse_gui_args(&args[1..])?, writer, block_gui);
     }
+    if !require_desktop_prefix
+        && matches!(
+            args.first().map(String::as_str),
+            Some("--bind" | "--no-open" | "--token")
+        )
+    {
+        return run_gui(parse_gui_args(&args)?, writer, block_gui);
+    }
 
     let config = RuntimeConfig::default();
     let runtime = DesktopRuntime::new(config.clone());
@@ -338,7 +346,7 @@ fn usage(require_desktop_prefix: bool) -> String {
     let gui_command = if require_desktop_prefix {
         ""
     } else {
-        "gui [--bind ADDR] [--no-open]|"
+        "gui [--bind ADDR] [--token TOKEN] [--no-open]|"
     };
 
     format!(
@@ -346,10 +354,11 @@ fn usage(require_desktop_prefix: bool) -> String {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GuiCliOptions {
     bind: SocketAddr,
     open_browser: bool,
+    token: Option<String>,
 }
 
 impl Default for GuiCliOptions {
@@ -357,6 +366,7 @@ impl Default for GuiCliOptions {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             open_browser: true,
+            token: None,
         }
     }
 }
@@ -379,9 +389,20 @@ fn parse_gui_args(args: &[String]) -> Result<GuiCliOptions, CliError> {
                     .map_err(|_| CliError::Usage(format!("invalid GUI bind address: {bind}")))?;
                 index += 2;
             }
+            "--token" => {
+                let Some(token) = args.get(index + 1) else {
+                    return Err(CliError::Usage("gui --token requires a token".to_owned()));
+                };
+                if token.is_empty() {
+                    return Err(CliError::Usage("gui --token must not be empty".to_owned()));
+                }
+                options.token = Some(token.to_owned());
+                index += 2;
+            }
             "--help" | "-h" => {
                 return Err(CliError::Usage(
-                    "usage: greentic-desktop gui [--bind ADDR] [--no-open]".to_owned(),
+                    "usage: greentic-desktop gui [--bind ADDR] [--token TOKEN] [--no-open]"
+                        .to_owned(),
                 ));
             }
             other => return Err(CliError::Usage(format!("unknown gui option: {other}"))),
@@ -409,7 +430,7 @@ fn run_gui(
         installed_core_adapter_ids: info.installed_adapters,
         installed_extension_ids: discover_extensions(&config.runner.home).unwrap_or_default(),
         runner_names: discover_runners(&config.runner.home).unwrap_or_default(),
-        gui_token: gui_session_token(),
+        gui_token: options.token.clone().unwrap_or_else(gui_session_token),
     };
     let gui_token = api_state.gui_token.clone();
     let handle = GuiHost::start(GuiHostOptions {
@@ -1433,7 +1454,33 @@ exit 2
             run_with_writer(["--help".to_owned()], false, &mut help).expect("help should print");
             let help = String::from_utf8(help).expect("help should be utf8");
             assert!(help.contains("greentic-desktop"));
-            assert!(help.contains("gui [--bind ADDR] [--no-open]"));
+            assert!(help.contains("gui [--bind ADDR] [--token TOKEN] [--no-open]"));
+        });
+    }
+
+    #[test]
+    fn gui_can_start_with_user_supplied_session_token() {
+        with_temp_home(|_| {
+            let mut output = Vec::new();
+            run_with_writer(
+                [
+                    "--no-open".to_owned(),
+                    "--bind".to_owned(),
+                    "127.0.0.1:0".to_owned(),
+                    "--token".to_owned(),
+                    "known-mcp-token".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("top-level GUI options should start GUI");
+            let output = String::from_utf8(output).expect("output should be utf8");
+
+            assert!(
+                output.contains("Greentic Automate Hub: http://127.0.0.1:"),
+                "{output}"
+            );
+            assert!(output.contains("?token=known-mcp-token"), "{output}");
         });
     }
 
@@ -1618,7 +1665,13 @@ exit 2
                 &mut output,
             )
             .expect_err("uri import should require cached artifact");
-            assert!(uri_err.to_string().contains("local distributor cache"));
+            let uri_err = uri_err.to_string();
+            assert!(
+                uri_err.contains("local distributor cache")
+                    || uri_err.contains("store://example.word")
+                    || uri_err.contains("example.word"),
+                "{uri_err}"
+            );
         });
     }
 

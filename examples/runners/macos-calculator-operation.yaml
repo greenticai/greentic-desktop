@@ -1,0 +1,48 @@
+id: example.macos.calculator.operation
+name: macOS Calculator Operation
+version: 0.1.0
+mode: HumanDemonstration
+description: Open the local macOS Calculator app, clear any existing value, ask for two numbers and a keyboard operation (+, -, *, or /), and return the displayed result.
+target:
+  kind: desktop
+  app: Calculator
+required_capabilities:
+  - macos.activate_app
+  - macos.invoke_menu
+  - macos.press_shortcut
+  - macos.type_text
+  - macos.read_clipboard
+inputs:
+  - inputs.first_number
+  - inputs.operation
+  - inputs.second_number
+secrets: []
+outputs:
+  - outputs.result
+assertions: []
+open_questions: []
+steps:
+  - id: open-calculator
+    action: activate_app
+    required_capability: macos.activate_app
+    value: Calculator
+
+  - id: clear-and-enter-expression
+    action: type_text
+    required_capability: macos.type_text
+    value: "c{{inputs.first_number}}{{inputs.operation}}{{inputs.second_number}}"
+
+  - id: calculate-result
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Return
+
+  - id: copy-result
+    action: invoke_menu
+    required_capability: macos.invoke_menu
+    value: Edit > Copy
+
+  - id: read-result
+    action: read_clipboard
+    required_capability: macos.read_clipboard
+    value: outputs.result

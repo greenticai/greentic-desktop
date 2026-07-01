@@ -8527,9 +8527,10 @@ steps:
             .expect("runner call should return structured content");
         assert_eq!(structured["status"], "passed");
         assert_eq!(
-            structured["outputs"]["outputs.result"],
+            structured["outputs"]["result"],
             "Saved row for Ada Lovelace <ada@example.test>"
         );
+        assert!(structured.get("outputs.result").is_none());
         assert_eq!(
             structured["evidenceRef"],
             "evidence://run_generic.web.append_row/bundle.json"

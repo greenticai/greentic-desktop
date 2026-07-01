@@ -369,7 +369,7 @@ impl McpOutputSchema {
     }
 
     pub fn to_json_schema(&self) -> String {
-        fields_to_json_schema("MCP runner output", &self.fields)
+        output_fields_to_json_schema("MCP runner output", &self.fields)
     }
 }
 
@@ -489,6 +489,37 @@ fn fields_to_json_schema(title: &str, fields: &[RunnerSchemaField]) -> String {
         "required": required
     })
     .to_string()
+}
+
+fn output_fields_to_json_schema(title: &str, fields: &[RunnerSchemaField]) -> String {
+    let mut output_properties = serde_json::Map::new();
+    let mut output_required = Vec::new();
+    for field in fields {
+        let output_name = output_field_name(&field.name);
+        if field.required {
+            output_required.push(serde_json::Value::String(output_name.clone()));
+        }
+        output_properties.insert(output_name, field_schema_value(field));
+    }
+    serde_json::json!({
+        "title": title,
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "evidenceRef": {"type": "string"},
+            "outputs": {
+                "type": "object",
+                "properties": output_properties,
+                "required": output_required
+            }
+        },
+        "required": ["outputs"]
+    })
+    .to_string()
+}
+
+fn output_field_name(name: &str) -> String {
+    name.strip_prefix("outputs.").unwrap_or(name).to_owned()
 }
 
 fn field_schema_value(field: &RunnerSchemaField) -> serde_json::Value {
@@ -1500,9 +1531,18 @@ mod tests {
 
         let input_json_schema = McpInputSchema::from_runner(&decoded).to_json_schema();
         assert!(input_json_schema.contains("\"writeOnly\":true"));
-        assert!(McpOutputSchema::from_runner(&decoded)
-            .to_json_schema()
-            .contains("confirmation"));
+        let output_json_schema = McpOutputSchema::from_runner(&decoded).to_json_schema();
+        let output_schema: serde_json::Value =
+            serde_json::from_str(&output_json_schema).expect("output schema should be json");
+        assert_eq!(
+            output_schema["properties"]["outputs"]["properties"]["confirmation"]["type"],
+            "string"
+        );
+        assert!(output_schema["properties"]["outputs"]["required"]
+            .as_array()
+            .expect("nested required outputs")
+            .iter()
+            .any(|value| value == "confirmation"));
     }
 
     #[test]

@@ -72,6 +72,7 @@ pub enum CapturedInputEvent {
     Unknown,
 }
 
+#[cfg(feature = "rdev-capture")]
 impl From<rdev::Event> for CapturedInputEvent {
     fn from(event: rdev::Event) -> Self {
         match event.event_type {
@@ -101,6 +102,7 @@ pub trait EventCaptureBackend: Send + Sync {
 #[derive(Debug, Default, Clone)]
 pub struct RdevEventCaptureBackend;
 
+#[cfg(feature = "rdev-capture")]
 impl EventCaptureBackend for RdevEventCaptureBackend {
     fn availability(&self) -> BackendAvailability {
         BackendAvailability::available()
@@ -116,6 +118,15 @@ impl EventCaptureBackend for RdevEventCaptureBackend {
                 format!("rdev input capture failed: {err:?}"),
             )
         })
+    }
+}
+
+#[cfg(not(feature = "rdev-capture"))]
+impl EventCaptureBackend for RdevEventCaptureBackend {
+    fn availability(&self) -> BackendAvailability {
+        BackendAvailability::unavailable(
+            "rdev event capture is not compiled in; rebuild with feature rdev-capture",
+        )
     }
 }
 
@@ -422,8 +433,10 @@ pub fn verify_ed25519_signature(
 mod tests {
     use super::*;
     use serde::Serialize;
+    #[cfg(feature = "rdev-capture")]
     use std::time::SystemTime;
 
+    #[cfg(feature = "rdev-capture")]
     fn rdev_event(event_type: rdev::EventType, name: Option<&str>) -> rdev::Event {
         rdev::Event {
             time: SystemTime::UNIX_EPOCH,
@@ -458,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdev-capture")]
     fn rdev_events_are_normalised_without_backend_state() {
         assert_eq!(
             CapturedInputEvent::from(rdev_event(
@@ -513,7 +527,17 @@ mod tests {
 
     #[test]
     fn real_backends_report_availability_without_mutating_state() {
-        assert!(RdevEventCaptureBackend.availability().available);
+        let rdev_availability = RdevEventCaptureBackend.availability();
+        if cfg!(feature = "rdev-capture") {
+            assert!(rdev_availability.available);
+        } else {
+            assert!(!rdev_availability.available);
+            assert!(rdev_availability
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("rdev event capture is not compiled in"));
+        }
         let screenshot = ScreenshotArtifact {
             path: PathBuf::from("/tmp/example.png"),
             width: 10,

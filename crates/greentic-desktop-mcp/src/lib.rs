@@ -449,13 +449,23 @@ pub fn rmcp_list_tools_result(tools: &[McpTool]) -> ListToolsResult {
 
 pub fn rmcp_call_tool_result(result: &McpCallResult) -> CallToolResult {
     if result.success {
-        let outputs = serde_json::from_str::<serde_json::Value>(&result.outputs_json)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let mut call_result = CallToolResult::structured(serde_json::json!({
-                "status": "passed",
-                "evidenceRef": result.evidence_uri,
-                "outputs": outputs
-        }));
+        let raw_outputs = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &result.outputs_json,
+        )
+        .unwrap_or_default();
+        let outputs = normalise_mcp_outputs(raw_outputs);
+        let structured = serde_json::Map::from_iter([
+            (
+                "status".to_owned(),
+                serde_json::Value::String("passed".to_owned()),
+            ),
+            (
+                "evidenceRef".to_owned(),
+                serde_json::Value::String(result.evidence_uri.clone()),
+            ),
+            ("outputs".to_owned(), serde_json::Value::Object(outputs)),
+        ]);
+        let mut call_result = CallToolResult::structured(serde_json::Value::Object(structured));
         call_result.content = vec![ContentBlock::text(format!(
             "Runner completed. Evidence: {}",
             result.evidence_uri
@@ -469,6 +479,22 @@ pub fn rmcp_call_tool_result(result: &McpCallResult) -> CallToolResult {
             .unwrap_or("runner failed");
         CallToolResult::error(vec![ContentBlock::text(message.to_owned())])
     }
+}
+
+fn normalise_mcp_outputs(
+    outputs: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    outputs
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name.strip_prefix("outputs.")
+                    .map(str::to_owned)
+                    .unwrap_or(name),
+                value,
+            )
+        })
+        .collect()
 }
 
 pub fn rmcp_tool(tool: &McpTool) -> Tool {
@@ -866,6 +892,73 @@ mod tests {
     }
 
     #[test]
+    fn successful_rmcp_calls_expose_outputs_as_clean_nested_object() {
+        let result = McpCallResult {
+            success: true,
+            outputs_json: serde_json::json!({
+                "outputs.result": "25"
+            })
+            .to_string(),
+            failure: None,
+            evidence_uri: "evidence://run_example.macos.calculator.operation/bundle.json"
+                .to_owned(),
+        };
+
+        let call_result = rmcp_call_tool_result(&result);
+
+        assert_eq!(call_result.is_error, Some(false));
+        let structured = call_result
+            .structured_content
+            .as_ref()
+            .expect("successful call should have structured content");
+        assert_eq!(structured["status"], "passed");
+        assert_eq!(structured["outputs"]["result"], "25");
+        assert!(structured.get("outputs.result").is_none());
+        assert_eq!(
+            structured["evidenceRef"],
+            "evidence://run_example.macos.calculator.operation/bundle.json"
+        );
+    }
+
+    #[test]
+    fn output_schema_normalises_runner_output_prefixes() {
+        let tool = published_runner_tool(
+            "example.demo_ecommerce.laptop.price_model",
+            Vec::new(),
+            Vec::new(),
+            vec![RunnerStep {
+                id: "read-model".to_owned(),
+                action: "extract_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("outputs.model".to_owned()),
+                required_capability: "web.extract_text".to_owned(),
+            }],
+            vec!["outputs.model", "outputs.price"],
+            vec!["web.extract_text"],
+            RiskLevel::Low,
+        )
+        .descriptor();
+        let schema: serde_json::Value =
+            serde_json::from_str(&tool.output_schema_json).expect("output schema should be json");
+
+        assert_eq!(
+            schema["properties"]["outputs"]["properties"]["model"]["type"],
+            "string"
+        );
+        assert_eq!(
+            schema["properties"]["outputs"]["properties"]["price"]["type"],
+            "string"
+        );
+        assert_eq!(
+            schema["properties"]["outputs"]["required"],
+            serde_json::json!(["model", "price"])
+        );
+        assert!(schema["properties"]["outputs"]["properties"]
+            .get("outputs.model")
+            .is_none());
+    }
+
+    #[test]
     fn forwarded_tool_names_are_stable() {
         let tool = example_runner_tool();
 
@@ -955,8 +1048,13 @@ mod tests {
             "string"
         );
         assert_eq!(
-            value["result"]["tools"][0]["outputSchema"]["properties"]["confirmation"]["type"],
+            value["result"]["tools"][0]["outputSchema"]["properties"]["outputs"]["properties"]
+                ["confirmation"]["type"],
             "string"
+        );
+        assert_eq!(
+            value["result"]["tools"][0]["outputSchema"]["required"],
+            serde_json::json!(["outputs"])
         );
     }
 
