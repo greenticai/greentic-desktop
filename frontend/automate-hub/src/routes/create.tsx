@@ -26,6 +26,8 @@ import {
   AlertTriangle,
   Circle,
   Save,
+  FileUp,
+  LinkIcon,
 } from "lucide-react";
 
 export const Route = createFileRoute("/create")({
@@ -33,7 +35,7 @@ export const Route = createFileRoute("/create")({
   component: CreatePage,
 });
 
-type Mode = null | "prompt" | "record";
+type Mode = null | "prompt" | "record" | "file";
 
 function CreatePage() {
   const [mode, setMode] = useState<Mode>(() => {
@@ -41,13 +43,16 @@ function CreatePage() {
       return null;
     }
     const requested = new URLSearchParams(window.location.search).get("mode");
-    return requested === "prompt" || requested === "record" ? requested : null;
+    return requested === "prompt" || requested === "record" || requested === "file"
+      ? requested
+      : null;
   });
   return (
     <div className="p-8 md:p-12 max-w-5xl mx-auto">
       {mode === null && <ChooseMode onPick={setMode} />}
       {mode === "prompt" && <PromptWizard onBack={() => setMode(null)} />}
       {mode === "record" && <RecordWizard onBack={() => setMode(null)} />}
+      {mode === "file" && <RunnerFileWizard onBack={() => setMode(null)} />}
     </div>
   );
 }
@@ -63,7 +68,7 @@ function ChooseMode({ onPick }: { onPick: (m: Mode) => void }) {
           Pick the way that feels easiest. You can always switch later.
         </p>
       </div>
-      <div className="grid md:grid-cols-2 gap-5">
+      <div className="grid md:grid-cols-3 gap-5">
         <button
           onClick={() => onPick("prompt")}
           className="text-left rounded-2xl border bg-card p-7 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-elegant)] hover:border-primary/40 transition-all"
@@ -94,8 +99,156 @@ function ChooseMode({ onPick }: { onPick: (m: Mode) => void }) {
             Start Recording <ArrowRight className="h-4 w-4" />
           </div>
         </button>
+        <button
+          onClick={() => onPick("file")}
+          className="text-left rounded-2xl border bg-card p-7 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-elegant)] hover:border-primary/40 transition-all"
+        >
+          <div className="h-12 w-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+            <FileUp className="h-6 w-6 text-primary" />
+          </div>
+          <div className="font-semibold text-lg">Provide a runner file</div>
+          <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
+            Upload runner YAML or import it from an oci://, store://, or repo:// source.
+          </p>
+          <div className="mt-5 inline-flex items-center gap-1.5 text-sm font-medium text-primary">
+            Import Runner <ArrowRight className="h-4 w-4" />
+          </div>
+        </button>
       </div>
     </>
+  );
+}
+
+function RunnerFileWizard({ onBack }: { onBack: () => void }) {
+  const navigate = useNavigate();
+  const [tab, setTab] = useState<"upload" | "source">("upload");
+  const [source, setSource] = useState("");
+  const [replace, setReplace] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const importYaml = useMutation({
+    mutationFn: async () => {
+      if (!selectedFile) throw new Error("Choose a YAML runner file first.");
+      if (!selectedFile.name.match(/\.ya?ml$/i)) {
+        throw new Error("Runner files must use .yaml or .yml.");
+      }
+      const yaml = await selectedFile.text();
+      return api.importRunnerYaml(selectedFile.name, yaml, replace);
+    },
+    onSuccess: (result) => {
+      setMessage(`Imported ${result.runnerName}`);
+      void navigate({ to: "/runners" });
+    },
+    onError: (error) => setMessage(error instanceof Error ? error.message : "Import failed"),
+  });
+  const importSource = useMutation({
+    mutationFn: () => {
+      const trimmed = source.trim();
+      if (!/^(oci|store|repo|file):\/\//.test(trimmed)) {
+        throw new Error("Use an oci://, store://, repo://, or file:// runner source.");
+      }
+      return api.importRunnerSource(trimmed, replace);
+    },
+    onSuccess: (result) => {
+      setMessage(`Imported ${result.runnerName}`);
+      void navigate({ to: "/runners" });
+    },
+    onError: (error) => setMessage(error instanceof Error ? error.message : "Import failed"),
+  });
+  const busy = importYaml.isPending || importSource.isPending;
+
+  return (
+    <WizardShell
+      onBack={onBack}
+      step={0}
+      total={1}
+      title="Provide a runner file"
+      subtitle="Import an existing runner YAML from local disk or a Greentic distributor source."
+      footer={
+        <>
+          <Button variant="outline" onClick={onBack}>
+            Back
+          </Button>
+          <Button
+            onClick={() => (tab === "upload" ? importYaml.mutate() : importSource.mutate())}
+            disabled={busy}
+            className="gap-2"
+          >
+            <Save className="h-4 w-4" />
+            {busy ? "Importing..." : "Import Runner"}
+          </Button>
+        </>
+      }
+    >
+      {message && (
+        <div
+          className={`mb-4 text-sm ${
+            message.toLowerCase().includes("imported") ? "text-success" : "text-destructive"
+          }`}
+        >
+          {message}
+        </div>
+      )}
+      <div className="mb-5 inline-flex rounded-lg border bg-muted p-1">
+        <button
+          type="button"
+          onClick={() => setTab("upload")}
+          className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
+            tab === "upload" ? "bg-background shadow-sm" : "text-muted-foreground"
+          }`}
+        >
+          <FileUp className="h-4 w-4" /> Upload YAML
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("source")}
+          className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
+            tab === "source" ? "bg-background shadow-sm" : "text-muted-foreground"
+          }`}
+        >
+          <LinkIcon className="h-4 w-4" /> Import URL
+        </button>
+      </div>
+
+      {tab === "upload" ? (
+        <div className="space-y-3">
+          <Label htmlFor="runner-yaml">Runner YAML</Label>
+          <Input
+            id="runner-yaml"
+            type="file"
+            accept=".yaml,.yml,application/x-yaml,text/yaml,text/plain"
+            onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+          />
+          {selectedFile && (
+            <p className="text-xs text-muted-foreground">
+              Selected {selectedFile.name} ({Math.max(1, Math.round(selectedFile.size / 1024))} KB)
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <Label htmlFor="runner-source">Runner source</Label>
+          <Input
+            id="runner-source"
+            value={source}
+            onChange={(event) => setSource(event.target.value)}
+            placeholder="repo://team/runner.yaml"
+          />
+          <p className="text-xs text-muted-foreground">
+            Supported sources: oci://, store://, repo://, and file://.
+          </p>
+        </div>
+      )}
+
+      <label className="mt-5 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={replace}
+          onChange={(event) => setReplace(event.target.checked)}
+        />
+        Replace an existing runner with the same id
+      </label>
+    </WizardShell>
   );
 }
 

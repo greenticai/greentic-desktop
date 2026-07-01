@@ -426,17 +426,17 @@ fn execute_step_with_timeout(
     timeout: Option<Duration>,
 ) -> Result<(StepResult, Option<Observation>), AdapterError> {
     let execute = move || {
-        adapter.execute(executable).and_then(|result| {
-            let observation = if let Some(target) = target {
-                Some(adapter.observe(ObserveContext {
-                    session_id,
-                    target: Some(target),
-                })?)
-            } else {
-                None
-            };
+        adapter.execute(executable).map(|result| {
+            let observation = target.and_then(|target| {
+                adapter
+                    .observe(ObserveContext {
+                        session_id,
+                        target: Some(target),
+                    })
+                    .ok()
+            });
             Ok((result, observation))
-        })
+        })?
     };
     if let Some(timeout) = timeout {
         let (tx, rx) = mpsc::channel();
@@ -456,13 +456,7 @@ fn execute_step_with_timeout(
 
 impl ReplayOutcome {
     pub fn outputs_json(&self) -> String {
-        let body = self
-            .outputs
-            .iter()
-            .map(|(key, value)| format!("\"{key}\":\"{value}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("{{{body}}}")
+        serde_json::to_string(&self.outputs).unwrap_or_else(|_| "{}".to_owned())
     }
 }
 
@@ -483,7 +477,7 @@ fn executable_step_for_replay(step: &RunnerStep) -> RunnerStep {
 fn should_skip_step_for_replay(step: &RunnerStep) -> bool {
     step.action == "focus_document"
         && step.required_capability == "macos.focus_document"
-        && is_active_document_target(&step.target)
+        && (step.target == LocatorTarget::default() || is_active_document_target(&step.target))
 }
 
 fn is_active_document_target(target: &LocatorTarget) -> bool {
@@ -647,12 +641,18 @@ fn extract_output_value(
     if let Some(value) = extract_labeled_output(&name, step_lines) {
         return Some(value);
     }
-    if name.contains("path") {
+    if output_can_use_saved_path(&name) {
         if let Some(value) = extract_saved_path_output(step_results.iter().rev()) {
             return Some(value);
         }
     }
     None
+}
+
+fn output_can_use_saved_path(name: &str) -> bool {
+    ["path", "file", "saved", "save", "status"]
+        .iter()
+        .any(|token| name.contains(token))
 }
 
 fn extract_saved_path_output<'a>(results: impl Iterator<Item = &'a StepResult>) -> Option<String> {
@@ -1014,6 +1014,50 @@ mod tests {
     }
 
     #[test]
+    fn outputs_json_escapes_multiline_output_values() {
+        let outcome = ReplayOutcome {
+            passed: true,
+            bootstrap: BootstrapPlan {
+                profile_id: "test".to_owned(),
+                started_process_refs: Vec::new(),
+                opened_targets: Vec::new(),
+            },
+            traces: Vec::new(),
+            outputs: BTreeMap::from([(
+                "outputs.largest_files".to_owned(),
+                "12 /tmp/a.txt\n8 /tmp/quoted \"file\".txt".to_owned(),
+            )]),
+            evidence: EvidenceBundle::new(
+                "run",
+                "runner",
+                "0.1.0",
+                EvidenceStatus::Success,
+                &BTreeMap::new(),
+                &[],
+                BTreeMap::new(),
+                Vec::new(),
+                Vec::new(),
+                "2026-06-30T00:00:00Z",
+                "2026-06-30T00:00:01Z",
+            ),
+            evidence_ref: EvidenceRef {
+                run_id: "run".to_owned(),
+                uri: "evidence://run/bundle.json".to_owned(),
+            },
+            failure_reason: None,
+        };
+
+        let json = outcome.outputs_json();
+        let parsed = serde_json::from_str::<BTreeMap<String, String>>(&json)
+            .expect("outputs JSON should parse");
+
+        assert_eq!(
+            parsed.get("outputs.largest_files").map(String::as_str),
+            Some("12 /tmp/a.txt\n8 /tmp/quoted \"file\".txt")
+        );
+    }
+
+    #[test]
     fn extracts_path_outputs_from_successful_save_steps() {
         let package = RunnerPackage {
             outputs: vec!["outputs.workbook_path".to_owned()],
@@ -1158,6 +1202,19 @@ mod tests {
     }
 
     #[test]
+    fn replay_skips_default_macos_focus_document_step() {
+        let step = RunnerStep {
+            id: "primitive-3-focus-target".to_owned(),
+            action: "focus_document".to_owned(),
+            target: LocatorTarget::default(),
+            value: None,
+            required_capability: "macos.focus_document".to_owned(),
+        };
+
+        assert!(should_skip_step_for_replay(&step));
+    }
+
+    #[test]
     fn replay_step_timeout_returns_failed_step_diagnostics() {
         let mut registry = AdapterRegistry::new();
         registry.insert(Arc::new(SlowAdapter {
@@ -1265,6 +1322,34 @@ mod tests {
             .evidence
             .to_json()
             .contains(&file.to_string_lossy().to_string()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_extracts_saved_status_from_save_step_path() {
+        let root =
+            std::env::temp_dir().join(format!("greentic-save-step-output-{}", unique_suffix()));
+        fs::create_dir_all(&root).expect("temp dir");
+        let file = root.join("result.docx");
+        fs::write(&file, "saved").expect("output file");
+        let outputs = extract_outputs(
+            &RunnerPackage {
+                outputs: vec!["outputs.saved_status".to_owned()],
+                ..package()
+            },
+            &[],
+            &[StepResult {
+                step_id: "save-document".to_owned(),
+                success: true,
+                message: format!("saved macOS document as {}", file.to_string_lossy()),
+            }],
+        )
+        .expect("outputs");
+
+        assert_eq!(
+            outputs.get("outputs.saved_status"),
+            Some(&file.to_string_lossy().to_string())
+        );
         let _ = fs::remove_dir_all(root);
     }
 

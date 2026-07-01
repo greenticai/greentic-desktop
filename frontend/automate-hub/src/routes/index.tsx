@@ -3,7 +3,15 @@ import { useQuery } from "@tanstack/react-query";
 import { BrandLogo } from "@/components/brand-logo";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { Wand2, Video, Workflow, ArrowRight, CheckCircle2, AlertTriangle } from "lucide-react";
+import {
+  Wand2,
+  Video,
+  Workflow,
+  ArrowRight,
+  CheckCircle2,
+  AlertTriangle,
+  FileUp,
+} from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "Home · Greentic Desktop" }] }),
@@ -34,6 +42,14 @@ const actions = [
     title: "Manage Runners",
     text: "Run, edit, and manage your saved automations.",
     cta: "View My Runners",
+  },
+  {
+    to: "/create",
+    mode: "file",
+    icon: FileUp,
+    title: "Import Runner",
+    text: "Upload runner YAML or import from an oci://, store://, repo://, or file:// source.",
+    cta: "Provide a Runner File",
   },
 ] as const;
 
@@ -75,7 +91,7 @@ function Home() {
         </div>
       </div>
 
-      <div className="grid md:grid-cols-3 gap-5 mb-10">
+      <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-5 mb-10">
         {actions.map((a) => {
           const Icon = a.icon;
           return (

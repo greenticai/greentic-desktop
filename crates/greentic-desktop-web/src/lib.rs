@@ -982,12 +982,47 @@ async function resolveLocator(target) {
   return null;
 }
 
+async function detectBlockingChallenge() {
+  const url = page.url();
+  const title = await page.title().catch(() => '');
+  const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '');
+  const html = await page.content().catch(() => '');
+  const combined = `${url}\n${title}\n${bodyText}\n${html}`.toLowerCase();
+  if (
+    combined.includes('unusual traffic')
+    || combined.includes('recaptcha')
+    || combined.includes('captcha-form')
+    || combined.includes('sorry/index')
+    || combined.includes('sorry! something went wrong')
+    || combined.includes('something went wrong on our end')
+    || combined.includes('robot check')
+    || combined.includes('enter the characters you see below')
+    || combined.includes('automated access')
+    || consoleErrors.some((entry) => entry.includes('status of 503'))
+    || consoleErrors.some((entry) => entry.includes('status of 429'))
+  ) {
+    return 'The target site blocked browser automation with a CAPTCHA/rate-limit challenge. Open the page manually or use a controlled test fixture; Greentic will not bypass anti-bot challenges.';
+  }
+  return null;
+}
+
 function valueFromTargetUrl(step) {
   return step.value
     || step.target?.preferred?.text
     || step.target?.preferred?.css
     || step.target?.fallback?.text
     || 'about:blank';
+}
+
+function outputLabel(step) {
+  const raw = step.value || '';
+  if (!raw) return '';
+  return raw.replace(/^outputs\./, '').replace(/_/g, ' ').trim();
+}
+
+function labeledExtraction(step, text) {
+  const label = outputLabel(step);
+  return label ? `${label}: ${text}` : text;
 }
 
 async function ensurePage() {
@@ -1032,6 +1067,8 @@ async function runStep(step) {
   }
   const locator = await resolveLocator(step.target);
   if (!locator && !['web.press', 'web.screenshot'].includes(capability)) {
+    const challenge = await detectBlockingChallenge();
+    if (challenge) throw new Error(challenge);
     throw new Error(`No element matched locator for ${capability}`);
   }
   if (capability === 'web.fill') {
@@ -1053,13 +1090,13 @@ async function runStep(step) {
   }
   if (capability === 'web.extract_text') {
     const text = locator ? await locator.innerText() : await page.locator('body').innerText();
-    return { success: true, message: text };
+    return { success: true, message: labeledExtraction(step, text) };
   }
   if (capability === 'web.extract_regex') {
     const text = locator ? await locator.innerText() : await page.locator('body').innerText();
     const pattern = step.value || step.target?.preferred?.text || '(.+)';
     const match = text.match(new RegExp(pattern));
-    return { success: true, message: match ? match[0] : '' };
+    return { success: true, message: labeledExtraction(step, match ? match[0] : '') };
   }
   if (capability === 'web.screenshot') {
     const file = step.value || path.join(evidenceRoot, `screenshot-${Date.now()}.png`);
@@ -1616,6 +1653,11 @@ mod tests {
         assert_eq!(response.id.as_deref(), Some("req-42"));
         assert!(response.ok);
         assert_eq!(response.result["success"], true);
+
+        let script = web_replay_sidecar_script();
+        assert!(script.contains("detectBlockingChallenge"));
+        assert!(script.contains("CAPTCHA/rate-limit challenge"));
+        assert!(script.contains("will not bypass anti-bot challenges"));
     }
 
     fn temp_dir(name: &str) -> PathBuf {

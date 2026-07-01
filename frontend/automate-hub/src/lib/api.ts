@@ -27,6 +27,7 @@ import type {
   RunnerDetailDto,
   RunnerEditApplyResultDto,
   RunnerEditDraftDto,
+  RunnerImportResultDto,
   RunnerActionResultDto,
   RunnerVersionsDto,
   RunnersDto,
@@ -79,6 +80,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return payload.data;
+}
+
+async function requestBlob(path: string): Promise<Blob> {
+  const token = guiToken();
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: {
+      accept: "application/x-yaml",
+      ...(token ? { "x-greentic-gui-token": token } : {}),
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new ApiClientError("runtime.download_failed", text || response.statusText);
+  }
+  return response.blob();
 }
 
 function jsonInit(method: "POST" | "PUT" | "PATCH", body?: unknown): RequestInit {
@@ -185,6 +201,27 @@ export const api = {
     ),
   runners: () => request<RunnersDto>("/runners"),
   runner: (id: string) => request<RunnerDetailDto>(`/runners/${encodeURIComponent(id)}`),
+  importRunnerYaml: (filename: string, yaml: string, replace = false) =>
+    request<RunnerImportResultDto>(
+      "/runners/import",
+      jsonInit("POST", { kind: "yaml", filename, yaml, replace }),
+    ),
+  importRunnerSource: (source: string, replace = false) =>
+    request<RunnerImportResultDto>(
+      "/runners/import",
+      jsonInit("POST", { kind: "source", source, replace }),
+    ),
+  downloadRunnerYaml: async (id: string, filename?: string) => {
+    const blob = await requestBlob(`/runners/${encodeURIComponent(id)}/yaml`);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename ?? `${id}.yaml`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
   runnerAction: (id: string, action: string, inputs?: Record<string, string>) =>
     request<RunnerActionResultDto>(
       `/runners/${encodeURIComponent(id)}/${action}`,

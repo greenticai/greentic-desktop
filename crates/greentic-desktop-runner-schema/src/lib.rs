@@ -615,8 +615,9 @@ pub struct SchemaDiagnostic {
 
 pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaDiagnostic> {
     let cleaned = clean_llm_json(raw);
-    validate_runner_draft_json_value(&cleaned)?;
-    let parsed: JsonRunnerDraftDocument = serde_json::from_str(&cleaned).map_err(|err| {
+    let normalized = normalize_runner_draft_json(&cleaned)?;
+    validate_runner_draft_json_value(&normalized)?;
+    let parsed: JsonRunnerDraftDocument = serde_json::from_str(&normalized).map_err(|err| {
         if err.is_data() {
             diagnostic(
                 "planner.schema_mismatch",
@@ -671,6 +672,155 @@ pub fn parse_runner_draft_json(raw: &str) -> Result<RunnerDraftDocument, SchemaD
     };
     validate_runner_draft(&document)?;
     Ok(document)
+}
+
+fn normalize_runner_draft_json(cleaned: &str) -> Result<String, SchemaDiagnostic> {
+    let mut value: serde_json::Value = serde_json::from_str(cleaned).map_err(|err| {
+        diagnostic(
+            "planner.invalid_json",
+            &format!("LLM output is not valid runner JSON: {err}"),
+        )
+    })?;
+    normalize_named_workflow_arrays(&mut value);
+    serde_json::to_string(&value).map_err(|err| {
+        diagnostic(
+            "planner.invalid_json",
+            &format!("LLM output could not be normalised as runner JSON: {err}"),
+        )
+    })
+}
+
+fn normalize_named_workflow_arrays(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, fallback_prefix) in [
+                ("inputs", "input"),
+                ("outputs", "output"),
+                ("actions", "action"),
+                ("assertions", "assertion"),
+            ] {
+                if let Some(serde_json::Value::Array(items)) = object.get_mut(key) {
+                    for (index, item) in items.iter_mut().enumerate() {
+                        ensure_object_name(item, fallback_prefix, index + 1);
+                    }
+                }
+            }
+            if let Some(serde_json::Value::Array(primitives)) = object.get_mut("primitives") {
+                for (index, primitive) in primitives.iter_mut().enumerate() {
+                    ensure_observe_output_name(primitive, index + 1);
+                }
+            }
+            for child in object.values_mut() {
+                normalize_named_workflow_arrays(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_named_workflow_arrays(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ensure_object_name(value: &mut serde_json::Value, fallback_prefix: &str, index: usize) {
+    let serde_json::Value::Object(object) = value else {
+        return;
+    };
+    if object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| !name.trim().is_empty())
+    {
+        return;
+    }
+    let name =
+        infer_name_from_object(object).unwrap_or_else(|| format!("{fallback_prefix}_{index}"));
+    object.insert(
+        "name".to_owned(),
+        serde_json::Value::String(slug_name(&name)),
+    );
+}
+
+fn ensure_observe_output_name(value: &mut serde_json::Value, index: usize) {
+    let serde_json::Value::Object(object) = value else {
+        return;
+    };
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if kind != "observe_output" {
+        return;
+    }
+    if object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| !name.trim().is_empty())
+    {
+        return;
+    }
+    let name = infer_name_from_object(object).unwrap_or_else(|| format!("output_{index}"));
+    object.insert(
+        "name".to_owned(),
+        serde_json::Value::String(slug_name(&name)),
+    );
+}
+
+fn infer_name_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for key in [
+        "id",
+        "key",
+        "field",
+        "label",
+        "title",
+        "output",
+        "output_name",
+        "input",
+        "input_name",
+    ] {
+        if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
+            if !value.trim().is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    object
+        .get("extractor")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extractor| {
+            extractor
+                .get("target")
+                .and_then(serde_json::Value::as_object)
+                .and_then(infer_name_from_object)
+                .or_else(|| {
+                    extractor
+                        .get("pattern")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                })
+        })
+}
+
+fn slug_name(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_separator = false;
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator {
+            out.push('_');
+            previous_separator = true;
+        }
+    }
+    let out = out.trim_matches('_').to_owned();
+    if out.is_empty() {
+        "field".to_owned()
+    } else {
+        out
+    }
 }
 
 fn validate_runner_draft_json_value(cleaned: &str) -> Result<(), SchemaDiagnostic> {
@@ -1071,6 +1221,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_llm_resource_type_aliases_like_word_document() {
+        let draft = parse_runner_draft_json(
+            r#"{
+                "runner_id": "word.document.format",
+                "version": "0.1.12-draft",
+                "summary": "Create and format a Word document",
+                "risk_level": "medium",
+                "required_capabilities": ["macos.activate_app", "macos.type_text", "macos.save_as"],
+                "inputs": {
+                    "document_name": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "outputs": {"document_path": {"type": "string"}},
+                "primitive_workflow": {
+                    "id": "word.document.format",
+                    "summary": "Create and format a Word document",
+                    "target": {"kind": {"NativeApp": "MacOs"}, "open": {"App": {"app_name": "Microsoft Word"}}},
+                    "inputs": [],
+                    "primitives": [
+                        {"kind": "open_app", "app": {"app_name": "Microsoft Word"}},
+                        {"kind": "open_resource", "resource": {"path_template": "{{inputs.document_name}}", "resource_type": "Word Document"}, "create_if_missing": true},
+                        {"kind": "enter_text", "target": {"label": "active document", "role": "document"}, "value_template": "{{inputs.text}}"},
+                        {"kind": "save_resource", "path_template": "{{inputs.document_name}}", "policy": "CreateOrUpdate"}
+                    ],
+                    "outputs": [],
+                    "assertions": [],
+                    "evidence_policy": {"capture_steps": true, "capture_screenshots": true}
+                },
+                "steps": [],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        )
+        .expect("Word Document alias should parse");
+
+        assert_eq!(draft.steps[0].required_capability, "macos.activate_app");
+        assert!(draft
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "macos.save_as"));
+    }
+
+    #[test]
     fn parses_empty_text_step_target_as_active_document() {
         let draft = parse_runner_draft_json(
             r#"{
@@ -1139,6 +1332,68 @@ mod tests {
 
         assert_eq!(draft.steps[0].value.as_deref(), Some("Word"));
         assert_eq!(draft.steps[0].required_capability, "macos.activate_app");
+    }
+
+    #[test]
+    fn repairs_llm_primitive_outputs_that_omit_name_fields() {
+        let draft = parse_runner_draft_json(
+            r#"{
+                "runner_id": "spreadsheet.price_lookup",
+                "version": "0.1.0-draft",
+                "summary": "Look up an item in an Excel price list",
+                "risk_level": "medium",
+                "required_capabilities": ["macos.activate_app", "macos.open_resource", "macos.read_text"],
+                "inputs": {
+                    "xlsx_file_location": {"type": "file"},
+                    "search_term": {"type": "string"}
+                },
+                "outputs": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "height": {"type": "string"},
+                    "width": {"type": "string"},
+                    "depth": {"type": "string"},
+                    "weight": {"type": "string"},
+                    "price": {"type": "string"}
+                },
+                "primitive_workflow": {
+                    "id": "spreadsheet.price_lookup",
+                    "summary": "Look up product data in a spreadsheet",
+                    "target": {"kind": {"NativeApp": "MacOs"}, "open": {"App": {"app_name": "Microsoft Excel", "window_title": "Excel"}}},
+                    "inputs": [
+                        {"id": "xlsx_file_location", "value_type": "File", "required": true, "secret": false, "target": {}, "value_template": "{{inputs.xlsx_file_location}}"},
+                        {"field": "search_term", "value_type": "String", "required": true, "secret": false, "target": {}, "value_template": "{{inputs.search_term}}"}
+                    ],
+                    "primitives": [
+                        {"kind": "open_app", "app": {"name": "Microsoft Excel"}},
+                        {"kind": "open_resource", "resource": {"path": "{{inputs.xlsx_file_location}}", "resource_type": "xlsx"}, "create_if_missing": false},
+                        {"kind": "invoke_command", "command": {"name": "Find", "shortcut": "Cmd+F"}},
+                        {"kind": "enter_text", "target": {"label": "search field"}, "value_template": "{{inputs.search_term}}"},
+                        {"kind": "observe_output", "extractor": {"target": {"label": "name"}, "pattern": "name"}},
+                        {"kind": "observe_output", "output_name": "description", "extractor": {"target": {"label": "description"}}},
+                        {"kind": "observe_output", "field": "price", "extractor": {"target": {"label": "price"}}}
+                    ],
+                    "outputs": [
+                        {"field": "name", "value_type": "String", "extractor": {"VisibleText": "name"}, "required": true, "expected": null},
+                        {"output": "description", "value_type": "String", "extractor": {"VisibleText": "description"}, "required": true, "expected": null},
+                        {"label": "price", "value_type": "String", "extractor": {"VisibleText": "price"}, "required": true, "expected": null}
+                    ],
+                    "assertions": [],
+                    "evidence_policy": {"capture_steps": true, "capture_screenshots": false}
+                },
+                "steps": [],
+                "assertions": [],
+                "open_questions": []
+            }"#,
+        )
+        .expect("missing output names should be repaired before schema validation");
+
+        assert_eq!(draft.runner_id, "spreadsheet.price_lookup");
+        assert!(draft.outputs.contains(&"price".to_owned()));
+        assert!(draft
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "macos.read_text"));
     }
 
     #[test]

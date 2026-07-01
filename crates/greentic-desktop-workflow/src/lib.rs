@@ -1,5 +1,5 @@
 use greentic_desktop_adapter::{AdapterCapabilities, LocatorStrategy, LocatorTarget, RunnerStep};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ pub struct ResourceReference {
     pub resource_type: ResourceType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum ResourceType {
     Document,
     Spreadsheet,
@@ -94,6 +94,42 @@ pub enum ResourceType {
     RemoteDesktop,
     #[default]
     Unknown,
+}
+
+impl<'de> Deserialize<'de> for ResourceType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(resource_type_from_label(&value))
+    }
+}
+
+fn resource_type_from_label(value: &str) -> ResourceType {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>();
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    let compact = words.join("");
+    match compact.as_str() {
+        "document" | "doc" | "docx" | "word" | "worddocument" | "worddoc" | "textdocument"
+        | "richtextdocument" | "rtf" | "pdf" => ResourceType::Document,
+        "spreadsheet" | "sheet" | "worksheet" | "workbook" | "excel" | "excelspreadsheet"
+        | "excelworkbook" | "csv" | "xlsx" | "xls" => ResourceType::Spreadsheet,
+        "browserpage" | "webpage" | "page" | "website" | "url" | "html" => {
+            ResourceType::BrowserPage
+        }
+        "terminalsession" | "terminal" | "shell" | "cli" | "console" => {
+            ResourceType::TerminalSession
+        }
+        "remotedesktop" | "rdp" | "vnc" | "remote" => ResourceType::RemoteDesktop,
+        "unknown" | "" => ResourceType::Unknown,
+        _ => ResourceType::Unknown,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

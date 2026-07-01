@@ -349,9 +349,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.17.0"
+version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
+checksum = "4342d8937fc7e5dd9b1c60292261c0670c882a2cd1719cfc11b1af41731e32ad"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -359,14 +359,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.41.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
+checksum = "6d9ceb1da931507a12f4fccea479dccd00da1943e1b4ae72d8e502d707361444"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -1817,7 +1818,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "greentic-desktop"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-config",
  "greentic-desktop-extension",
@@ -1831,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-adapter"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-core",
  "serde",
@@ -1839,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-automation-foundation"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "ed25519-dalek",
  "enigo",
@@ -1856,18 +1857,18 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-business"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-mcp",
 ]
 
 [[package]]
 name = "greentic-desktop-config"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "greentic-desktop-core"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "criterion",
  "serde",
@@ -1875,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-deployment"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-core",
  "greentic-desktop-extension",
@@ -1885,18 +1886,18 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-evidence"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "greentic-desktop-extension"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
 ]
 
 [[package]]
 name = "greentic-desktop-forwarded"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-core",
@@ -1909,10 +1910,11 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-gui"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "axum",
  "greentic-desktop-adapter",
+ "greentic-desktop-config",
  "greentic-desktop-core",
  "greentic-desktop-evidence",
  "greentic-desktop-extension",
@@ -1927,6 +1929,7 @@ dependencies = [
  "greentic-desktop-recorder",
  "greentic-desktop-replay",
  "greentic-desktop-runner-schema",
+ "greentic-desktop-runtime",
  "greentic-desktop-security",
  "greentic-desktop-session",
  "greentic-desktop-terminal",
@@ -1942,11 +1945,11 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-gui-assets"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "greentic-desktop-io"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-evidence",
  "greentic-desktop-platform",
@@ -1954,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-java"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-recorder",
@@ -1963,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-linux"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-automation-foundation",
@@ -1974,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-llm"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-llm",
  "serde_json",
@@ -1983,14 +1986,14 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-ltm"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-evidence",
 ]
 
 [[package]]
 name = "greentic-desktop-macos"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-automation-foundation",
@@ -2001,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-mcp"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-core",
@@ -2017,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-mvp"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-core",
@@ -2032,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-planner"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-core",
@@ -2045,7 +2048,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-platform"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-recorder",
@@ -2053,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-policy"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-core",
  "greentic-desktop-runner-schema",
@@ -2061,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-recorder"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-workflow",
@@ -2069,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-refinement"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-recorder",
@@ -2077,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-registry"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "ed25519-dalek",
  "sha2 0.11.0",
@@ -2085,17 +2088,18 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-replay"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-evidence",
  "greentic-desktop-recorder",
  "greentic-desktop-session",
+ "serde_json",
 ]
 
 [[package]]
 name = "greentic-desktop-rollout"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-mcp",
  "greentic-desktop-workspaces",
@@ -2103,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-runner-schema"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-core",
@@ -2116,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-runtime"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "axum",
  "greentic-desktop-adapter",
@@ -2135,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-security"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-core",
  "greentic-desktop-registry",
@@ -2143,15 +2147,15 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-session"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "greentic-desktop-telemetry"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "greentic-desktop-terminal"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-recorder",
@@ -2162,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-test-harness"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-config",
  "greentic-desktop-java",
@@ -2179,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-vision"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-automation-foundation",
@@ -2188,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-web"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-recorder",
@@ -2198,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-windowing"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-platform",
@@ -2207,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-windows"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "greentic-desktop-automation-foundation",
@@ -2217,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-workflow"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-adapter",
  "serde",
@@ -2225,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-desktop-workspaces"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-mcp",
  "greentic-desktop-registry",
@@ -2234,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-distributor-client"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "greentic-desktop-extension",
 ]
@@ -2754,9 +2758,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.46.6"
+version = "0.46.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8374249b1bdce1c1773a09fa294347e19e4bfeb86d845c2d8ebaf8a8dbf11233"
+checksum = "185abd1edcef44ac028ec6588ad1360155fbd0a8baa20243a28f5b2a05537a48"
 dependencies = [
  "ahash",
  "bytecount",
@@ -4116,9 +4120,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.46.6"
+version = "0.46.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65a910f9d63351f9c9d7dc3053d02b214ea3a005917140c70087d7b59cbc5bb1"
+checksum = "c335a4796e6081e384712c269f29ed8d2f6613e7afdd54a8467bb7d48f99859f"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -4388,9 +4392,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.14.1"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
+checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
 dependencies = [
  "web-time",
  "zeroize",

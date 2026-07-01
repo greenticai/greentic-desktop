@@ -20,3 +20,4 @@ greentic-desktop-adapter.workspace = true
 greentic-desktop-evidence.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-session.workspace = true
+serde_json.workspace = true

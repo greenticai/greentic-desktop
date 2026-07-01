@@ -37,6 +37,7 @@ pub fn terminal_capabilities() -> AdapterCapabilities {
             "terminal.assert_text",
             "terminal.extract_field",
             "terminal.capture_screen",
+            "terminal.run_command",
         ],
     )
 }
@@ -299,6 +300,33 @@ impl DesktopAdapter for TerminalAdapter {
             ));
         }
 
+        if step.required_capability == "terminal.run_command" {
+            let command = step.value.as_deref().ok_or_else(|| {
+                AdapterError::ExecutionFailed(
+                    "terminal.run_command requires a shell command in step.value.".to_owned(),
+                )
+            })?;
+            let terminal = run_local_pty_command_with_status(
+                "sh",
+                &["-lc", command],
+                Duration::from_secs(30),
+            )?;
+            let output = terminal.lines.join("\n");
+            if !terminal.exit_success {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "terminal command failed: {output}"
+                )));
+            }
+            let message = terminal_labeled_output(&step)
+                .map(|label| format!("{label}: {output}"))
+                .unwrap_or(output);
+            return Ok(StepResult {
+                step_id: step.id,
+                success: true,
+                message,
+            });
+        }
+
         let output = self.run_runtime(TerminalRuntimeAction::Execute, Some(&step), None)?;
 
         Ok(StepResult {
@@ -340,6 +368,30 @@ impl DesktopAdapter for TerminalAdapter {
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
         Ok(None)
     }
+}
+
+fn terminal_labeled_output(step: &RunnerStep) -> Option<String> {
+    [
+        step.target.preferred.as_ref(),
+        step.target.fallback.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|locator| {
+        locator
+            .text
+            .as_deref()
+            .or(locator.name.as_deref())
+            .or(locator.label.as_deref())
+    })
+    .map(|label| {
+        label
+            .trim_start_matches("outputs.")
+            .replace('_', " ")
+            .trim()
+            .to_owned()
+    })
+    .filter(|label| !label.is_empty())
 }
 
 impl TerminalAdapter {
@@ -490,6 +542,20 @@ pub fn run_local_pty_command(
     args: &[&str],
     timeout: Duration,
 ) -> AdapterResult<Vec<String>> {
+    Ok(run_local_pty_command_with_status(program, args, timeout)?.lines)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalPtyCommandOutput {
+    lines: Vec<String>,
+    exit_success: bool,
+}
+
+fn run_local_pty_command_with_status(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AdapterResult<LocalPtyCommandOutput> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -514,6 +580,7 @@ pub fn run_local_pty_command(
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
+    let mut status = None;
     while Instant::now() < deadline {
         match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -527,14 +594,20 @@ pub fn run_local_pty_command(
                 )));
             }
         }
-        if let Ok(Some(_status)) = child.try_wait() {
+        if let Ok(Some(child_status)) = child.try_wait() {
+            status = Some(child_status);
             break;
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    if status.is_none() {
+        let _ = child.kill();
+        status = child.wait().ok();
+    }
     let output = String::from_utf8_lossy(&bytes);
-    Ok(parse_terminal_screen(&output))
+    Ok(LocalPtyCommandOutput {
+        lines: parse_terminal_screen(&output),
+        exit_success: status.is_some_and(|status| status.success()),
+    })
 }
 
 pub fn parse_terminal_screen(output: &str) -> Vec<String> {
@@ -935,6 +1008,45 @@ mod tests {
                 .contains("No owned terminal runtime is configured"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn terminal_run_command_uses_local_pty_and_labels_output() {
+        let adapter = TerminalAdapter::new();
+        let result = adapter
+            .execute(RunnerStep {
+                id: "largest-files".to_owned(),
+                action: "run_command".to_owned(),
+                target: LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        text: Some("outputs.largest_files".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
+                value: Some("printf '10K\\t/tmp/example\\n'".to_owned()),
+                required_capability: "terminal.run_command".to_owned(),
+            })
+            .expect("local terminal command should run");
+
+        assert!(result.message.starts_with("largest files:"), "{result:?}");
+        assert!(result.message.contains("/tmp/example"), "{result:?}");
+    }
+
+    #[test]
+    fn terminal_run_command_fails_on_non_zero_shell_exit() {
+        let adapter = TerminalAdapter::new();
+        let err = adapter
+            .execute(RunnerStep {
+                id: "bad-command".to_owned(),
+                action: "run_command".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("echo shell failed >&2; exit 7".to_owned()),
+                required_capability: "terminal.run_command".to_owned(),
+            })
+            .expect_err("non-zero shell exit should fail the step");
+
+        assert!(err.to_string().contains("terminal command failed"), "{err}");
     }
 
     #[test]

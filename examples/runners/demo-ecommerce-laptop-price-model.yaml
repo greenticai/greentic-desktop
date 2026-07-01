@@ -1,0 +1,57 @@
+id: example.demo_ecommerce.laptop.price_model
+name: Demo Ecommerce Laptop Price and Model
+version: 0.1.0
+mode: HumanDemonstration
+description: Open a public demo ecommerce page and return the first laptop product model and price.
+target:
+  kind: web
+  app: WebScraper.io Ecommerce Test Site
+required_capabilities:
+  - web.goto
+  - web.wait_for
+  - web.extract_text
+inputs: []
+secrets: []
+outputs:
+  - outputs.model
+  - outputs.price
+assertions: []
+open_questions: []
+steps:
+  - id: open-demo-laptop-listing
+    action: goto
+    required_capability: web.goto
+    value: "https://webscraper.io/test-sites/e-commerce/static/computers/laptops"
+    target:
+      preferred:
+        role: document
+        name: Web Scraper Test Sites
+
+  - id: wait-for-product-card
+    action: wait_for
+    required_capability: web.wait_for
+    target:
+      preferred:
+        css: ".card.thumbnail .title"
+      fallback:
+        css: '[itemtype="https://schema.org/Product"] [itemprop="name"]'
+
+  - id: read-model
+    action: extract_text
+    required_capability: web.extract_text
+    value: outputs.model
+    target:
+      preferred:
+        css: ".card.thumbnail .title"
+      fallback:
+        css: '[itemtype="https://schema.org/Product"] [itemprop="name"]'
+
+  - id: read-price
+    action: extract_text
+    required_capability: web.extract_text
+    value: outputs.price
+    target:
+      preferred:
+        css: ".card.thumbnail .price span"
+      fallback:
+        css: '[itemtype="https://schema.org/Product"] [itemprop="price"]'

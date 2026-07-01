@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 greentic-desktop-adapter.workspace = true
+greentic-desktop-config.workspace = true
 greentic-desktop-core.workspace = true
 greentic-distributor-client.workspace = true
 greentic-desktop-evidence.workspace = true
@@ -31,6 +32,7 @@ greentic-desktop-platform.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-replay.workspace = true
 greentic-desktop-runner-schema.workspace = true
+greentic-desktop-runtime.workspace = true
 greentic-desktop-security.workspace = true
 greentic-desktop-session.workspace = true
 greentic-desktop-terminal.workspace = true

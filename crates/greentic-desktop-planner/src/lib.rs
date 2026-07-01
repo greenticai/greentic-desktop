@@ -655,7 +655,14 @@ fn canonical_native_capability(
             .any(|modifier| normalized.split('_').any(|part| part == *modifier)))
     {
         "press_shortcut"
-    } else if normalized.contains("click") || normalized.contains("save") {
+    } else if normalized.contains("save_as")
+        || normalized == "save"
+        || normalized.ends_with("_save")
+        || normalized.contains("_save_")
+        || normalized.starts_with("save_")
+    {
+        "save_as"
+    } else if normalized.contains("click") {
         "click_element"
     } else if normalized.contains("type")
         || normalized.contains("input")
@@ -1208,6 +1215,19 @@ mod tests {
             canonical_native_capability("macos.click_element", Some("macos"), "press Cmd+N")
                 .as_deref(),
             Some("macos.press_shortcut")
+        );
+    }
+
+    #[test]
+    fn native_save_actions_keep_save_as_capability() {
+        assert_eq!(
+            canonical_native_capability("macos.click_element", Some("macos"), "save_as").as_deref(),
+            Some("macos.save_as")
+        );
+        assert_eq!(
+            canonical_native_capability("macos.click_element", Some("macos"), "save document")
+                .as_deref(),
+            Some("macos.save_as")
         );
     }
 
