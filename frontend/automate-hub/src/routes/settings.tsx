@@ -160,7 +160,13 @@ function SettingsPage() {
   });
   const setupAction = useMutation({
     mutationFn: ({ id, action }: { id: string; action?: string }) => api.setupFix(id, action),
-    onSuccess: (result) => setActionStatus(result.message),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["setup-checklist"] }),
+        queryClient.refetchQueries({ queryKey: ["adapter-health"] }),
+      ]);
+      setActionStatus(result.message);
+    },
     onError: (error) => setActionStatus(error instanceof Error ? error.message : "Setup failed"),
   });
   const saveLlm = useMutation({
@@ -252,7 +258,12 @@ function SettingsPage() {
           )}
         <ul className="divide-y">
           {(adapterHealth.data?.adapters ?? []).map((adapter) => (
-            <AdapterHealthRow key={adapter.id} adapter={adapter} />
+            <AdapterHealthRow
+              key={adapter.id}
+              adapter={adapter}
+              busy={setupAction.isPending}
+              onSetup={(id) => setupAction.mutate({ id })}
+            />
           ))}
         </ul>
       </Card>
@@ -430,7 +441,17 @@ function SettingsPage() {
   );
 }
 
-function AdapterHealthRow({ adapter }: { adapter: AdapterHealthDto }) {
+function AdapterHealthRow({
+  adapter,
+  busy,
+  onSetup,
+}: {
+  adapter: AdapterHealthDto;
+  busy: boolean;
+  onSetup: (id: string) => void;
+}) {
+  const blocked = adapter.blockedCapabilities ?? [];
+  const setupActions = adapter.setupActions ?? [];
   return (
     <li className="py-3">
       <div className="flex items-start justify-between gap-4">
@@ -468,6 +489,42 @@ function AdapterHealthRow({ adapter }: { adapter: AdapterHealthDto }) {
         ))}
         {adapter.logPath && <span>{adapter.logPath}</span>}
       </div>
+      {blocked.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <div className="text-[11px] font-medium text-muted-foreground">Blocked capabilities</div>
+          {blocked.slice(0, 6).map((item) => (
+            <div
+              key={item.capability}
+              className="rounded border bg-muted/30 px-2 py-1 text-[11px] text-muted-foreground"
+            >
+              <span className="font-mono text-foreground">{item.capability}</span>
+              <span className="mx-1">·</span>
+              {item.reason}
+            </div>
+          ))}
+          {blocked.length > 6 && (
+            <div className="text-[11px] text-muted-foreground">
+              +{blocked.length - 6} blocked capabilities
+            </div>
+          )}
+        </div>
+      )}
+      {setupActions.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {setupActions.map((action) => (
+            <Button
+              key={action.id}
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              title={action.description}
+              onClick={() => onSetup(action.id)}
+            >
+              {action.label}
+            </Button>
+          ))}
+        </div>
+      )}
     </li>
   );
 }

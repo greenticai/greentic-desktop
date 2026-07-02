@@ -290,16 +290,7 @@ impl JavaDesktopAdapter {
 
 impl DesktopAdapter for JavaDesktopAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
-        if self
-            .state
-            .lock()
-            .expect("java adapter mutex poisoned")
-            .access_bridge_enabled
-        {
-            java_capabilities()
-        } else {
-            AdapterCapabilities::new(JAVA_ADAPTER_ID, env!("CARGO_PKG_VERSION"), [] as [&str; 0])
-        }
+        java_capabilities()
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
