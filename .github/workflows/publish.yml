@@ -45,6 +45,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/automate-hub/package-lock.json
+      - name: Install Linux native automation dependencies
+        run: bash ci/install_linux_native_deps.sh
       - uses: Swatinem/rust-cache@v2
       - name: Read Cargo version
         id: version
@@ -161,6 +163,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/automate-hub/package-lock.json
+      - name: Install Linux native automation dependencies
+        if: runner.os == 'Linux'
+        run: bash ci/install_linux_native_deps.sh
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
@@ -349,6 +354,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux native automation dependencies
+        run: bash ci/install_linux_native_deps.sh
       - uses: Swatinem/rust-cache@v2
       - name: Publish crates
         env:
