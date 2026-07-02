@@ -181,7 +181,7 @@ fn shell_command(command: &str) -> Command {
     }
 }
 
-fn shell_program_and_args<'a>(command: &'a str) -> (&'static str, Vec<&'a str>) {
+fn shell_program_and_args(command: &str) -> (&'static str, Vec<&str>) {
     if cfg!(windows) {
         ("cmd", vec!["/C", command])
     } else {
