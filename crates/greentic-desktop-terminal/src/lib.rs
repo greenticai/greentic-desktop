@@ -14,7 +14,7 @@ use greentic_desktop_workflow::{
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use vte::{Params, Parser, Perform};
@@ -131,7 +131,7 @@ fn run_terminal_capture_command(
     sink: RecordingEventSink,
 ) {
     let mut child = shell_command(&command);
-    let output = child
+    child
         .env("GREENTIC_RECORDING_SESSION_ID", sink.session_id())
         .env("GREENTIC_RECORDING_ROOT", request.out.display().to_string())
         .env("GREENTIC_TERMINAL_PROFILE_NAME", &profile.name)
@@ -141,10 +141,26 @@ fn run_terminal_capture_command(
         )
         .env("GREENTIC_TERMINAL_PROFILE_HOST", &profile.host)
         .stdin(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        let _ = sink.append_backend_warning("failed to run terminal capture command");
-        return;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = match child.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = sink
+                .append_backend_warning(&format!("failed to run terminal capture command: {err}"));
+            return;
+        }
+    };
+    let output = match wait_child_with_output_timeout(
+        child,
+        Duration::from_secs(30),
+        "terminal capture command",
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = sink.append_backend_warning(&err);
+            return;
+        }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -187,6 +203,34 @@ fn shell_program_and_args(command: &str) -> (&'static str, Vec<&str>) {
     } else {
         ("sh", vec!["-lc", command])
     }
+}
+
+fn wait_child_with_output_timeout(
+    mut child: Child,
+    timeout: Duration,
+    description: &str,
+) -> Result<Output, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(format!(
+                    "{description} timed out after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            Err(err) => return Err(format!("failed to poll {description}: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map_err(|err| format!("failed to collect {description} output: {err}"))
 }
 
 pub fn terminal_recording_event(
@@ -494,15 +538,14 @@ fn run_terminal_runtime_command(
     let mut child = command.spawn().map_err(|err| {
         AdapterError::ExecutionFailed(format!("terminal runtime failed to start: {err}"))
     })?;
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         let payload = terminal_runtime_payload(step, assertion);
         stdin.write_all(payload.as_bytes()).map_err(|err| {
             AdapterError::ExecutionFailed(format!("terminal runtime stdin failed: {err}"))
         })?;
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| AdapterError::ExecutionFailed(format!("terminal runtime failed: {err}")))?;
+    let output = wait_child_with_output_timeout(child, Duration::from_secs(30), "terminal runtime")
+        .map_err(AdapterError::ExecutionFailed)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AdapterError::ExecutionFailed(format!(
@@ -570,7 +613,7 @@ fn run_local_shell_command_with_status(
     command_text: &str,
     timeout: Duration,
 ) -> AdapterResult<LocalPtyCommandOutput> {
-    let mut child = shell_command(command_text)
+    let child = shell_command(command_text)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -578,28 +621,8 @@ fn run_local_shell_command_with_status(
         .map_err(|err| {
             AdapterError::ExecutionFailed(format!("failed to spawn shell command: {err}"))
         })?;
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    loop {
-        if child
-            .try_wait()
-            .map_err(|err| {
-                AdapterError::ExecutionFailed(format!("failed to poll shell command: {err}"))
-            })?
-            .is_some()
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            let _ = child.kill();
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let output = child.wait_with_output().map_err(|err| {
-        AdapterError::ExecutionFailed(format!("failed to collect shell command output: {err}"))
-    })?;
+    let output = wait_child_with_output_timeout(child, timeout, "shell command")
+        .map_err(AdapterError::ExecutionFailed)?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.stderr.is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
@@ -609,7 +632,7 @@ fn run_local_shell_command_with_status(
     }
     Ok(LocalPtyCommandOutput {
         lines: parse_terminal_screen(&text),
-        exit_success: !timed_out && output.status.success(),
+        exit_success: output.status.success(),
     })
 }
 
