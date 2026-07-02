@@ -25,23 +25,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/automate-hub/package-lock.json
       - name: Install Linux native automation dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libdbus-1-dev \
-            libegl1-mesa-dev \
-            libgbm-dev \
-            libpipewire-0.3-dev \
-            libwayland-dev \
-            libxi-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxdo-dev \
-            libxrandr-dev \
-            libxtst-dev \
-            pkg-config \
-            wmctrl \
-            xdotool
+        run: bash ci/install_linux_native_deps.sh
       - name: Install frontend automation dependencies
         run: |
           cd frontend/automate-hub
