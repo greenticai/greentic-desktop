@@ -14,7 +14,8 @@ use greentic_desktop_workflow::{
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use vte::{Params, Parser, Perform};
 
@@ -37,6 +38,7 @@ pub fn terminal_capabilities() -> AdapterCapabilities {
             "terminal.assert_text",
             "terminal.extract_field",
             "terminal.capture_screen",
+            "terminal.run_command",
         ],
     )
 }
@@ -129,7 +131,7 @@ fn run_terminal_capture_command(
     sink: RecordingEventSink,
 ) {
     let mut child = shell_command(&command);
-    let output = child
+    child
         .env("GREENTIC_RECORDING_SESSION_ID", sink.session_id())
         .env("GREENTIC_RECORDING_ROOT", request.out.display().to_string())
         .env("GREENTIC_TERMINAL_PROFILE_NAME", &profile.name)
@@ -139,10 +141,26 @@ fn run_terminal_capture_command(
         )
         .env("GREENTIC_TERMINAL_PROFILE_HOST", &profile.host)
         .stdin(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        let _ = sink.append_backend_warning("failed to run terminal capture command");
-        return;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = match child.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = sink
+                .append_backend_warning(&format!("failed to run terminal capture command: {err}"));
+            return;
+        }
+    };
+    let output = match wait_child_with_output_timeout(
+        child,
+        Duration::from_secs(30),
+        "terminal capture command",
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = sink.append_backend_warning(&err);
+            return;
+        }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -177,6 +195,42 @@ fn shell_command(command: &str) -> Command {
         cmd.arg("-lc").arg(command);
         cmd
     }
+}
+
+fn shell_program_and_args(command: &str) -> (&'static str, Vec<&str>) {
+    if cfg!(windows) {
+        ("cmd", vec!["/C", command])
+    } else {
+        ("sh", vec!["-lc", command])
+    }
+}
+
+fn wait_child_with_output_timeout(
+    mut child: Child,
+    timeout: Duration,
+    description: &str,
+) -> Result<Output, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(format!(
+                    "{description} timed out after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            Err(err) => return Err(format!("failed to poll {description}: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map_err(|err| format!("failed to collect {description} output: {err}"))
 }
 
 pub fn terminal_recording_event(
@@ -299,14 +353,47 @@ impl DesktopAdapter for TerminalAdapter {
             ));
         }
 
+        if step.required_capability == "terminal.run_command" {
+            let command = step.value.as_deref().ok_or_else(|| {
+                AdapterError::ExecutionFailed(
+                    "terminal.run_command requires a shell command in step.value.".to_owned(),
+                )
+            })?;
+            let terminal = if cfg!(windows) {
+                run_local_shell_command_with_status(command, Duration::from_secs(30))?
+            } else {
+                let (program, args) = shell_program_and_args(command);
+                run_local_pty_command_with_status(program, &args, Duration::from_secs(30))?
+            };
+            let output = terminal.lines.join("\n");
+            if !terminal.exit_success {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "terminal command failed: {output}"
+                )));
+            }
+            let message = terminal_labeled_output(&step)
+                .map(|label| format!("{label}: {output}"))
+                .unwrap_or(output);
+            return Ok(StepResult {
+                step_id: step.id,
+                success: true,
+                message,
+            });
+        }
+
         let output = self.run_runtime(TerminalRuntimeAction::Execute, Some(&step), None)?;
+        let success = output.passed.unwrap_or(true);
 
         Ok(StepResult {
             step_id: step.id,
-            success: true,
-            message: output
-                .message
-                .unwrap_or_else(|| "terminal step completed by owned runtime".to_owned()),
+            success,
+            message: output.message.unwrap_or_else(|| {
+                if success {
+                    "terminal step completed by owned runtime".to_owned()
+                } else {
+                    "terminal runtime reported step failure".to_owned()
+                }
+            }),
         })
     }
 
@@ -340,6 +427,30 @@ impl DesktopAdapter for TerminalAdapter {
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
         Ok(None)
     }
+}
+
+fn terminal_labeled_output(step: &RunnerStep) -> Option<String> {
+    [
+        step.target.preferred.as_ref(),
+        step.target.fallback.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|locator| {
+        locator
+            .text
+            .as_deref()
+            .or(locator.name.as_deref())
+            .or(locator.label.as_deref())
+    })
+    .map(|label| {
+        label
+            .trim_start_matches("outputs.")
+            .replace('_', " ")
+            .trim()
+            .to_owned()
+    })
+    .filter(|label| !label.is_empty())
 }
 
 impl TerminalAdapter {
@@ -427,15 +538,14 @@ fn run_terminal_runtime_command(
     let mut child = command.spawn().map_err(|err| {
         AdapterError::ExecutionFailed(format!("terminal runtime failed to start: {err}"))
     })?;
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         let payload = terminal_runtime_payload(step, assertion);
         stdin.write_all(payload.as_bytes()).map_err(|err| {
             AdapterError::ExecutionFailed(format!("terminal runtime stdin failed: {err}"))
         })?;
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| AdapterError::ExecutionFailed(format!("terminal runtime failed: {err}")))?;
+    let output = wait_child_with_output_timeout(child, Duration::from_secs(30), "terminal runtime")
+        .map_err(AdapterError::ExecutionFailed)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AdapterError::ExecutionFailed(format!(
@@ -490,6 +600,47 @@ pub fn run_local_pty_command(
     args: &[&str],
     timeout: Duration,
 ) -> AdapterResult<Vec<String>> {
+    Ok(run_local_pty_command_with_status(program, args, timeout)?.lines)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalPtyCommandOutput {
+    lines: Vec<String>,
+    exit_success: bool,
+}
+
+fn run_local_shell_command_with_status(
+    command_text: &str,
+    timeout: Duration,
+) -> AdapterResult<LocalPtyCommandOutput> {
+    let child = shell_command(command_text)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("failed to spawn shell command: {err}"))
+        })?;
+    let output = wait_child_with_output_timeout(child, timeout, "shell command")
+        .map_err(AdapterError::ExecutionFailed)?;
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(LocalPtyCommandOutput {
+        lines: parse_terminal_screen(&text),
+        exit_success: output.status.success(),
+    })
+}
+
+fn run_local_pty_command_with_status(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AdapterResult<LocalPtyCommandOutput> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -511,30 +662,65 @@ pub fn run_local_pty_command(
         .master
         .try_clone_reader()
         .map_err(|err| AdapterError::ExecutionFailed(format!("failed to read PTY: {err}")))?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(bytes));
+                    break;
+                }
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 4096];
+    let mut status = None;
     while Instant::now() < deadline {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20));
+        match receiver.try_recv() {
+            Ok(Ok(output)) => {
+                bytes = output;
+                break;
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 return Err(AdapterError::ExecutionFailed(format!(
                     "failed to read PTY output: {err}"
                 )));
             }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => break,
         }
-        if let Ok(Some(_status)) = child.try_wait() {
+        if let Ok(Some(child_status)) = child.try_wait() {
+            status = Some(child_status);
             break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    if status.is_none() {
+        let _ = child.kill();
+        status = child.wait().ok();
+    }
+    drop(pair.master);
+    if bytes.is_empty() {
+        if let Ok(Ok(output)) = receiver.recv_timeout(Duration::from_millis(200)) {
+            bytes = output;
+        }
+    }
     let output = String::from_utf8_lossy(&bytes);
-    Ok(parse_terminal_screen(&output))
+    Ok(LocalPtyCommandOutput {
+        lines: parse_terminal_screen(&output),
+        exit_success: status.is_some_and(|status| status.success()),
+    })
 }
 
 pub fn parse_terminal_screen(output: &str) -> Vec<String> {
@@ -830,6 +1016,10 @@ mod tests {
     use std::fs;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    fn coverage_instrumented_run() -> bool {
+        std::env::var_os("CARGO_LLVM_COV").is_some()
+    }
+
     #[test]
     fn exposes_terminal_capabilities() {
         let capabilities = terminal_capabilities();
@@ -934,6 +1124,93 @@ mod tests {
     }
 
     #[test]
+    fn terminal_execute_propagates_runtime_failed_status() {
+        let adapter = TerminalAdapter::with_runtime_command("echo passed:false");
+        let result = adapter
+            .execute(RunnerStep {
+                id: "runtime-step".to_owned(),
+                action: "send_keys".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("ENTER".to_owned()),
+                required_capability: "terminal.send_keys".to_owned(),
+            })
+            .expect("runtime output should parse");
+
+        assert!(!result.success);
+        assert!(result.message.contains("reported step failure"));
+    }
+
+    #[test]
+    fn terminal_run_command_uses_local_pty_and_labels_output() {
+        let adapter = TerminalAdapter::new();
+        let command = if cfg!(windows) {
+            "echo 10K\tC:\\tmp\\example"
+        } else {
+            "printf '10K\\t/tmp/example\\n'"
+        };
+        let expected_path = if cfg!(windows) {
+            "C:\\tmp\\example"
+        } else {
+            "/tmp/example"
+        };
+        let result = adapter
+            .execute(RunnerStep {
+                id: "largest-files".to_owned(),
+                action: "run_command".to_owned(),
+                target: LocatorTarget {
+                    preferred: Some(greentic_desktop_adapter::LocatorStrategy {
+                        text: Some("outputs.largest_files".to_owned()),
+                        ..greentic_desktop_adapter::LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
+                value: Some(command.to_owned()),
+                required_capability: "terminal.run_command".to_owned(),
+            })
+            .expect("local terminal command should run");
+
+        assert!(result.message.starts_with("largest files:"), "{result:?}");
+        assert!(result.message.contains(expected_path), "{result:?}");
+    }
+
+    #[test]
+    fn terminal_run_command_fails_on_non_zero_shell_exit() {
+        let adapter = TerminalAdapter::new();
+        let command = if cfg!(windows) {
+            "echo shell failed 1>&2 && exit /B 7"
+        } else {
+            "echo shell failed >&2; exit 7"
+        };
+        let err = adapter
+            .execute(RunnerStep {
+                id: "bad-command".to_owned(),
+                action: "run_command".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some(command.to_owned()),
+                required_capability: "terminal.run_command".to_owned(),
+            })
+            .expect_err("non-zero shell exit should fail the step");
+
+        assert!(err.to_string().contains("terminal command failed"), "{err}");
+    }
+
+    #[test]
+    fn terminal_pty_collects_exit_status_after_eof() {
+        if cfg!(windows) || coverage_instrumented_run() {
+            return;
+        }
+        let output = run_local_pty_command_with_status(
+            "sh",
+            &["-lc", "printf 'done\\n'"],
+            Duration::from_secs(2),
+        )
+        .expect("local PTY command should run");
+
+        assert!(output.exit_success);
+        assert!(output.lines.iter().any(|line| line.contains("done")));
+    }
+
+    #[test]
     fn parses_ansi_terminal_screen_with_cursor_positioning() {
         let screen = parse_terminal_screen("first\r\n\x1b[3;5Hfield");
 
@@ -953,7 +1230,7 @@ mod tests {
 
     #[test]
     fn local_pty_fixture_runs_command_and_parses_output() {
-        if cfg!(windows) {
+        if cfg!(windows) || coverage_instrumented_run() {
             return;
         }
         let screen = run_local_pty_command(

@@ -125,6 +125,14 @@ export interface RunnersDto {
   runners: RunnerSummaryDto[];
 }
 
+export interface RunnerImportResultDto {
+  runnerId: string;
+  runnerName: string;
+  path: string;
+  sourceUri?: string | null;
+  resolvedUri?: string | null;
+}
+
 export interface RunnerDetailDto {
   runner: RunnerSummaryDto | null;
   yamlPreview: string;

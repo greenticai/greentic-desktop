@@ -1,0 +1,25 @@
+id: example.terminal.top_10_largest_files
+name: Terminal Top 10 Largest Files
+version: 0.1.0
+mode: HumanDemonstration
+description: Run a local terminal command to find the top 10 largest files under a directory, within a bounded traversal depth, and return their size and location.
+target:
+  kind: terminal
+  app: Local shell
+required_capabilities:
+  - terminal.run_command
+inputs:
+  - inputs.root_path
+secrets: []
+outputs:
+  - outputs.largest_files
+assertions: []
+open_questions: []
+steps:
+  - id: list-largest-files
+    action: run_command
+    required_capability: terminal.run_command
+    value: "find '{{inputs.root_path}}' -maxdepth 6 '(' -name .git -o -name target -o -name node_modules -o -name dist -o -name Library -o -name .Trash -o -name .venv -o -name __pycache__ ')' -prune -o -type f -exec du -k {} + 2>/dev/null | sort -nr | head -n 10 | sed -E \"s#^([0-9]+)[[:space:]]+#size_kb=\\1 path=#\""
+    target:
+      preferred:
+        text: outputs.largest_files

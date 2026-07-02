@@ -34,6 +34,7 @@ pub fn linux_x11_capabilities() -> AdapterCapabilities {
             "linux.find_element",
             "linux.click_element",
             "linux.type_text",
+            "linux.press_shortcut",
             "linux.read_text",
             "linux.assert_visible",
             "linux.screenshot",
@@ -695,12 +696,40 @@ fn execute_x11_step(step: &RunnerStep) -> AdapterResult<String> {
         }
         "linux.type_text" => {
             let value = step.value.as_deref().unwrap_or_default();
+            if step.target != LocatorTarget::default() {
+                return Err(AdapterError::ExecutionFailed(
+                    "linux.type_text cannot safely type into a targeted element until the target is resolved to coordinates; omit the target to type into the current focus.".to_owned(),
+                ));
+            }
             run_command("xdotool", ["type", "--clearmodifiers", value])?;
             Ok("typed through XTest/xdotool".to_owned())
         }
+        "linux.press_shortcut" => {
+            let shortcut = step.value.as_deref().ok_or_else(|| {
+                AdapterError::ExecutionFailed(
+                    "linux.press_shortcut requires a shortcut such as Ctrl+N in step.value."
+                        .to_owned(),
+                )
+            })?;
+            let sequence = linux_xdotool_key_sequence(shortcut)?;
+            run_command("xdotool", ["key", "--clearmodifiers", sequence.as_str()])?;
+            Ok(format!("pressed Linux shortcut {shortcut}"))
+        }
         "linux.click_element" => {
-            run_command("xdotool", ["click", "1"])?;
-            Ok("clicked through XTest/xdotool".to_owned())
+            let (x, y) = target_region_center(&step.target).ok_or_else(|| {
+                AdapterError::ExecutionFailed(
+                    "linux.click_element requires a target region so it does not click the current cursor position.".to_owned(),
+                )
+            })?;
+            let x = x.to_string();
+            let y = y.to_string();
+            run_command(
+                "xdotool",
+                ["mousemove", x.as_str(), y.as_str(), "click", "1"],
+            )?;
+            Ok(format!(
+                "clicked Linux target at {x},{y} through XTest/xdotool"
+            ))
         }
         "linux.read_text" => Ok(read_at_spi_text()?.join("\n")),
         "linux.screenshot" => {
@@ -773,6 +802,60 @@ fn read_at_spi_text() -> AdapterResult<Vec<String>> {
         .collect())
 }
 
+fn linux_xdotool_key_sequence(shortcut: &str) -> AdapterResult<String> {
+    let parts = shortcut
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some(key) = parts.last() else {
+        return Err(AdapterError::ExecutionFailed(
+            "shortcut must include a key, for example Ctrl+N.".to_owned(),
+        ));
+    };
+    let mut sequence = Vec::new();
+    for modifier in &parts[..parts.len().saturating_sub(1)] {
+        sequence.push(match modifier.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "ctrl".to_owned(),
+            "shift" => "shift".to_owned(),
+            "alt" | "option" => "alt".to_owned(),
+            "super" | "meta" | "win" | "windows" => "super".to_owned(),
+            other => {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "unsupported Linux shortcut modifier {other}"
+                )))
+            }
+        });
+    }
+    sequence.push(linux_xdotool_key(key));
+    Ok(sequence.join("+"))
+}
+
+fn linux_xdotool_key(key: &str) -> String {
+    match key
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+        .as_str()
+    {
+        "return" | "enter" => "Return".to_owned(),
+        "tab" => "Tab".to_owned(),
+        "escape" | "esc" => "Escape".to_owned(),
+        "delete" | "del" => "Delete".to_owned(),
+        "backspace" => "BackSpace".to_owned(),
+        "home" => "Home".to_owned(),
+        "end" => "End".to_owned(),
+        "pageup" | "pgup" => "Page_Up".to_owned(),
+        "pagedown" | "pgdn" => "Page_Down".to_owned(),
+        "left" | "leftarrow" => "Left".to_owned(),
+        "right" | "rightarrow" => "Right".to_owned(),
+        "down" | "downarrow" => "Down".to_owned(),
+        "up" | "uparrow" => "Up".to_owned(),
+        key if key.starts_with('f') && key[1..].parse::<u8>().is_ok() => key.to_ascii_uppercase(),
+        key => key.to_owned(),
+    }
+}
+
 fn x11_screenshot(path: &Path) -> AdapterResult<()> {
     XcapScreenshotBackend
         .capture_primary_monitor(path)
@@ -820,6 +903,45 @@ fn target_text(target: &LocatorTarget) -> Option<String> {
                     .or_else(|| strategy.class_name.clone())
             })
         })
+}
+
+fn target_region_center(target: &LocatorTarget) -> Option<(u32, u32)> {
+    [
+        target
+            .preferred
+            .as_ref()
+            .and_then(|strategy| strategy.region.as_deref()),
+        target
+            .fallback
+            .as_ref()
+            .and_then(|strategy| strategy.region.as_deref()),
+        target
+            .visual_fallback
+            .as_ref()
+            .and_then(|visual| visual.region.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(parse_region_center)
+}
+
+fn parse_region_center(region: &str) -> Option<(u32, u32)> {
+    let normalized = region
+        .replace("x=", "")
+        .replace("y=", "")
+        .replace("width=", "")
+        .replace("height=", "")
+        .replace([' ', ';'], ",");
+    let parts = normalized
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.trim().parse::<u32>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.len() != 4 {
+        return None;
+    }
+    Some((parts[0] + parts[2] / 2, parts[1] + parts[3] / 2))
 }
 
 fn run_optional_command<const N: usize>(program: &str, args: [&str; N]) -> AdapterResult<String> {
@@ -1121,9 +1243,10 @@ mod tests {
         } else {
             let error = result.expect_err("off-Linux execution should fail closed");
             assert!(
-                error
-                    .to_string()
-                    .contains("Linux desktop automation can only run on Linux"),
+                error.to_string().contains("cannot safely type")
+                    || error
+                        .to_string()
+                        .contains("Linux desktop automation can only run on Linux"),
                 "{error}"
             );
         }
@@ -1348,6 +1471,71 @@ mod tests {
             error.to_string().contains("intentionally unsupported"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn maps_linux_xdotool_shortcuts_to_key_sequences() {
+        assert_eq!(
+            linux_xdotool_key_sequence("Return").expect("return shortcut"),
+            "Return"
+        );
+        assert_eq!(
+            linux_xdotool_key_sequence("Ctrl+PageUp").expect("page shortcut"),
+            "ctrl+Page_Up"
+        );
+        assert_eq!(
+            linux_xdotool_key_sequence("Ctrl+Shift+N").expect("modified shortcut"),
+            "ctrl+shift+n"
+        );
+    }
+
+    #[test]
+    fn linux_click_element_requires_target_region() {
+        let err = execute_x11_step(&RunnerStep {
+            id: "click".to_owned(),
+            action: "click_element".to_owned(),
+            target: LocatorTarget::default(),
+            value: None,
+            required_capability: "linux.click_element".to_owned(),
+        })
+        .expect_err("click without coordinates should fail before xdotool");
+
+        assert!(err.to_string().contains("requires a target region"));
+    }
+
+    #[test]
+    fn linux_targeted_type_text_fails_closed() {
+        let target = LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                name: Some("Search".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+
+        let err = execute_x11_step(&RunnerStep {
+            id: "type".to_owned(),
+            action: "type_text".to_owned(),
+            target,
+            value: Some("hello".to_owned()),
+            required_capability: "linux.type_text".to_owned(),
+        })
+        .expect_err("targeted type should fail before xdotool");
+
+        assert!(err.to_string().contains("cannot safely type"));
+    }
+
+    #[test]
+    fn linux_target_region_center_parses_coordinates() {
+        let target = LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                region: Some("10,20,100,40".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+
+        assert_eq!(target_region_center(&target), Some((60, 40)));
     }
 
     #[test]

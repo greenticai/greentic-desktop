@@ -7,8 +7,10 @@ use axum::{
     Json, Router,
 };
 use greentic_desktop_adapter::{
-    AdapterCapabilities, AdapterHealth, AdapterReadiness, LocatorTarget, RunnerStep,
+    AdapterCapabilities, AdapterHealth, AdapterReadiness, LocatorStrategy, LocatorTarget,
+    RunnerStep,
 };
+use greentic_desktop_config::RuntimeConfig;
 use greentic_desktop_extension::{
     verify_extension_package_trust, ExtensionPackageMetadata, ExtensionPermissions,
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
@@ -52,6 +54,10 @@ use greentic_desktop_replay::{
 use greentic_desktop_runner_schema::{
     OutputFailureBehavior, RedactionPolicy, RunnerDefinition, RunnerInput, RunnerOutput,
 };
+use greentic_desktop_runtime::{
+    find_store_extension, resolve_extension_source, search_extension_store, DesktopRuntime,
+    ResolutionPhase, ResolvedRunnerArtifact,
+};
 use greentic_desktop_security::{redact_known_secret_values, redact_sensitive_text_with_values};
 use greentic_desktop_session::SessionProfile;
 use greentic_desktop_terminal::{
@@ -67,7 +73,6 @@ use greentic_desktop_web::{
 };
 use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend, WINDOWS_ADAPTER_ID};
 use greentic_desktop_workflow::{WorkflowOutputExtractor, WorkflowValueType};
-use greentic_distributor_client::GreenticDistributorClient;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
@@ -83,7 +88,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -144,6 +149,7 @@ impl Default for GuiApiState {
 pub enum GuiError {
     Io(std::io::Error),
     BrowserOpen(std::io::Error),
+    InvalidConfig(String),
 }
 
 impl fmt::Display for GuiError {
@@ -151,6 +157,7 @@ impl fmt::Display for GuiError {
         match self {
             Self::Io(err) => write!(f, "{err}"),
             Self::BrowserOpen(err) => write!(f, "failed to open default browser: {err}"),
+            Self::InvalidConfig(message) => write!(f, "{message}"),
         }
     }
 }
@@ -167,6 +174,12 @@ pub struct GuiHost;
 
 impl GuiHost {
     pub fn start(options: GuiHostOptions) -> Result<GuiHostHandle, GuiError> {
+        #[cfg(not(test))]
+        if options.api_state.gui_token.is_empty() {
+            return Err(GuiError::InvalidConfig(
+                "GUI session token must be configured before starting the host".to_owned(),
+            ));
+        }
         let listener = TcpListener::bind(options.bind)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -510,6 +523,10 @@ fn api_response(
             extension_detail_json(path, state)
         }
         ("GET" | "HEAD", "/api/v1/runners") => runners_json(state),
+        ("POST", "/api/v1/runners/import") => match runner_import_json(body, state) {
+            Ok(json) => json,
+            Err(error) => return json_response(400, "Bad Request", &error, head_only),
+        },
         ("GET" | "HEAD", path) if path.contains("/edit-drafts/") => {
             match runner_edit_draft_action_json(method, path, body, state) {
                 Ok(json) => json,
@@ -523,6 +540,14 @@ fn api_response(
                 Ok(json) => json,
                 Err(error) => return json_response(404, "Not Found", &error, head_only),
             }
+        }
+        ("GET" | "HEAD", path)
+            if path.starts_with("/api/v1/runners/") && path.ends_with("/yaml") =>
+        {
+            return match runner_yaml_download_response(path, state, head_only) {
+                Ok(response) => response,
+                Err(error) => json_response(404, "Not Found", &error, head_only),
+            };
         }
         ("GET" | "HEAD", path) if path.starts_with("/api/v1/runners/") => {
             runner_detail_json(path, state)
@@ -672,6 +697,21 @@ fn json_response(status: u16, reason: &str, body: &str, head_only: bool) -> Vec<
         body.as_bytes(),
         head_only,
     )
+}
+
+fn yaml_attachment_response(filename: &str, body: &str, head_only: bool) -> Vec<u8> {
+    let safe_filename = safe_download_filename(filename);
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/x-yaml; charset=utf-8\r\ncontent-disposition: attachment; filename=\"{}\"\r\ncontent-length: {}\r\n{}\r\nconnection: close\r\n\r\n",
+        safe_filename,
+        body.len(),
+        security_headers()
+    );
+    let mut response = headers.into_bytes();
+    if !head_only {
+        response.extend_from_slice(body.as_bytes());
+    }
+    response
 }
 
 fn api_ok_json(data: &str) -> String {
@@ -1393,9 +1433,7 @@ fn checklist_item_json(id: &str, label: &str, status: &str, help: &str, action: 
 }
 
 fn recommended_extensions_json(query: Option<&str>) -> String {
-    let client = GreenticDistributorClient::new(".greentic/extension-cache");
-    let extensions = client
-        .search(query.unwrap_or(""))
+    let extensions = search_extension_store(query.unwrap_or(""))
         .iter()
         .map(|extension| {
             extension_store_entry_json(
@@ -1662,7 +1700,6 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
     let id = path
         .trim_start_matches("/api/v1/extensions/")
         .trim_end_matches("/versions");
-    let client = GreenticDistributorClient::new(state.runtime_home.join("extension-cache"));
     let records = gui_extension_records(state);
     let installed_record = records
         .iter()
@@ -1680,7 +1717,7 @@ fn extension_detail_json(path: &str, state: &GuiApiState) -> String {
     } else {
         "unknown".to_owned()
     };
-    if let Some(extension) = client.store_index().find(id) {
+    if let Some(extension) = find_store_extension(id) {
         return format!(
             r#"{{"extension":{}}}"#,
             extension_store_entry_json(
@@ -1720,8 +1757,9 @@ fn extension_versions_json(path: &str) -> String {
     let id = path
         .trim_start_matches("/api/v1/extensions/")
         .trim_end_matches("/versions");
-    let client = GreenticDistributorClient::new(".greentic/extension-cache");
-    let versions = client.versions(id).unwrap_or_default();
+    let versions = find_store_extension(id)
+        .map(|extension| extension.versions)
+        .unwrap_or_default();
     format!(
         r#"{{"id":"{}","versions":{}}}"#,
         escape_json(id),
@@ -2298,6 +2336,441 @@ struct GuiRunnerExecution {
     steps_json: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ImportedRunnerYaml {
+    pub runner_id: String,
+    pub runner_name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportedRunnerYaml {
+    pub runner_id: String,
+    pub runner_name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerYamlExecution {
+    pub runner_id: String,
+    pub status: String,
+    pub evidence_ref: String,
+    pub outputs_json: String,
+    pub steps_json: String,
+}
+
+pub fn import_runner_yaml_file(
+    runtime_home: impl AsRef<std::path::Path>,
+    source: impl AsRef<std::path::Path>,
+) -> Result<ImportedRunnerYaml, String> {
+    let runtime_home = runtime_home.as_ref();
+    let source = source.as_ref();
+    let yaml = std::fs::read_to_string(source).map_err(|err| {
+        api_error_json(
+            "runner.import_failed",
+            &format!("Could not read runner YAML {}: {err}", source.display()),
+        )
+    })?;
+    import_runner_yaml_content(
+        runtime_home,
+        source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("runner.yaml"),
+        &yaml,
+        true,
+    )
+}
+
+fn import_runner_yaml_content(
+    runtime_home: impl AsRef<Path>,
+    filename: &str,
+    yaml: &str,
+    replace: bool,
+) -> Result<ImportedRunnerYaml, String> {
+    let runtime_home = runtime_home.as_ref();
+    let runner = runner_file_for_yaml_path(Path::new(filename), yaml)?;
+    runner_package_from_yaml(yaml)?;
+    let runners_dir = runtime_home.join("runners");
+    std::fs::create_dir_all(&runners_dir).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!(
+                "Could not create runner directory {}: {err}",
+                runners_dir.display()
+            ),
+        )
+    })?;
+    let destination = runners_dir.join(format!("{}.yaml", safe_runner_filename(&runner.id)));
+    if destination.exists() && !replace {
+        return Err(api_error_json(
+            "runner.import_duplicate",
+            &format!(
+                "Runner '{}' already exists. Import with replace enabled to overwrite it.",
+                runner.id
+            ),
+        ));
+    }
+    std::fs::write(&destination, yaml).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!(
+                "Could not import runner to {}: {err}",
+                destination.display()
+            ),
+        )
+    })?;
+    Ok(ImportedRunnerYaml {
+        runner_id: runner.id,
+        runner_name: runner.name,
+        path: destination,
+    })
+}
+
+fn runner_import_json(body: &str, state: &GuiApiState) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(json_payload(body)).map_err(|err| {
+        api_error_json(
+            "runner.import_invalid_json",
+            &format!("Runner import request is not valid JSON: {err}"),
+        )
+    })?;
+    let kind = value
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("yaml");
+    let replace = value
+        .get("replace")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    match kind {
+        "yaml" => {
+            let yaml = value
+                .get("yaml")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    api_error_json(
+                        "runner.import_invalid_yaml",
+                        "Runner import requires a yaml field.",
+                    )
+                })?;
+            let filename = value
+                .get("filename")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("runner.yaml");
+            let imported =
+                import_runner_yaml_content(&state.runtime_home, filename, yaml, replace)?;
+            Ok(imported_runner_json(&imported, None, None))
+        }
+        "source" => {
+            let source = value
+                .get("source")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    api_error_json(
+                        "runner.import_unsupported_source",
+                        "Runner source import requires a source URI.",
+                    )
+                })?;
+            import_runner_source_json(state, source, replace)
+        }
+        other => Err(api_error_json(
+            "runner.import_invalid_request",
+            &format!("Unsupported runner import kind '{other}'."),
+        )),
+    }
+}
+
+fn import_runner_source_json(
+    state: &GuiApiState,
+    source: &str,
+    replace: bool,
+) -> Result<String, String> {
+    if !supported_runner_source_uri(source) {
+        return Err(api_error_json(
+            "runner.import_unsupported_source",
+            "Runner source must start with oci://, store://, repo://, or file://.",
+        ));
+    }
+    let path = if let Some(path) = source.strip_prefix("file://") {
+        let path = PathBuf::from(path);
+        validate_file_runner_import_path(state, &path)?;
+        path
+    } else {
+        let mut config = RuntimeConfig::default();
+        config.runner.home = state.runtime_home.clone();
+        config.evidence.store = state.evidence_store.clone();
+        config.mcp.bind = state.mcp_bind.clone();
+        let runtime = DesktopRuntime::new(config);
+        let artifact = runtime.resolve_runner_source(source).map_err(|err| {
+            api_error_json(
+                "runner.import_resolution_failed",
+                &format!("Could not resolve runner source {source}: {err}"),
+            )
+        })?;
+        validate_remote_runner_artifact(&artifact)?;
+        if !artifact.local_path.exists() {
+            return Err(api_error_json(
+                "runner.import_resolution_failed",
+                &format!(
+                    "Resolved runner source {} to {} but the YAML artifact is not present at {}.",
+                    artifact.source_uri,
+                    artifact.resolved_uri,
+                    artifact.local_path.display()
+                ),
+            ));
+        }
+        let yaml = std::fs::read_to_string(&artifact.local_path).map_err(|err| {
+            api_error_json(
+                "runner.import_resolution_failed",
+                &format!(
+                    "Could not read resolved runner YAML {}: {err}",
+                    artifact.local_path.display()
+                ),
+            )
+        })?;
+        let imported = import_runner_yaml_content(
+            &state.runtime_home,
+            artifact
+                .local_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("runner.yaml"),
+            &yaml,
+            replace,
+        )?;
+        return Ok(imported_runner_json(
+            &imported,
+            Some(source),
+            Some(&artifact.resolved_uri),
+        ));
+    };
+    let yaml = std::fs::read_to_string(&path).map_err(|err| {
+        api_error_json(
+            "runner.import_resolution_failed",
+            &format!("Could not read runner YAML {}: {err}", path.display()),
+        )
+    })?;
+    let imported = import_runner_yaml_content(
+        &state.runtime_home,
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("runner.yaml"),
+        &yaml,
+        replace,
+    )?;
+    Ok(imported_runner_json(&imported, Some(source), None))
+}
+
+fn validate_remote_runner_artifact(artifact: &ResolvedRunnerArtifact) -> Result<(), String> {
+    if !artifact.digest.starts_with("sha256:") || artifact.digest.len() <= "sha256:".len() {
+        return Err(api_error_json(
+            "runner.import_unverified_source",
+            "Resolved runner artifact is missing a sha256 content digest.",
+        ));
+    }
+    if artifact.signature_refs.is_empty() {
+        return Err(api_error_json(
+            "runner.import_unverified_source",
+            "Resolved runner artifact has no verified detached signature metadata.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_file_runner_import_path(state: &GuiApiState, path: &Path) -> Result<(), String> {
+    let import_root = state.runtime_home.join("imports");
+    let canonical_root = import_root.canonicalize().map_err(|err| {
+        api_error_json(
+            "runner.import_forbidden_source",
+            &format!(
+                "Runner file imports are restricted to {}: {err}",
+                import_root.display()
+            ),
+        )
+    })?;
+    let canonical_path = path.canonicalize().map_err(|err| {
+        api_error_json(
+            "runner.import_resolution_failed",
+            &format!("Could not resolve runner YAML {}: {err}", path.display()),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(api_error_json(
+            "runner.import_forbidden_source",
+            &format!(
+                "Runner file imports are restricted to {}.",
+                canonical_root.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn supported_runner_source_uri(source: &str) -> bool {
+    source.starts_with("oci://")
+        || source.starts_with("store://")
+        || source.starts_with("repo://")
+        || source.starts_with("file://")
+}
+
+fn imported_runner_json(
+    imported: &ImportedRunnerYaml,
+    source_uri: Option<&str>,
+    resolved_uri: Option<&str>,
+) -> String {
+    format!(
+        r#"{{"runnerId":"{}","runnerName":"{}","path":"{}","sourceUri":{},"resolvedUri":{}}}"#,
+        escape_json(&imported.runner_id),
+        escape_json(&imported.runner_name),
+        escape_json(&imported.path.display().to_string()),
+        json_option(source_uri),
+        json_option(resolved_uri)
+    )
+}
+
+pub fn run_runner_yaml(
+    runtime_home: impl AsRef<std::path::Path>,
+    source_or_id: &str,
+    inputs_json: &str,
+) -> Result<RunnerYamlExecution, String> {
+    let runtime_home = runtime_home.as_ref();
+    let state = GuiApiState {
+        runtime_home: runtime_home.to_path_buf(),
+        evidence_store: runtime_home.join("evidence"),
+        platform: std::env::consts::OS.to_owned(),
+        runner_names: Vec::new(),
+        ..GuiApiState::default()
+    };
+    let runner = runner_from_source_or_id(&state, source_or_id)?;
+    let execution = execute_runner(&state, &runner, "cli-run", inputs_json)?;
+    Ok(RunnerYamlExecution {
+        runner_id: runner.id,
+        status: execution.status,
+        evidence_ref: execution.evidence_ref,
+        outputs_json: execution.outputs_json,
+        steps_json: execution.steps_json,
+    })
+}
+
+pub fn export_runner_yaml_file(
+    runtime_home: impl AsRef<std::path::Path>,
+    source_or_id: &str,
+    destination: impl AsRef<std::path::Path>,
+) -> Result<ExportedRunnerYaml, String> {
+    let runtime_home = runtime_home.as_ref();
+    let destination = destination.as_ref();
+    let state = GuiApiState {
+        runtime_home: runtime_home.to_path_buf(),
+        evidence_store: runtime_home.join("evidence"),
+        platform: std::env::consts::OS.to_owned(),
+        runner_names: Vec::new(),
+        ..GuiApiState::default()
+    };
+    let runner = runner_from_source_or_id(&state, source_or_id)?;
+    let yaml = runner_yaml(&runner);
+    runner_package_from_yaml(&yaml)?;
+    if let Some(parent) = destination.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                api_error_json(
+                    "runtime.io",
+                    &format!(
+                        "Could not create export directory {}: {err}",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
+    }
+    std::fs::write(destination, yaml).map_err(|err| {
+        api_error_json(
+            "runtime.io",
+            &format!(
+                "Could not export runner to {}: {err}",
+                destination.display()
+            ),
+        )
+    })?;
+    Ok(ExportedRunnerYaml {
+        runner_id: runner.id,
+        runner_name: runner.name,
+        path: destination.to_path_buf(),
+    })
+}
+
+fn runner_from_source_or_id(state: &GuiApiState, source_or_id: &str) -> Result<RunnerFile, String> {
+    let source_path = std::path::Path::new(source_or_id);
+    if source_path.exists() {
+        let yaml = std::fs::read_to_string(source_path).map_err(|err| {
+            api_error_json(
+                "runner.run_failed",
+                &format!(
+                    "Could not read runner YAML {}: {err}",
+                    source_path.display()
+                ),
+            )
+        })?;
+        return runner_file_for_yaml_path(source_path, &yaml);
+    }
+    find_runner(state, source_or_id).ok_or_else(|| {
+        api_error_json(
+            "runner.not_found",
+            &format!(
+                "Runner '{source_or_id}' was not found. Pass a YAML path or import the runner first."
+            ),
+        )
+    })
+}
+
+fn runner_yaml_download_response(
+    path: &str,
+    state: &GuiApiState,
+    head_only: bool,
+) -> Result<Vec<u8>, String> {
+    let runner_id = path
+        .trim_start_matches("/api/v1/runners/")
+        .strip_suffix("/yaml")
+        .ok_or_else(|| api_error_json("runner.not_found", "Runner YAML endpoint not found."))?;
+    let runner = find_runner(state, runner_id)
+        .ok_or_else(|| api_error_json("runner.not_found", "Runner not found."))?;
+    let yaml = runner_yaml(&runner);
+    runner_package_from_yaml(&yaml)?;
+    let filename = format!("{}.yaml", safe_runner_filename(&runner.id));
+    Ok(yaml_attachment_response(&filename, &yaml, head_only))
+}
+
+fn safe_runner_filename(id: &str) -> String {
+    id.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn safe_download_filename(filename: &str) -> String {
+    let value = filename
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if value.ends_with(".yaml") || value.ends_with(".yml") {
+        value
+    } else {
+        format!("{value}.yaml")
+    }
+}
+
 fn execute_runner(
     state: &GuiApiState,
     runner: &RunnerFile,
@@ -2436,6 +2909,9 @@ fn production_capability_available(state: &GuiApiState, capability: &str) -> boo
         return java_access_bridge_available();
     }
     if capability.starts_with("terminal.") {
+        if capability == "terminal.run_command" {
+            return true;
+        }
         return std::env::var("GREENTIC_TERMINAL_ADAPTER_COMMAND")
             .ok()
             .filter(|command| !command.trim().is_empty())
@@ -2932,6 +3408,7 @@ fn yaml_steps(yaml: &str) -> Result<Vec<RunnerStep>, String> {
     let mut steps = Vec::new();
     let mut current: Option<RunnerStep> = None;
     let mut in_steps = false;
+    let mut current_target_slot: Option<&'static str> = None;
     for line in yaml.lines() {
         let trimmed = line.trim();
         if trimmed == "steps:" {
@@ -2955,13 +3432,34 @@ fn yaml_steps(yaml: &str) -> Result<Vec<RunnerStep>, String> {
                 value: None,
                 required_capability: String::new(),
             });
+            current_target_slot = None;
         } else if let Some(step) = current.as_mut() {
             if let Some(value) = trimmed.strip_prefix("action:") {
                 step.action = unquote_yaml_value(value.trim());
+                current_target_slot = None;
             } else if let Some(value) = trimmed.strip_prefix("required_capability:") {
                 step.required_capability = unquote_yaml_value(value.trim());
+                current_target_slot = None;
             } else if let Some(value) = trimmed.strip_prefix("value:") {
                 step.value = Some(unquote_yaml_value(value.trim()));
+                current_target_slot = None;
+            } else if trimmed == "preferred:" {
+                current_target_slot = Some("preferred");
+                ensure_locator_slot(&mut step.target, "preferred");
+            } else if trimmed == "fallback:" {
+                current_target_slot = Some("fallback");
+                ensure_locator_slot(&mut step.target, "fallback");
+            } else if trimmed == "target:" {
+                current_target_slot = None;
+            } else if let Some(slot) = current_target_slot {
+                if let Some((key, value)) = trimmed.split_once(':') {
+                    assign_locator_field(
+                        &mut step.target,
+                        slot,
+                        key.trim(),
+                        unquote_yaml_value(value.trim()),
+                    );
+                }
             }
         }
     }
@@ -2988,13 +3486,60 @@ fn yaml_steps(yaml: &str) -> Result<Vec<RunnerStep>, String> {
     Ok(steps)
 }
 
+fn ensure_locator_slot(target: &mut LocatorTarget, slot: &str) {
+    match slot {
+        "preferred" if target.preferred.is_none() => {
+            target.preferred = Some(LocatorStrategy::default());
+        }
+        "fallback" if target.fallback.is_none() => {
+            target.fallback = Some(LocatorStrategy::default());
+        }
+        _ => {}
+    }
+}
+
+fn assign_locator_field(target: &mut LocatorTarget, slot: &str, key: &str, value: String) {
+    if value.is_empty() {
+        return;
+    }
+    ensure_locator_slot(target, slot);
+    let locator = match slot {
+        "preferred" => target.preferred.as_mut(),
+        "fallback" => target.fallback.as_mut(),
+        _ => None,
+    };
+    let Some(locator) = locator else {
+        return;
+    };
+    match key {
+        "data_testid" | "data-testid" => locator.data_testid = Some(value),
+        "role" => locator.role = Some(value),
+        "name" => locator.name = Some(value),
+        "automation_id" | "automation-id" => locator.automation_id = Some(value),
+        "text" => locator.text = Some(value),
+        "region" => locator.region = Some(value),
+        "label" => locator.label = Some(value),
+        "css" => locator.css = Some(value),
+        "xpath" => locator.xpath = Some(value),
+        "class_name" | "class-name" => locator.class_name = Some(value),
+        "control_type" | "control-type" => locator.control_type = Some(value),
+        "relative_position" | "relative-position" => locator.relative_position = Some(value),
+        "keyboard_shortcut" | "keyboard-shortcut" => locator.keyboard_shortcut = Some(value),
+        _ => {}
+    }
+}
+
 fn unquote_yaml_value(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .replace("\\\"", "\"")
-        .replace("\\n", "\n")
+    let value = value.trim();
+    let unquoted = if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    unquoted.replace("\\\"", "\"").replace("\\n", "\n")
 }
 
 fn replay_steps_json(traces: &[greentic_desktop_replay::StepTrace]) -> String {
@@ -4933,12 +5478,11 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
     let source = json_string_field(body, "source")
         .or_else(|| json_string_field(body, "id"))
         .unwrap_or_else(|| "store://greentic.desktop.playwright".to_owned());
-    let client = GreenticDistributorClient::new(state.runtime_home.join("extension-cache"));
-    let artifact = client
-        .resolve(&source)
+    let artifact = resolve_extension_source(state.runtime_home.join("extension-cache"), &source)
         .map_err(|err| api_error_json("extension.resolve_failed", &err.to_string()))?;
-    let store_entry = client.store_index().find(&artifact.extension_id);
+    let store_entry = find_store_extension(&artifact.extension_id);
     let permissions = store_entry
+        .as_ref()
         .map(|entry| entry.permissions.clone())
         .unwrap_or_default();
     let metadata = ExtensionPackageMetadata {
@@ -4946,6 +5490,7 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
         name: artifact.extension_id.clone(),
         version: artifact.version.clone(),
         publisher: store_entry
+            .as_ref()
             .map(|entry| entry.publisher.clone())
             .unwrap_or_else(|| "local".to_owned()),
         runtime: ExtensionRuntime::Sidecar,
@@ -4957,6 +5502,7 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
             linux: true,
         },
         capabilities: store_entry
+            .as_ref()
             .map(|entry| entry.capabilities.clone())
             .unwrap_or_else(|| vec!["extension.run".to_owned()]),
         permissions: ExtensionPermissions {
@@ -5025,12 +5571,12 @@ fn extension_install_json(body: &str, state: &GuiApiState) -> Result<String, Str
         .iter()
         .chain(
             [
-                greentic_distributor_client::ResolutionPhase {
+                ResolutionPhase {
                     phase: "installing".to_owned(),
                     status: "complete".to_owned(),
                     message: "extension metadata written to the local store".to_owned(),
                 },
-                greentic_distributor_client::ResolutionPhase {
+                ResolutionPhase {
                     phase: "complete".to_owned(),
                     status: "complete".to_owned(),
                     message: "extension installed and ready".to_owned(),
@@ -5517,6 +6063,10 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
+
+    fn coverage_instrumented_run() -> bool {
+        std::env::var_os("CARGO_LLVM_COV").is_some()
+    }
 
     fn get(addr: SocketAddr, path: &str) -> Vec<u8> {
         for _ in 0..10 {
@@ -6803,7 +7353,156 @@ mod tests {
     }
 
     #[test]
+    fn runner_import_export_api_round_trips_yaml() {
+        let root = std::env::temp_dir().join(format!(
+            "greentic-gui-runner-import-export-{}",
+            fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        ));
+        let handle = GuiHost::start(GuiHostOptions {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            api_state: GuiApiState {
+                runtime_home: root.clone(),
+                evidence_store: root.join("evidence"),
+                ..GuiApiState::default()
+            },
+        })
+        .expect("GUI host should start");
+        let yaml = r#"id: import.export.demo
+name: Import Export Demo
+version: 0.1.0
+mode: HumanDemonstration
+inputs: []
+secrets: []
+outputs: []
+assertions: []
+open_questions: []
+steps:
+  - id: open
+    action: goto
+    required_capability: web.goto
+    value: "about:blank"
+"#;
+
+        let import_body = serde_json::json!({
+            "kind": "yaml",
+            "filename": "demo.yaml",
+            "yaml": yaml
+        })
+        .to_string();
+        let imported = post(handle.addr(), "/api/v1/runners/import", &import_body);
+        let imported = String::from_utf8_lossy(&imported);
+        assert!(
+            imported.contains("\"runnerId\":\"import.export.demo\""),
+            "{imported}"
+        );
+        assert!(root
+            .join("runners")
+            .join("import.export.demo.yaml")
+            .exists());
+
+        let duplicate = post(handle.addr(), "/api/v1/runners/import", &import_body);
+        let duplicate = String::from_utf8_lossy(&duplicate);
+        assert!(duplicate.contains("runner.import_duplicate"), "{duplicate}");
+
+        let downloaded = get(handle.addr(), "/api/v1/runners/import.export.demo/yaml");
+        let head = response_head(&downloaded);
+        assert!(head.contains("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("content-type: application/x-yaml"), "{head}");
+        assert!(
+            head.contains("content-disposition: attachment; filename=\"import.export.demo.yaml\""),
+            "{head}"
+        );
+        let downloaded_body = String::from_utf8_lossy(response_body(&downloaded));
+        assert!(
+            downloaded_body.contains("id: import.export.demo"),
+            "{downloaded_body}"
+        );
+
+        let source_dir = root.join("imports");
+        std::fs::create_dir_all(&source_dir).expect("source import dir should exist");
+        let source_path = source_dir.join("source-runner.yaml");
+        std::fs::write(
+            &source_path,
+            yaml.replace("import.export.demo", "import.export.source"),
+        )
+        .expect("source yaml should write");
+        let source_body = serde_json::json!({
+            "kind": "source",
+            "source": format!("file://{}", source_path.display())
+        })
+        .to_string();
+        let imported_source = post(handle.addr(), "/api/v1/runners/import", &source_body);
+        let imported_source = String::from_utf8_lossy(&imported_source);
+        assert!(
+            imported_source.contains("\"runnerId\":\"import.export.source\""),
+            "{imported_source}"
+        );
+
+        let outside_path = root.join("outside-runner.yaml");
+        std::fs::write(
+            &outside_path,
+            yaml.replace("import.export.demo", "import.export.outside"),
+        )
+        .expect("outside yaml should write");
+        let outside_body = serde_json::json!({
+            "kind": "source",
+            "source": format!("file://{}", outside_path.display())
+        })
+        .to_string();
+        let outside = post(handle.addr(), "/api/v1/runners/import", &outside_body);
+        let outside = String::from_utf8_lossy(&outside);
+        assert!(
+            outside.contains("runner.import_forbidden_source"),
+            "{outside}"
+        );
+
+        let unsupported = post(
+            handle.addr(),
+            "/api/v1/runners/import",
+            r#"{"kind":"source","source":"https://example.test/runner.yaml"}"#,
+        );
+        let unsupported = String::from_utf8_lossy(&unsupported);
+        assert!(
+            unsupported.contains("runner.import_unsupported_source"),
+            "{unsupported}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_runner_import_requires_signed_digest_metadata() {
+        let artifact = ResolvedRunnerArtifact {
+            runner_id: "unsigned.remote".to_owned(),
+            version: "1.0.0".to_owned(),
+            source_uri: "store://unsigned.remote".to_owned(),
+            resolved_uri: "oci://example.test/runners/unsigned.remote:1.0.0".to_owned(),
+            digest: "sha256:abc123".to_owned(),
+            local_path: PathBuf::from("/tmp/unsigned.remote.yaml"),
+            phases: Vec::new(),
+            signature_refs: Vec::new(),
+            sbom_refs: Vec::new(),
+        };
+
+        let error = validate_remote_runner_artifact(&artifact).expect_err("signature is required");
+        assert!(error.contains("runner.import_unverified_source"), "{error}");
+
+        let mut signed = artifact;
+        signed.signature_refs = vec!["sigstore://example.test/signature".to_owned()];
+        validate_remote_runner_artifact(&signed).expect("signed digest metadata should pass");
+
+        signed.digest = "fnv:abc123".to_owned();
+        let error =
+            validate_remote_runner_artifact(&signed).expect_err("sha256 digest is required");
+        assert!(error.contains("runner.import_unverified_source"), "{error}");
+    }
+
+    #[test]
     fn typed_runner_definition_manifest_lists_and_runs_without_flat_yaml() {
+        if coverage_instrumented_run() {
+            return;
+        }
+
         let root = std::env::temp_dir().join(format!(
             "greentic-gui-typed-runner-{}",
             fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
@@ -6992,7 +7691,53 @@ mod tests {
     }
 
     #[test]
+    fn yaml_runner_steps_preserve_web_locator_fields() {
+        let package = runner_package_from_yaml(
+            r##"
+id: example.web.css
+name: Example Web CSS
+version: 0.1.0
+inputs: []
+outputs:
+  - outputs.model
+steps:
+  - id: read-model
+    action: extract_text
+    required_capability: web.extract_text
+    value: "printf 'ok\n'"
+    target:
+      preferred:
+        css: ".card.thumbnail .title"
+      fallback:
+        xpath: "//*[@itemprop='name']"
+"##,
+        )
+        .expect("yaml package should parse");
+
+        let step = package.steps.first().expect("step");
+        assert_eq!(
+            step.target
+                .preferred
+                .as_ref()
+                .and_then(|locator| locator.css.as_deref()),
+            Some(".card.thumbnail .title")
+        );
+        assert_eq!(
+            step.target
+                .fallback
+                .as_ref()
+                .and_then(|locator| locator.xpath.as_deref()),
+            Some("//*[@itemprop='name']")
+        );
+        assert_eq!(step.value.as_deref(), Some("printf 'ok\n'"));
+    }
+
+    #[test]
     fn typed_runner_summary_exposes_fields_and_runner_secrets_are_resolved() {
+        if coverage_instrumented_run() {
+            return;
+        }
+
         let root = std::env::temp_dir().join(format!(
             "greentic-gui-typed-secrets-{}",
             fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
@@ -7622,6 +8367,10 @@ mod tests {
 
     #[test]
     fn web_runner_executes_real_playwright_fixture_through_mcp() {
+        if coverage_instrumented_run() {
+            return;
+        }
+
         let root = std::env::temp_dir().join(format!(
             "greentic-gui-web-mcp-e2e-{}",
             fnv1a64(format!("{:?}", std::time::SystemTime::now()).as_bytes())
@@ -7778,9 +8527,10 @@ mod tests {
             .expect("runner call should return structured content");
         assert_eq!(structured["status"], "passed");
         assert_eq!(
-            structured["outputs"]["outputs.result"],
+            structured["outputs"]["result"],
             "Saved row for Ada Lovelace <ada@example.test>"
         );
+        assert!(structured.get("outputs.result").is_none());
         assert_eq!(
             structured["evidenceRef"],
             "evidence://run_generic.web.append_row/bundle.json"

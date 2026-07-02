@@ -1,0 +1,51 @@
+id: example.macos.excel.sample_product_lookup
+name: Excel Sample Product Lookup
+version: 0.1.0
+mode: HumanDemonstration
+description: Open the sample product workbook in Excel, search for a product term, and return the selected product name, description, dimensions, weight, and price.
+target:
+  kind: desktop
+  os: macos
+  app: Microsoft Excel
+required_capabilities:
+  - macos.activate_app
+  - macos.open_resource
+  - macos.copy_spreadsheet_row
+  - macos.close_app
+inputs:
+  - inputs.xlsx_path
+  - inputs.search_term
+secrets: []
+outputs:
+  - outputs.product_row
+assertions: []
+open_questions:
+  - If multiple rows match the search term, Excel's first selected match is returned.
+  - outputs.product_row is copied from the matching spreadsheet row and is tab-delimited by Excel.
+  - Use examples/runners/sample.xlsx for inputs.xlsx_path when running the bundled sample workbook.
+steps:
+  - id: open-excel
+    action: activate_app
+    required_capability: macos.activate_app
+    value: Microsoft Excel
+
+  - id: open-sample-workbook
+    action: open_resource
+    required_capability: macos.open_resource
+    value: "{{inputs.xlsx_path}}"
+    target:
+      preferred:
+        role: document
+        name: active workbook
+      fallback:
+        role: grid
+
+  - id: copy-matching-product-row
+    action: copy_spreadsheet_row
+    required_capability: macos.copy_spreadsheet_row
+    value: "outputs.product_row={{inputs.search_term}}"
+
+  - id: close-excel
+    action: close_app
+    required_capability: macos.close_app
+    value: Microsoft Excel

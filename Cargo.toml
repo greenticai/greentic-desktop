@@ -7,7 +7,6 @@ members = [
   "crates/greentic-desktop-automation-foundation",
   "crates/greentic-desktop-workflow",
   "crates/greentic-desktop-extension",
-  "crates/greentic-distributor-client",
   "crates/greentic-desktop-web",
   "crates/greentic-desktop-windows",
   "crates/greentic-desktop-java",
@@ -46,7 +45,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.10"
+version = "0.1.13"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/greenticai/greentic-desktop"
@@ -57,14 +56,14 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 criterion = "0.8"
-greentic-llm = "1.2.6-research"
+greentic-llm = "1.1"
 greentic-desktop-core = { path = "crates/greentic-desktop-core", version = "0.1" }
 greentic-desktop-config = { path = "crates/greentic-desktop-config", version = "0.1" }
 greentic-desktop-adapter = { path = "crates/greentic-desktop-adapter", version = "0.1" }
 greentic-desktop-automation-foundation = { path = "crates/greentic-desktop-automation-foundation", version = "0.1" }
 greentic-desktop-workflow = { path = "crates/greentic-desktop-workflow", version = "0.1" }
 greentic-desktop-extension = { path = "crates/greentic-desktop-extension", version = "0.1" }
-greentic-distributor-client = { path = "crates/greentic-distributor-client", version = "0.1" }
+greentic-distributor-client = "1.1"
 greentic-desktop-web = { path = "crates/greentic-desktop-web", version = "0.1" }
 greentic-desktop-windows = { path = "crates/greentic-desktop-windows", version = "0.1" }
 greentic-desktop-java = { path = "crates/greentic-desktop-java", version = "0.1" }
@@ -101,6 +100,7 @@ greentic-desktop-gui-assets = { path = "crates/greentic-desktop-gui-assets", ver
 greentic-desktop-gui = { path = "crates/greentic-desktop-gui", version = "0.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+semver = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"

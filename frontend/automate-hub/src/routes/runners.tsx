@@ -16,6 +16,7 @@ import {
   Power,
   RotateCw,
   Trash2,
+  Download,
 } from "lucide-react";
 
 export const Route = createFileRoute("/runners")({
@@ -147,6 +148,10 @@ function RunnersPage() {
       void queryClient.invalidateQueries({ queryKey: ["runners"] });
       void queryClient.invalidateQueries({ queryKey: ["activity"] });
     },
+  });
+  const downloadRunner = useMutation({
+    mutationFn: (runner: RunnerSummaryDto) =>
+      api.downloadRunnerYaml(runner.id, `${runner.id.replace(/[^A-Za-z0-9._-]/g, "_")}.yaml`),
   });
   const items = (runnersQuery.data?.runners ?? []).map((r) => ({
     ...r,
@@ -452,6 +457,13 @@ function RunnersPage() {
             : "Runner action failed"}
         </div>
       )}
+      {downloadRunner.isError && (
+        <div className="mb-5 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {downloadRunner.error instanceof Error
+            ? downloadRunner.error.message
+            : "Runner export failed"}
+        </div>
+      )}
       {runnersQuery.isError && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           Could not load runners.
@@ -544,6 +556,18 @@ function RunnersPage() {
                 <a href={editHref(r)}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </a>
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
+                disabled={downloadRunner.isPending}
+                onClick={() => downloadRunner.mutate(r)}
+              >
+                <Download className="h-3.5 w-3.5" />
+                {downloadRunner.isPending && downloadRunner.variables?.id === r.id
+                  ? "Exporting"
+                  : "Export YAML"}
               </Button>
               <Button
                 size="sm"

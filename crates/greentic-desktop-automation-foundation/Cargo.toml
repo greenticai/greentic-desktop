@@ -14,12 +14,16 @@ categories.workspace = true
 name = "greentic_desktop_automation_foundation"
 path = "src/lib.rs"
 
+[features]
+default = []
+rdev-capture = ["dep:rdev"]
+
 [dependencies]
 ed25519-dalek.workspace = true
 enigo.workspace = true
 greentic-desktop-security.workspace = true
 jsonschema.workspace = true
-rdev.workspace = true
+rdev = { workspace = true, optional = true }
 reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true

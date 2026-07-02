@@ -1,4 +1,5 @@
 use greentic_desktop_adapter::AdapterCapabilities;
+use semver::Version;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -265,6 +266,7 @@ pub enum ExtensionError {
     UnsignedExtension(String),
     NotFound(String),
     NotSidecar(String),
+    Downgrade(String),
 }
 
 impl fmt::Display for ExtensionError {
@@ -274,7 +276,8 @@ impl fmt::Display for ExtensionError {
             | Self::InvalidManifest(message)
             | Self::UnsignedExtension(message)
             | Self::NotFound(message)
-            | Self::NotSidecar(message) => write!(f, "{message}"),
+            | Self::NotSidecar(message)
+            | Self::Downgrade(message) => write!(f, "{message}"),
         }
     }
 }
@@ -316,6 +319,12 @@ impl ExtensionManager {
         digest: &str,
     ) -> Result<PathBuf, ExtensionError> {
         self.verify(manifest)?;
+        validate_extension_id(&manifest.id)?;
+        validate_extension_version(&manifest.version)?;
+        let mut records = self.installed_records()?;
+        if let Some(existing) = records.iter().find(|record| record.id == manifest.id) {
+            reject_extension_downgrade(&manifest.id, &manifest.version, &existing.version)?;
+        }
         let dir = self.extension_version_dir(&manifest.id, &manifest.version);
         fs::create_dir_all(&dir)?;
         let path = dir.join("extension.toml");
@@ -324,7 +333,6 @@ impl ExtensionManager {
             self.extension_dir(&manifest.id).join("current"),
             &manifest.version,
         )?;
-        let mut records = self.installed_records()?;
         upsert_record(
             &mut records,
             InstalledExtensionRecord {
@@ -363,11 +371,8 @@ impl ExtensionManager {
     }
 
     pub fn verify(&self, manifest: &ExtensionManifest) -> Result<(), ExtensionError> {
-        if manifest.id.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest(
-                "extension id must not be empty".to_owned(),
-            ));
-        }
+        validate_extension_id(&manifest.id)?;
+        validate_extension_version(&manifest.version)?;
 
         if manifest.capabilities.is_empty() {
             return Err(ExtensionError::InvalidManifest(format!(
@@ -379,6 +384,15 @@ impl ExtensionManager {
         if self.require_signed_extensions && !manifest.signed {
             return Err(ExtensionError::UnsignedExtension(format!(
                 "unsigned extension {} refused by policy",
+                manifest.id
+            )));
+        }
+        if self.require_signed_extensions
+            && manifest.signed
+            && !is_trusted_builtin_manifest(manifest)
+        {
+            return Err(ExtensionError::UnsignedExtension(format!(
+                "extension {} declares signed=true but no verified package signature was provided",
                 manifest.id
             )));
         }
@@ -404,6 +418,7 @@ impl ExtensionManager {
     }
 
     pub fn remove(&self, extension_id: &str) -> Result<(), ExtensionError> {
+        validate_extension_id(extension_id)?;
         let dir = self.extension_dir(extension_id);
         if !dir.exists() {
             return Err(ExtensionError::NotFound(format!(
@@ -417,6 +432,7 @@ impl ExtensionManager {
     }
 
     pub fn set_enabled(&self, extension_id: &str, enabled: bool) -> Result<(), ExtensionError> {
+        validate_extension_id(extension_id)?;
         let mut records = self.installed_records()?;
         let record = records
             .iter_mut()
@@ -429,6 +445,7 @@ impl ExtensionManager {
     }
 
     pub fn health(&self, extension_id: &str) -> Result<ExtensionHealth, ExtensionError> {
+        validate_extension_id(extension_id)?;
         let manifest = self
             .list()?
             .into_iter()
@@ -437,6 +454,34 @@ impl ExtensionManager {
                 ExtensionError::NotFound(format!("extension {extension_id} not found"))
             })?;
         self.verify(&manifest)?;
+        let record = self
+            .installed_records()?
+            .into_iter()
+            .find(|record| record.id == extension_id)
+            .ok_or_else(|| {
+                ExtensionError::NotFound(format!("extension {extension_id} is not installed"))
+            })?;
+        if !record.enabled {
+            return Ok(ExtensionHealth {
+                id: extension_id.to_owned(),
+                status: "disabled".to_owned(),
+                message: "Extension is installed but disabled.".to_owned(),
+            });
+        }
+        if manifest.runtime == ExtensionRuntime::Sidecar
+            && manifest
+                .command
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            return Ok(ExtensionHealth {
+                id: extension_id.to_owned(),
+                status: "unhealthy".to_owned(),
+                message: "Sidecar extension is missing a command.".to_owned(),
+            });
+        }
         Ok(ExtensionHealth {
             id: extension_id.to_owned(),
             status: "healthy".to_owned(),
@@ -445,6 +490,7 @@ impl ExtensionManager {
     }
 
     pub fn start_sidecar(&self, extension_id: &str) -> Result<SidecarProcess, ExtensionError> {
+        validate_extension_id(extension_id)?;
         let manifest = self
             .list()?
             .into_iter()
@@ -487,9 +533,16 @@ impl ExtensionManager {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, render_installed_lock(records))?;
+        let tmp = path.with_file_name("installed.lock.tmp");
+        fs::write(&tmp, render_installed_lock(records))?;
+        fs::rename(tmp, path)?;
         Ok(())
     }
+}
+
+fn is_trusted_builtin_manifest(manifest: &ExtensionManifest) -> bool {
+    built_in_extension(&manifest.id)
+        .is_some_and(|builtin| builtin.version == manifest.version && builtin.signed)
 }
 
 pub fn parse_manifest(input: &str) -> Result<ExtensionManifest, ExtensionError> {
@@ -575,17 +628,8 @@ pub fn parse_package_metadata(input: &str) -> Result<ExtensionPackageMetadata, E
 pub fn validate_package_metadata(
     metadata: &ExtensionPackageMetadata,
 ) -> Result<(), ExtensionError> {
-    if metadata.id.trim().is_empty() {
-        return Err(ExtensionError::InvalidManifest(
-            "extension id must not be empty".to_owned(),
-        ));
-    }
-    if metadata.version.trim().is_empty() {
-        return Err(ExtensionError::InvalidManifest(format!(
-            "extension {} must declare version",
-            metadata.id
-        )));
-    }
+    validate_extension_id(&metadata.id)?;
+    validate_extension_version(&metadata.version)?;
     if metadata.publisher.trim().is_empty() {
         return Err(ExtensionError::InvalidManifest(format!(
             "extension {} must declare publisher",
@@ -621,6 +665,66 @@ pub fn validate_package_metadata(
         )));
     }
     Ok(())
+}
+
+fn validate_extension_id(id: &str) -> Result<(), ExtensionError> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(ExtensionError::InvalidManifest(
+            "extension id must not be empty".to_owned(),
+        ));
+    }
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ExtensionError::InvalidManifest(format!(
+            "extension id {id} contains invalid characters"
+        )));
+    }
+    if id == "." || id == ".." || id.contains("..") {
+        return Err(ExtensionError::InvalidManifest(format!(
+            "extension id {id} must not contain path traversal"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_extension_version(version: &str) -> Result<(), ExtensionError> {
+    let version = version.trim();
+    if version.is_empty() {
+        return Err(ExtensionError::InvalidManifest(
+            "extension version must not be empty".to_owned(),
+        ));
+    }
+    Version::parse(version).map_err(|err| {
+        ExtensionError::InvalidManifest(format!("extension version {version} is not semver: {err}"))
+    })?;
+    Ok(())
+}
+
+fn reject_extension_downgrade(
+    id: &str,
+    next_version: &str,
+    current_version: &str,
+) -> Result<(), ExtensionError> {
+    let next = Version::parse(next_version).map_err(|err| {
+        ExtensionError::InvalidManifest(format!(
+            "extension version {next_version} is not semver: {err}"
+        ))
+    })?;
+    let current = Version::parse(current_version).map_err(|err| {
+        ExtensionError::InvalidManifest(format!(
+            "installed extension version {current_version} is not semver: {err}"
+        ))
+    })?;
+    if next < current {
+        Err(ExtensionError::Downgrade(format!(
+            "refusing to downgrade extension {id} from {current_version} to {next_version}"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn built_in_extension(extension_id: &str) -> Option<ExtensionManifest> {
@@ -817,7 +921,7 @@ pub fn built_in_extension(extension_id: &str) -> Option<ExtensionManifest> {
 fn string_value(input: &str, key: &str) -> Option<String> {
     input.lines().find_map(|line| {
         let line = line.trim();
-        let rest = line.strip_prefix(key)?.trim_start();
+        let rest = exact_key_rest(line, key)?;
         let rest = rest.strip_prefix('=')?.trim_start();
         Some(rest.trim_matches('"').to_owned())
     })
@@ -837,7 +941,7 @@ fn array_value(input: &str, key: &str) -> Vec<String> {
 
     for line in input.lines() {
         let line = line.trim();
-        if line.starts_with(&format!("{key} = [")) {
+        if exact_key_rest(line, key).is_some_and(|rest| rest.starts_with("= [")) {
             collecting = true;
             collect_quoted_values(line, &mut values);
             if line.ends_with(']') {
@@ -857,6 +961,18 @@ fn array_value(input: &str, key: &str) -> Vec<String> {
     values.sort();
     values.dedup();
     values
+}
+
+fn exact_key_rest<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(key)?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+    Some(rest.trim_start())
 }
 
 fn collect_quoted_values(line: &str, values: &mut Vec<String>) {
@@ -946,15 +1062,20 @@ fn render_array(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_home() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "greentic-extension-test-{}",
+            "greentic-extension-test-{}-{}-{}",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock should be after epoch")
-                .as_nanos()
+                .as_nanos(),
+            TEMP_HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
@@ -1259,6 +1380,14 @@ filesystem = "none"
         let health = manager
             .health("greentic.desktop.playwright")
             .expect("health should pass");
+        assert_eq!(health.status, "disabled");
+
+        manager
+            .set_enabled("greentic.desktop.playwright", true)
+            .expect("enable should pass");
+        let health = manager
+            .health("greentic.desktop.playwright")
+            .expect("health should pass");
         assert_eq!(health.status, "healthy");
 
         manager
@@ -1286,6 +1415,73 @@ filesystem = "none"
             .expect_err("unsigned extension should fail");
 
         assert!(err.to_string().contains("unsigned extension"));
+    }
+
+    #[test]
+    fn refuses_self_declared_signed_manifest_when_signature_is_required() {
+        let home = temp_home();
+        let manager = ExtensionManager::new(&home, true);
+        let manifest = ExtensionManifest {
+            id: "greentic.desktop.attacker".to_owned(),
+            name: "Attacker".to_owned(),
+            version: "1.0.0".to_owned(),
+            runtime: ExtensionRuntime::Native,
+            command: None,
+            args: Vec::new(),
+            capabilities: vec!["attacker.run".to_owned()],
+            permissions: Vec::new(),
+            signed: true,
+        };
+
+        let err = manager
+            .install(&manifest)
+            .expect_err("self-declared signed manifest should not satisfy signed policy");
+
+        assert!(err.to_string().contains("no verified package signature"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_extension_ids_before_filesystem_access() {
+        let home = temp_home();
+        let manager = ExtensionManager::new(&home, false);
+        let manifest = ExtensionManifest {
+            id: "../../../tmp/pwn".to_owned(),
+            name: "Traversal".to_owned(),
+            version: "1.0.0".to_owned(),
+            runtime: ExtensionRuntime::Native,
+            command: None,
+            args: Vec::new(),
+            capabilities: vec!["bad.run".to_owned()],
+            permissions: Vec::new(),
+            signed: false,
+        };
+
+        let install = manager
+            .install(&manifest)
+            .expect_err("traversal id should not install");
+        let remove = manager
+            .remove("../../../tmp/pwn")
+            .expect_err("traversal id should not remove arbitrary paths");
+
+        assert!(install.to_string().contains("invalid characters"));
+        assert!(remove.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn rejects_extension_downgrades_with_semver_ordering() {
+        let home = temp_home();
+        let manager = ExtensionManager::new(&home, false);
+        let mut manifest =
+            built_in_extension("greentic.desktop.playwright").expect("built-in extension");
+        manifest.version = "1.10.0".to_owned();
+        manager.install(&manifest).expect("newer install");
+        manifest.version = "1.9.0".to_owned();
+
+        let err = manager
+            .install(&manifest)
+            .expect_err("older semver version should not overwrite newer install");
+
+        assert!(err.to_string().contains("refusing to downgrade"));
     }
 
     #[test]
@@ -1336,6 +1532,30 @@ allow = [
         );
         assert_eq!(manifest.permissions, vec!["desktop.input".to_owned()]);
         assert!(!manifest.signed);
+    }
+
+    #[test]
+    fn manifest_parser_matches_exact_keys_only() {
+        let manifest = parse_manifest(
+            r#"
+identity = "wrong"
+id = "greentic.desktop.exact"
+version_backup = "9.9.9"
+version = "1.2.3"
+signed_backup = true
+signed = false
+
+[capabilities]
+tools_backup = ["wrong.run"]
+tools = ["exact.run"]
+"#,
+        )
+        .expect("manifest should parse exact keys");
+
+        assert_eq!(manifest.id, "greentic.desktop.exact");
+        assert_eq!(manifest.version, "1.2.3");
+        assert!(!manifest.signed);
+        assert_eq!(manifest.capabilities, vec!["exact.run".to_owned()]);
     }
 
     #[test]

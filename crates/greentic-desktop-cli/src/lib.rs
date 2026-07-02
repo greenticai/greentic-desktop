@@ -1,6 +1,9 @@
 use greentic_desktop_config::RuntimeConfig;
 use greentic_desktop_extension::built_in_extension;
-use greentic_desktop_gui::{open_default_browser, GuiApiState, GuiHost, GuiHostOptions};
+use greentic_desktop_gui::{
+    export_runner_yaml_file, import_runner_yaml_file, open_default_browser, run_runner_yaml,
+    GuiApiState, GuiHost, GuiHostOptions,
+};
 use greentic_desktop_planner::{
     plan_prompt_with_default_llm, save_draft_runner, PlannerDiagnostic, PlannerOptions,
     PlanningContext,
@@ -12,11 +15,12 @@ use greentic_desktop_recorder::{
     RecordingStartRequest, RecordingTargetKind,
 };
 use greentic_desktop_runtime::{discover_extensions, discover_runners, DesktopRuntime};
+use serde_json::json;
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -122,6 +126,14 @@ fn run(
     if !require_desktop_prefix && args.first().map(String::as_str) == Some("gui") {
         return run_gui(parse_gui_args(&args[1..])?, writer, block_gui);
     }
+    if !require_desktop_prefix
+        && matches!(
+            args.first().map(String::as_str),
+            Some("--bind" | "--no-open" | "--token")
+        )
+    {
+        return run_gui(parse_gui_args(&args)?, writer, block_gui);
+    }
 
     let config = RuntimeConfig::default();
     let runtime = DesktopRuntime::new(config.clone());
@@ -133,6 +145,21 @@ fn run(
         [command] if command == "init" => {
             runtime.init()?;
             writeln!(writer, "initialized: {}", config.runner.home.display())?;
+        }
+        [flag, path] if flag == "--import" => {
+            handle_runner_import(path, &runtime, &config, writer)?;
+        }
+        [flag, target, rest @ ..] if flag == "--run" => {
+            handle_runner_run(target, rest, &config, writer)?;
+        }
+        [command, subcommand, rest @ ..] if command == "desktop" && subcommand == "validate" => {
+            handle_desktop_validate(rest, &config, writer)?;
+        }
+        [command, rest @ ..] if command == "validate" => {
+            handle_desktop_validate(rest, &config, writer)?;
+        }
+        [flag, target, rest @ ..] if flag == "--export" => {
+            handle_runner_export(target, rest, &config, writer)?;
         }
         [command, subcommand] if command == "config" && subcommand == "show" => {
             writer.write_all(config.render_toml().as_bytes())?;
@@ -242,6 +269,20 @@ fn run(
                 writeln!(writer, "{runner}")?;
             }
         }
+        [command, subcommand, path] if command == "runner" && subcommand == "import" => {
+            handle_runner_import(path, &runtime, &config, writer)?;
+        }
+        [command, subcommand, target, rest @ ..] if command == "runner" && subcommand == "run" => {
+            handle_runner_run(target, rest, &config, writer)?;
+        }
+        [command, subcommand, rest @ ..] if command == "runner" && subcommand == "validate" => {
+            handle_desktop_validate(rest, &config, writer)?;
+        }
+        [command, subcommand, target, rest @ ..]
+            if command == "runner" && subcommand == "export" =>
+        {
+            handle_runner_export(target, rest, &config, writer)?;
+        }
         [command, subcommand, rest @ ..] if command == "runner" && subcommand == "plan" => {
             handle_runner_plan(rest, &runtime, &config, writer)?;
         }
@@ -305,18 +346,19 @@ fn usage(require_desktop_prefix: bool) -> String {
     let gui_command = if require_desktop_prefix {
         ""
     } else {
-        "gui [--bind ADDR] [--no-open]|"
+        "gui [--bind ADDR] [--token TOKEN] [--no-open]|"
     };
 
     format!(
-        "usage: {prefix} <{gui_command}info|init|config show|extension search QUERY|extension install ID|extension list|extension info ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|runner pack ID --out PATH|runner verify-pack PATH|runner install-pack PATH|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
+        "usage: {prefix} <{gui_command}info|init|--import (PATH|file://PATH|oci://REF|store://ID|repo://REF)|--run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]|desktop validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]|--export (PATH|ID) --out PATH|config show|extension search QUERY|extension install ID|extension list|extension info ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner import (PATH|file://PATH|oci://REF|store://ID|repo://REF)|runner run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]|runner validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]|runner export (PATH|ID) --out PATH|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|runner pack ID --out PATH|runner verify-pack PATH|runner install-pack PATH|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GuiCliOptions {
     bind: SocketAddr,
     open_browser: bool,
+    token: Option<String>,
 }
 
 impl Default for GuiCliOptions {
@@ -324,6 +366,7 @@ impl Default for GuiCliOptions {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             open_browser: true,
+            token: None,
         }
     }
 }
@@ -346,9 +389,20 @@ fn parse_gui_args(args: &[String]) -> Result<GuiCliOptions, CliError> {
                     .map_err(|_| CliError::Usage(format!("invalid GUI bind address: {bind}")))?;
                 index += 2;
             }
+            "--token" => {
+                let Some(token) = args.get(index + 1) else {
+                    return Err(CliError::Usage("gui --token requires a token".to_owned()));
+                };
+                if token.is_empty() {
+                    return Err(CliError::Usage("gui --token must not be empty".to_owned()));
+                }
+                options.token = Some(token.to_owned());
+                index += 2;
+            }
             "--help" | "-h" => {
                 return Err(CliError::Usage(
-                    "usage: greentic-desktop gui [--bind ADDR] [--no-open]".to_owned(),
+                    "usage: greentic-desktop gui [--bind ADDR] [--token TOKEN] [--no-open]"
+                        .to_owned(),
                 ));
             }
             other => return Err(CliError::Usage(format!("unknown gui option: {other}"))),
@@ -376,7 +430,7 @@ fn run_gui(
         installed_core_adapter_ids: info.installed_adapters,
         installed_extension_ids: discover_extensions(&config.runner.home).unwrap_or_default(),
         runner_names: discover_runners(&config.runner.home).unwrap_or_default(),
-        gui_token: gui_session_token(),
+        gui_token: options.token.clone().unwrap_or_else(gui_session_token),
     };
     let gui_token = api_state.gui_token.clone();
     let handle = GuiHost::start(GuiHostOptions {
@@ -572,6 +626,496 @@ fn recording_target_kind_for_adapter(adapter: &str) -> RecordingTargetKind {
     } else {
         RecordingTargetKind::Web
     }
+}
+
+fn handle_runner_import(
+    source: &str,
+    runtime: &DesktopRuntime,
+    config: &RuntimeConfig,
+    writer: &mut dyn Write,
+) -> Result<(), CliError> {
+    let import_path = resolve_runner_import_source(source, runtime)?;
+    let imported =
+        import_runner_yaml_file(&config.runner.home, &import_path).map_err(CliError::Usage)?;
+    writeln!(
+        writer,
+        "imported: {}\t{}\t{}",
+        imported.runner_id,
+        imported.runner_name,
+        imported.path.display()
+    )?;
+    Ok(())
+}
+
+fn resolve_runner_import_source(
+    source: &str,
+    runtime: &DesktopRuntime,
+) -> Result<PathBuf, CliError> {
+    if let Some(path) = source.strip_prefix("file://") {
+        return Ok(PathBuf::from(path));
+    }
+    if !source.contains("://") {
+        return Ok(PathBuf::from(source));
+    }
+    let artifact = runtime.resolve_runner_source(source)?;
+    if artifact.local_path.exists() {
+        Ok(artifact.local_path)
+    } else {
+        Err(CliError::Usage(format!(
+            "resolved runner source {} to {} but the YAML artifact is not present in the local distributor cache. Expected cached file: {}",
+            artifact.source_uri,
+            artifact.resolved_uri,
+            artifact.local_path.display()
+        )))
+    }
+}
+
+fn handle_runner_run(
+    target: &str,
+    args: &[String],
+    config: &RuntimeConfig,
+    writer: &mut dyn Write,
+) -> Result<(), CliError> {
+    let inputs_json = runner_run_inputs_json(args)?;
+    let execution =
+        run_runner_yaml(&config.runner.home, target, &inputs_json).map_err(CliError::Usage)?;
+    writeln!(writer, "runner: {}", execution.runner_id)?;
+    writeln!(writer, "status: {}", execution.status)?;
+    writeln!(writer, "evidence: {}", execution.evidence_ref)?;
+    writeln!(writer, "outputs: {}", execution.outputs_json)?;
+    writeln!(writer, "steps: {}", execution.steps_json)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DesktopValidateOptions {
+    workflow: String,
+    input_args: Vec<String>,
+    expect_files: Vec<PathBuf>,
+    expect_file_changed: Vec<PathBuf>,
+    expect_outputs: Vec<(String, String)>,
+    expect_no_modal: bool,
+    expect_frontmost_app: Option<String>,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LiveFileState {
+    exists: bool,
+    modified: Option<SystemTime>,
+    size: Option<u64>,
+}
+
+impl LiveFileState {
+    fn capture(path: &Path) -> Self {
+        match fs::metadata(path) {
+            Ok(metadata) => Self {
+                exists: true,
+                modified: metadata.modified().ok(),
+                size: Some(metadata.len()),
+            },
+            Err(_) => Self {
+                exists: false,
+                modified: None,
+                size: None,
+            },
+        }
+    }
+
+    fn changed_from(&self, before: &Self) -> bool {
+        self.exists
+            && (!before.exists || self.modified != before.modified || self.size != before.size)
+    }
+}
+
+fn handle_desktop_validate(
+    args: &[String],
+    config: &RuntimeConfig,
+    writer: &mut dyn Write,
+) -> Result<(), CliError> {
+    let options = parse_desktop_validate_args(args)?;
+    let before = options
+        .expect_file_changed
+        .iter()
+        .map(|path| (path.clone(), LiveFileState::capture(path)))
+        .collect::<Vec<_>>();
+    let inputs_json = runner_run_inputs_json(&options.input_args)?;
+    let execution =
+        run_runner_yaml(&config.runner.home, &options.workflow, &inputs_json).map_err(|err| {
+            CliError::Usage(format!("live validation runner execution failed: {err}"))
+        })?;
+    let mut failures = Vec::new();
+    let outputs = serde_json::from_str::<serde_json::Value>(&execution.outputs_json)
+        .unwrap_or_else(|_| json!({}));
+
+    for path in &options.expect_files {
+        if !path.exists() {
+            failures.push(format!("expected file does not exist: {}", path.display()));
+        }
+    }
+    for (path, before_state) in &before {
+        let after = LiveFileState::capture(path);
+        if !after.changed_from(before_state) {
+            failures.push(format!(
+                "expected file was not created or changed: {}",
+                path.display()
+            ));
+        }
+    }
+    for (key, expected) in &options.expect_outputs {
+        let actual = outputs.get(key).and_then(|value| value.as_str());
+        if actual != Some(expected.as_str()) {
+            failures.push(format!(
+                "expected output {key}={expected}, got {}",
+                actual.unwrap_or("<missing>")
+            ));
+        }
+    }
+    let modal = if options.expect_no_modal {
+        live_modal_summary()
+    } else {
+        LiveModalSummary::default()
+    };
+    if options.expect_no_modal && modal.blocking {
+        failures.push(format!(
+            "blocking modal remains: {}",
+            modal.summary.as_deref().unwrap_or("unknown modal")
+        ));
+    }
+    let frontmost = live_frontmost_app();
+    if let Some(expected) = &options.expect_frontmost_app {
+        match &frontmost {
+            Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
+            Some(actual) => {
+                failures.push(format!("expected frontmost app {expected}, got {actual}"))
+            }
+            None => failures.push(format!("expected frontmost app {expected}, got <unknown>")),
+        }
+    }
+
+    let passed = failures.is_empty();
+    if options.json {
+        let summary = json!({
+            "ok": passed,
+            "runnerId": execution.runner_id,
+            "status": if passed { "passed" } else { "failed" },
+            "evidenceRef": execution.evidence_ref,
+            "outputs": outputs,
+            "steps": serde_json::from_str::<serde_json::Value>(&execution.steps_json).unwrap_or_else(|_| json!([])),
+            "liveAssertions": {
+                "expectFiles": options.expect_files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                "expectFileChanged": options.expect_file_changed.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                "expectOutputs": options.expect_outputs.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>(),
+                "expectNoModal": options.expect_no_modal,
+                "expectFrontmostApp": options.expect_frontmost_app,
+            },
+            "liveState": {
+                "frontmostApp": frontmost,
+                "modal": {
+                    "blocking": modal.blocking,
+                    "summary": modal.summary,
+                }
+            },
+            "failures": failures,
+        });
+        writeln!(writer, "{summary}")?;
+    } else {
+        writeln!(writer, "runner: {}", execution.runner_id)?;
+        writeln!(
+            writer,
+            "status: {}",
+            if passed { "passed" } else { "failed" }
+        )?;
+        writeln!(writer, "evidence: {}", execution.evidence_ref)?;
+        writeln!(writer, "outputs: {}", execution.outputs_json)?;
+        if let Some(frontmost) = frontmost {
+            writeln!(writer, "frontmost_app: {frontmost}")?;
+        }
+        if options.expect_no_modal {
+            writeln!(
+                writer,
+                "modal: {}",
+                modal.summary.as_deref().unwrap_or("none")
+            )?;
+        }
+        for failure in &failures {
+            writeln!(writer, "validation_error: {failure}")?;
+        }
+    }
+
+    if passed {
+        Ok(())
+    } else {
+        Err(CliError::Usage(format!(
+            "live validation failed: {}",
+            failures.join("; ")
+        )))
+    }
+}
+
+fn parse_desktop_validate_args(args: &[String]) -> Result<DesktopValidateOptions, CliError> {
+    let mut workflow = None;
+    let mut input_args = Vec::new();
+    let mut expect_files = Vec::new();
+    let mut expect_file_changed = Vec::new();
+    let mut expect_outputs = Vec::new();
+    let mut expect_no_modal = false;
+    let mut expect_frontmost_app = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workflow" | "--runner" => {
+                index += 1;
+                workflow = Some(required_arg(args, index, "--workflow")?.to_owned());
+            }
+            "--input" => {
+                index += 1;
+                input_args.push("--input".to_owned());
+                input_args.push(required_arg(args, index, "--input")?.to_owned());
+            }
+            "--inputs-json" => {
+                index += 1;
+                input_args.push("--inputs-json".to_owned());
+                input_args.push(required_arg(args, index, "--inputs-json")?.to_owned());
+            }
+            "--inputs-file" => {
+                index += 1;
+                input_args.push("--inputs-file".to_owned());
+                input_args.push(required_arg(args, index, "--inputs-file")?.to_owned());
+            }
+            "--expect-file" => {
+                index += 1;
+                expect_files.push(PathBuf::from(required_arg(args, index, "--expect-file")?));
+            }
+            "--expect-file-changed" => {
+                index += 1;
+                expect_file_changed.push(PathBuf::from(required_arg(
+                    args,
+                    index,
+                    "--expect-file-changed",
+                )?));
+            }
+            "--expect-output" => {
+                index += 1;
+                let raw = required_arg(args, index, "--expect-output")?;
+                let (key, value) = raw.split_once('=').ok_or_else(|| {
+                    CliError::Usage("--expect-output requires KEY=VALUE".to_owned())
+                })?;
+                expect_outputs.push((key.to_owned(), value.to_owned()));
+            }
+            "--expect-no-modal" => expect_no_modal = true,
+            "--expect-frontmost-app" => {
+                index += 1;
+                expect_frontmost_app =
+                    Some(required_arg(args, index, "--expect-frontmost-app")?.to_owned());
+            }
+            "--json" => json = true,
+            "--help" | "-h" => {
+                return Err(CliError::Usage(
+                    "usage: greentic-desktop desktop validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]".to_owned(),
+                ));
+            }
+            value if !value.starts_with("--") && workflow.is_none() => {
+                workflow = Some(value.to_owned());
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown desktop validate argument: {other}"
+                )))
+            }
+        }
+        index += 1;
+    }
+    Ok(DesktopValidateOptions {
+        workflow: workflow.ok_or_else(|| {
+            CliError::Usage("desktop validate requires --workflow PATH_OR_ID".to_owned())
+        })?,
+        input_args,
+        expect_files,
+        expect_file_changed,
+        expect_outputs,
+        expect_no_modal,
+        expect_frontmost_app,
+        json,
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+struct LiveModalSummary {
+    blocking: bool,
+    summary: Option<String>,
+}
+
+fn live_modal_summary() -> LiveModalSummary {
+    #[cfg(target_os = "macos")]
+    {
+        macos_live_modal_summary()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        LiveModalSummary::default()
+    }
+}
+
+fn live_frontmost_app() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        greentic_desktop_macos::macos_live_frontmost_app()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_live_modal_summary() -> LiveModalSummary {
+    let summary = greentic_desktop_macos::macos_live_modal_summary();
+    LiveModalSummary {
+        blocking: summary.blocking,
+        summary: summary.summary,
+    }
+}
+
+fn handle_runner_export(
+    target: &str,
+    args: &[String],
+    config: &RuntimeConfig,
+    writer: &mut dyn Write,
+) -> Result<(), CliError> {
+    let out = runner_export_out(args)?;
+    let exported =
+        export_runner_yaml_file(&config.runner.home, target, &out).map_err(CliError::Usage)?;
+    writeln!(
+        writer,
+        "exported: {}\t{}\t{}",
+        exported.runner_id,
+        exported.runner_name,
+        exported.path.display()
+    )?;
+    Ok(())
+}
+
+fn runner_export_out(args: &[String]) -> Result<PathBuf, CliError> {
+    let mut out = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--out" => {
+                index += 1;
+                out = Some(PathBuf::from(required_arg(args, index, "--out")?));
+            }
+            "--help" | "-h" => {
+                return Err(CliError::Usage(
+                    "usage: greentic-desktop --export (PATH|ID) --out PATH".to_owned(),
+                ));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown runner export argument: {other}"
+                )))
+            }
+        }
+        index += 1;
+    }
+    out.ok_or_else(|| CliError::Usage("runner export requires --out PATH".to_owned()))
+}
+
+fn runner_run_inputs_json(args: &[String]) -> Result<String, CliError> {
+    let mut fields = Vec::new();
+    let mut raw_json = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--input" => {
+                if raw_json.is_some() {
+                    return Err(CliError::Usage(
+                        "use either --input, --inputs-json, or --inputs-file".to_owned(),
+                    ));
+                }
+                index += 1;
+                let value = required_arg(args, index, "--input")?;
+                let (key, value) = value
+                    .split_once('=')
+                    .ok_or_else(|| CliError::Usage("--input requires KEY=VALUE".to_owned()))?;
+                if key.trim().is_empty() {
+                    return Err(CliError::Usage("--input key must not be empty".to_owned()));
+                }
+                fields.push((key.trim().to_owned(), value.to_owned()));
+            }
+            "--inputs-json" => {
+                index += 1;
+                if raw_json.is_some() || !fields.is_empty() {
+                    return Err(CliError::Usage(
+                        "use either --input, --inputs-json, or --inputs-file".to_owned(),
+                    ));
+                }
+                raw_json = Some(required_arg(args, index, "--inputs-json")?.to_owned());
+            }
+            "--inputs-file" => {
+                index += 1;
+                if raw_json.is_some() || !fields.is_empty() {
+                    return Err(CliError::Usage(
+                        "use either --input, --inputs-json, or --inputs-file".to_owned(),
+                    ));
+                }
+                raw_json = Some(fs::read_to_string(required_arg(
+                    args,
+                    index,
+                    "--inputs-file",
+                )?)?);
+            }
+            "--help" | "-h" => {
+                return Err(CliError::Usage(
+                    "usage: greentic-desktop --run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]".to_owned(),
+                ));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown runner run argument: {other}"
+                )))
+            }
+        }
+        index += 1;
+    }
+    if let Some(raw_json) = raw_json {
+        let trimmed = raw_json.trim();
+        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+            return Err(CliError::Usage(
+                "--inputs-json/--inputs-file must contain a JSON object".to_owned(),
+            ));
+        }
+        return Ok(trimmed.to_owned());
+    }
+    Ok(format!(
+        "{{{}}}",
+        fields
+            .into_iter()
+            .map(|(key, value)| format!(
+                "\"{}\":\"{}\"",
+                escape_cli_json(&key),
+                escape_cli_json(&value)
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
+fn escape_cli_json(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => escaped.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn handle_runner_plan(
@@ -910,7 +1454,33 @@ exit 2
             run_with_writer(["--help".to_owned()], false, &mut help).expect("help should print");
             let help = String::from_utf8(help).expect("help should be utf8");
             assert!(help.contains("greentic-desktop"));
-            assert!(help.contains("gui [--bind ADDR] [--no-open]"));
+            assert!(help.contains("gui [--bind ADDR] [--token TOKEN] [--no-open]"));
+        });
+    }
+
+    #[test]
+    fn gui_can_start_with_user_supplied_session_token() {
+        with_temp_home(|_| {
+            let mut output = Vec::new();
+            run_with_writer(
+                [
+                    "--no-open".to_owned(),
+                    "--bind".to_owned(),
+                    "127.0.0.1:0".to_owned(),
+                    "--token".to_owned(),
+                    "known-mcp-token".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("top-level GUI options should start GUI");
+            let output = String::from_utf8(output).expect("output should be utf8");
+
+            assert!(
+                output.contains("Greentic Automate Hub: http://127.0.0.1:"),
+                "{output}"
+            );
+            assert!(output.contains("?token=known-mcp-token"), "{output}");
         });
     }
 
@@ -1021,6 +1591,156 @@ exit 2
                 .expect("output should be utf8")
                 .contains("demo.gtpack"));
         });
+    }
+
+    #[test]
+    fn runner_import_and_run_yaml_cli_resolve_runner_manifests() {
+        with_temp_home(|home| {
+            fs::create_dir_all(&home).expect("temp home should exist");
+            let source = home.join("word-example.yaml");
+            fs::write(
+                &source,
+                "id: example.word\nname: Example Word\nversion: 0.1.0\ninputs:\n  - inputs.document_path\noutputs: []\nsteps:\n  - id: open-word\n    action: activate_app\n    required_capability: macos.activate_app\n    value: \"Microsoft Word\"\n",
+            )
+            .expect("source yaml");
+
+            let mut output = Vec::new();
+            run_with_writer(
+                ["--import".to_owned(), source.display().to_string()],
+                false,
+                &mut output,
+            )
+            .expect("runner import should succeed");
+            let imported = String::from_utf8(output.clone()).expect("output should be utf8");
+            assert!(imported.contains("imported: example.word"), "{imported}");
+            assert!(home.join("runners").join("example.word.yaml").exists());
+
+            output.clear();
+            let path_err = run_with_writer(
+                ["--run".to_owned(), source.display().to_string()],
+                false,
+                &mut output,
+            )
+            .expect_err("missing input should fail before desktop execution");
+            assert!(path_err.to_string().contains("runner.input_missing"));
+
+            output.clear();
+            let id_err = run_with_writer(
+                [
+                    "runner".to_owned(),
+                    "run".to_owned(),
+                    "example.word".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect_err("imported runner id should resolve and validate inputs");
+            assert!(id_err.to_string().contains("runner.input_missing"));
+
+            output.clear();
+            let export_path = home.join("exports").join("word.yaml");
+            run_with_writer(
+                [
+                    "--export".to_owned(),
+                    "example.word".to_owned(),
+                    "--out".to_owned(),
+                    export_path.display().to_string(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("runner export should write YAML");
+            assert!(export_path.exists());
+            assert!(fs::read_to_string(export_path)
+                .expect("exported yaml")
+                .contains("id: example.word"));
+
+            let uri_err = run_with_writer(
+                [
+                    "runner".to_owned(),
+                    "import".to_owned(),
+                    "store://example.word".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect_err("uri import should require cached artifact");
+            let uri_err = uri_err.to_string();
+            assert!(
+                uri_err.contains("local distributor cache")
+                    || uri_err.contains("store://example.word")
+                    || uri_err.contains("example.word"),
+                "{uri_err}"
+            );
+        });
+    }
+
+    #[test]
+    fn desktop_validate_parser_accepts_workflow_inputs_and_assertions() {
+        let args = [
+            "--workflow".to_owned(),
+            "examples/runners/demo.yaml".to_owned(),
+            "--input".to_owned(),
+            "inputs.name=Maarten".to_owned(),
+            "--expect-file".to_owned(),
+            "/tmp/out.txt".to_owned(),
+            "--expect-file-changed".to_owned(),
+            "/tmp/out.txt".to_owned(),
+            "--expect-output".to_owned(),
+            "outputs.result=done".to_owned(),
+            "--expect-no-modal".to_owned(),
+            "--expect-frontmost-app".to_owned(),
+            "Microsoft Excel".to_owned(),
+            "--json".to_owned(),
+        ];
+
+        let options = parse_desktop_validate_args(&args).expect("validate args");
+
+        assert_eq!(options.workflow, "examples/runners/demo.yaml");
+        assert_eq!(
+            options.input_args,
+            vec!["--input".to_owned(), "inputs.name=Maarten".to_owned()]
+        );
+        assert_eq!(options.expect_files, vec![PathBuf::from("/tmp/out.txt")]);
+        assert_eq!(
+            options.expect_file_changed,
+            vec![PathBuf::from("/tmp/out.txt")]
+        );
+        assert_eq!(
+            options.expect_outputs,
+            vec![("outputs.result".to_owned(), "done".to_owned())]
+        );
+        assert!(options.expect_no_modal);
+        assert_eq!(
+            options.expect_frontmost_app.as_deref(),
+            Some("Microsoft Excel")
+        );
+        assert!(options.json);
+    }
+
+    #[test]
+    fn live_file_state_detects_created_or_modified_files() {
+        let path = std::env::temp_dir().join(format!(
+            "greentic-live-file-state-{}.txt",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let before = LiveFileState::capture(&path);
+
+        fs::write(&path, "created").expect("write file");
+        let after_create = LiveFileState::capture(&path);
+        assert!(after_create.changed_from(&before));
+
+        let same = LiveFileState::capture(&path);
+        assert!(!same.changed_from(&after_create));
+
+        fs::write(&path, "created and changed").expect("rewrite file");
+        let after_change = LiveFileState::capture(&path);
+        assert!(after_change.changed_from(&same));
+
+        fs::remove_file(path).expect("remove file");
     }
 
     #[test]

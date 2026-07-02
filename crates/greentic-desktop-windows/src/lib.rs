@@ -31,6 +31,7 @@ pub fn windows_capabilities() -> AdapterCapabilities {
             "windows.find_element",
             "windows.click_element",
             "windows.type_text",
+            "windows.press_shortcut",
             "windows.read_text",
             "windows.read_window_tree",
             "windows.assert_visible",
@@ -247,6 +248,16 @@ impl WindowsUiAdapter {
                 )?;
                 Ok("typed text through Windows UI Automation".to_owned())
             }
+            "windows.press_shortcut" => {
+                let shortcut = step.value.as_deref().ok_or_else(|| {
+                    AdapterError::ExecutionFailed(
+                        "windows.press_shortcut requires a shortcut such as Ctrl+N in step.value."
+                            .to_owned(),
+                    )
+                })?;
+                windows_press_shortcut(shortcut)?;
+                Ok(format!("pressed Windows shortcut {shortcut}"))
+            }
             "windows.click_element" => {
                 let app = self.active_app()?;
                 windows_click_element(&app, &step.target)?;
@@ -408,6 +419,74 @@ fn windows_element_exists(
 fn windows_type_text(app: &str, target: &LocatorTarget, value: &str) -> AdapterResult<()> {
     let script = windows_uia_script(app, target, Some(value), "type")?;
     run_powershell(&script).map(|_| ())
+}
+
+fn windows_press_shortcut(shortcut: &str) -> AdapterResult<()> {
+    let keys = windows_sendkeys_sequence(shortcut)?;
+    let script = format!(
+        r#"
+$shell = New-Object -ComObject WScript.Shell
+$shell.SendKeys({keys})
+"#,
+        keys = ps_quote(&keys)
+    );
+    run_powershell(&script).map(|_| ())
+}
+
+fn windows_sendkeys_sequence(shortcut: &str) -> AdapterResult<String> {
+    let parts = shortcut
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some(key) = parts.last() else {
+        return Err(AdapterError::ExecutionFailed(
+            "shortcut must include a key, for example Ctrl+N.".to_owned(),
+        ));
+    };
+    let mut sequence = String::new();
+    for modifier in &parts[..parts.len().saturating_sub(1)] {
+        match modifier.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => sequence.push('^'),
+            "shift" => sequence.push('+'),
+            "alt" | "option" => sequence.push('%'),
+            "win" | "windows" | "meta" | "super" => sequence.push_str("^{ESC}"),
+            other => {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "unsupported Windows shortcut modifier {other}"
+                )))
+            }
+        }
+    }
+    sequence.push_str(&windows_sendkeys_key(key));
+    Ok(sequence)
+}
+
+fn windows_sendkeys_key(key: &str) -> String {
+    match key
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+        .as_str()
+    {
+        "return" | "enter" => "{ENTER}".to_owned(),
+        "tab" => "{TAB}".to_owned(),
+        "escape" | "esc" => "{ESC}".to_owned(),
+        "delete" | "del" => "{DEL}".to_owned(),
+        "backspace" => "{BACKSPACE}".to_owned(),
+        "home" => "{HOME}".to_owned(),
+        "end" => "{END}".to_owned(),
+        "pageup" | "pgup" => "{PGUP}".to_owned(),
+        "pagedown" | "pgdn" => "{PGDN}".to_owned(),
+        "left" | "leftarrow" => "{LEFT}".to_owned(),
+        "right" | "rightarrow" => "{RIGHT}".to_owned(),
+        "down" | "downarrow" => "{DOWN}".to_owned(),
+        "up" | "uparrow" => "{UP}".to_owned(),
+        key if key.starts_with('f') && key[1..].parse::<u8>().is_ok() => {
+            format!("{{{}}}", key.to_ascii_uppercase())
+        }
+        key => key.to_owned(),
+    }
 }
 
 fn windows_click_element(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
@@ -1050,6 +1129,22 @@ mod tests {
         assert!(
             outcome.to_string().contains("Windows UI Automation"),
             "{outcome}"
+        );
+    }
+
+    #[test]
+    fn maps_windows_shortcuts_to_sendkeys_sequences() {
+        assert_eq!(
+            windows_sendkeys_sequence("Return").expect("return shortcut"),
+            "{ENTER}"
+        );
+        assert_eq!(
+            windows_sendkeys_sequence("Ctrl+PageUp").expect("page shortcut"),
+            "^{PGUP}"
+        );
+        assert_eq!(
+            windows_sendkeys_sequence("Ctrl+Shift+N").expect("modified shortcut"),
+            "^+n"
         );
     }
 

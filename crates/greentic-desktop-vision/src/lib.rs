@@ -224,9 +224,10 @@ fn run_remote_viewport_provider_command(
         if line.trim().is_empty() {
             continue;
         }
-        let event = parse_remote_provider_event(sink.session_id(), index as u64 + 1, line);
-        let _ = sink.append_event(event);
-        let _ = sink.update_heartbeat();
+        if let Ok(event) = parse_remote_provider_event(sink.session_id(), index as u64 + 1, line) {
+            let _ = sink.append_event(event);
+            let _ = sink.update_heartbeat();
+        }
     }
 }
 
@@ -234,15 +235,15 @@ fn parse_remote_provider_event(
     session_id: &str,
     sequence: u64,
     line: &str,
-) -> RecordingEventEnvelope {
+) -> AdapterResult<RecordingEventEnvelope> {
     let parts: Vec<&str> = line.split(',').collect();
     let kind = parts.first().copied().unwrap_or("viewport_event");
     let region = if parts.len() >= 5 {
         Region {
-            x: parts[1].trim().parse().unwrap_or_default(),
-            y: parts[2].trim().parse().unwrap_or_default(),
-            width: parts[3].trim().parse().unwrap_or_default(),
-            height: parts[4].trim().parse().unwrap_or_default(),
+            x: parse_u32(parts[1], "remote event x")?,
+            y: parse_u32(parts[2], "remote event y")?,
+            width: parse_u32(parts[3], "remote event width")?,
+            height: parse_u32(parts[4], "remote event height")?,
         }
     } else {
         Region {
@@ -254,7 +255,14 @@ fn parse_remote_provider_event(
     };
     let value = parts.get(5).map(|value| value.trim().to_owned());
     let screenshot_ref = parts.get(6).map(|value| value.trim().to_owned());
-    remote_recording_event(session_id, sequence, kind, region, value, screenshot_ref)
+    Ok(remote_recording_event(
+        session_id,
+        sequence,
+        kind,
+        region,
+        value,
+        screenshot_ref,
+    ))
 }
 
 pub fn remote_recording_event(
@@ -359,14 +367,28 @@ impl DesktopAdapter for VisionAdapter {
         }
 
         let output = self.run_backend(VisionBackendAction::Execute, Some(&step), None)?;
+        let success = output.passed.unwrap_or_else(|| {
+            output.evidence.is_some()
+                || !output.matches.is_empty()
+                || output
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| !message.trim().is_empty())
+        });
 
         Ok(StepResult {
             step_id: step.id,
-            success: true,
+            success,
             message: output
                 .message
                 .or_else(|| output.evidence.map(|evidence| evidence.explanation))
-                .unwrap_or_else(|| "vision step completed by configured backend".to_owned()),
+                .unwrap_or_else(|| {
+                    if success {
+                        "vision step completed by configured backend".to_owned()
+                    } else {
+                        "vision backend did not find the requested target".to_owned()
+                    }
+                }),
         })
     }
 
@@ -691,6 +713,14 @@ mod tests {
     }
 
     #[test]
+    fn remote_provider_event_rejects_malformed_coordinates() {
+        let err = parse_remote_provider_event("session", 1, "click,not-a-number,0,100,20")
+            .expect_err("malformed coordinates should fail");
+
+        assert!(err.to_string().contains("remote event x"));
+    }
+
+    #[test]
     fn click_region_requires_configured_backend_and_returns_evidence() {
         let adapter = VisionAdapter::with_backend_command(
             "echo message:clicked && echo evidence:before.png,20,30,80,24,0.94,after.png,clicked visually identified region",
@@ -706,6 +736,23 @@ mod tests {
             .expect("click should use configured backend");
 
         assert_eq!(result.message, "clicked");
+    }
+
+    #[test]
+    fn execute_reports_failure_when_backend_does_not_find_target() {
+        let adapter = VisionAdapter::with_backend_command("echo passed:false");
+        let result = adapter
+            .execute(RunnerStep {
+                id: "find".to_owned(),
+                action: "find_text".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("Missing".to_owned()),
+                required_capability: "vision.find_text".to_owned(),
+            })
+            .expect("backend response should parse");
+
+        assert!(!result.success);
+        assert!(result.message.contains("did not find"));
     }
 
     #[test]

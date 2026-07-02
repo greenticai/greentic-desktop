@@ -1,0 +1,76 @@
+id: example.macos.word.hello_bold_save
+name: Word Hello Bold Save
+version: 0.1.0
+mode: HumanDemonstration
+description: Open Word, create a new document, write Hello World, bold Hello, and save as test.docx.
+target:
+  kind: desktop
+  os: macos
+  app: Microsoft Word
+required_capabilities:
+  - macos.activate_app
+  - macos.press_shortcut
+  - macos.focus_document
+  - macos.type_text
+  - macos.save_as
+inputs:
+  - inputs.document_path
+secrets: []
+outputs:
+  - outputs.document_path
+assertions: []
+open_questions: []
+steps:
+  - id: open-word
+    action: activate_app
+    required_capability: macos.activate_app
+    value: Microsoft Word
+
+  - id: create-new-document
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Cmd+N
+
+  - id: focus-document
+    action: focus_document
+    required_capability: macos.focus_document
+    target:
+      preferred:
+        role: document
+        name: active document
+      fallback:
+        role: text area
+
+  - id: enter-text
+    action: type_text
+    required_capability: macos.type_text
+    value: Hello World
+    target:
+      preferred:
+        role: document
+        name: active document
+
+  - id: move-to-start
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Cmd+Left
+
+  - id: select-hello
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Option+Shift+Right
+
+  - id: bold-selection
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Cmd+B
+
+  - id: move-to-end
+    action: press_shortcut
+    required_capability: macos.press_shortcut
+    value: Cmd+Right
+
+  - id: save-document
+    action: save_as
+    required_capability: macos.save_as
+    value: "{{inputs.document_path}}"

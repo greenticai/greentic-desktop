@@ -69,6 +69,14 @@ greentic-desktop record normalise \
 
 Both paths produce a draft runner YAML file that should be reviewed before production use.
 
+## Import And Export Runner YAML
+
+Use Automate Hub **Create Runner > Provide a runner file** to import an existing `.yaml` or `.yml` runner from local disk, or import a runner source such as `oci://`, `store://`, or `repo://`.
+
+Use **My Runners > Export YAML** to download the canonical YAML for a runner. Exports include runner definitions, inputs, outputs, secrets declarations, and steps, but never secret values or evidence bundles.
+
+See [Runner Import And Export](import-export.md) for GUI and CLI examples.
+
 ## Make A Runner Discoverable
 
 The current CLI discovers local `.gtpack` runner packages from the runtime runner folder:

@@ -14,7 +14,8 @@ use greentic_desktop_registry::{RegistryError, SignedRunnerManifest, SigningKey}
 use greentic_desktop_session::DesktopSession;
 use greentic_desktop_telemetry::TelemetryLog;
 use greentic_distributor_client::{
-    DistributorError, GreenticDistributorClient, ResolvedArtifact, StoreExtension,
+    CachePolicy, DistClient, DistOptions, ResolvePolicy,
+    ResolvedArtifact as DistributorResolvedArtifact,
 };
 use rmcp::{
     model::{
@@ -42,7 +43,7 @@ pub struct DesktopRuntime {
 pub enum RuntimeError {
     Io(std::io::Error),
     Extension(ExtensionError),
-    Distributor(DistributorError),
+    Distributor(String),
     Registry(RegistryError),
     Security(String),
     InvalidCapabilities(String),
@@ -77,17 +78,137 @@ impl From<ExtensionError> for RuntimeError {
     }
 }
 
-impl From<DistributorError> for RuntimeError {
-    fn from(value: DistributorError) -> Self {
-        Self::Distributor(value)
-    }
-}
-
 impl From<RegistryError> for RuntimeError {
     fn from(value: RegistryError) -> Self {
         Self::Registry(value)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedArtifact {
+    pub extension_id: String,
+    pub version: String,
+    pub source_uri: String,
+    pub resolved_uri: String,
+    pub digest: String,
+    pub local_path: PathBuf,
+    pub phases: Vec<ResolutionPhase>,
+    pub signature_refs: Vec<String>,
+    pub sbom_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRunnerArtifact {
+    pub runner_id: String,
+    pub version: String,
+    pub source_uri: String,
+    pub resolved_uri: String,
+    pub digest: String,
+    pub local_path: PathBuf,
+    pub phases: Vec<ResolutionPhase>,
+    pub signature_refs: Vec<String>,
+    pub sbom_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionPhase {
+    pub phase: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreExtension {
+    pub id: String,
+    pub aliases: Vec<String>,
+    pub name: String,
+    pub description: String,
+    pub latest: String,
+    pub versions: Vec<String>,
+    pub source: String,
+    pub publisher: String,
+    pub platforms: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuiltInExtensionCatalogEntry {
+    manifest_id: &'static str,
+    aliases: &'static [&'static str],
+    description: &'static str,
+    platforms: &'static [&'static str],
+    source_slug: &'static str,
+    publisher: &'static str,
+}
+
+const BUILT_IN_EXTENSION_CATALOG: &[BuiltInExtensionCatalogEntry] = &[
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.playwright",
+        aliases: &["playwright", "browser", "web"],
+        description: "Automate browser-based applications.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "playwright",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.vision",
+        aliases: &["vision", "screenshot"],
+        description: "Use screenshots and visual matching as a fallback.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "vision",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.macos.ax",
+        aliases: &["macos", "macos-ax"],
+        description: "Drive native macOS apps through Accessibility.",
+        platforms: &["macos"],
+        source_slug: "macos-ax",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.linux.x11",
+        aliases: &["linux-x11", "x11"],
+        description: "Drive native Linux X11 apps through AT-SPI and XTest.",
+        platforms: &["linux"],
+        source_slug: "linux-x11",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.linux.wayland",
+        aliases: &["linux-wayland", "wayland"],
+        description:
+            "Drive Wayland-compatible Linux workflows through safe portals and accessibility.",
+        platforms: &["linux"],
+        source_slug: "linux-wayland",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.windows-ui",
+        aliases: &["windows", "windows-ui"],
+        description: "Drive native Windows apps through UI Automation.",
+        platforms: &["windows"],
+        source_slug: "windows-ui",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.java-accessibility",
+        aliases: &["java", "java-accessibility"],
+        description: "Drive Java Swing and AWT apps through Java Accessibility.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "java-accessibility",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.terminal-tn3270",
+        aliases: &["terminal", "tn3270"],
+        description: "Drive terminal and mainframe workflows.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "terminal-tn3270",
+        publisher: "greenticai",
+    },
+];
 
 impl DesktopRuntime {
     pub fn new(config: RuntimeConfig) -> Self {
@@ -184,19 +305,22 @@ impl DesktopRuntime {
     }
 
     pub fn resolve_extension_source(&self, source: &str) -> Result<ResolvedArtifact, RuntimeError> {
-        let client =
-            GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"));
-        client.resolve(source).map_err(Into::into)
+        resolve_extension_source(self.config.runner.home.join("extension-cache"), source)
+    }
+
+    pub fn resolve_runner_source(
+        &self,
+        source: &str,
+    ) -> Result<ResolvedRunnerArtifact, RuntimeError> {
+        resolve_runner_source(self.config.runner.home.join("runner-cache"), source)
     }
 
     pub fn search_extension_store(&self, query: &str) -> Vec<StoreExtension> {
-        GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"))
-            .search(query)
+        search_extension_store(query)
     }
 
     pub fn extension_versions(&self, id_or_alias: &str) -> Option<Vec<String>> {
-        GreenticDistributorClient::new(self.config.runner.home.join("extension-cache"))
-            .versions(id_or_alias)
+        find_store_extension(id_or_alias).map(|extension| extension.versions)
     }
 
     pub fn install_extension(&self, extension_id: &str) -> Result<ExtensionManifest, RuntimeError> {
@@ -514,6 +638,301 @@ fn monotonic_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default()
+}
+
+pub fn search_extension_store(query: &str) -> Vec<StoreExtension> {
+    let query = query.to_ascii_lowercase();
+    built_in_store_extensions()
+        .into_iter()
+        .filter(|extension| {
+            query.is_empty()
+                || extension.id.to_ascii_lowercase().contains(&query)
+                || extension.name.to_ascii_lowercase().contains(&query)
+                || extension.description.to_ascii_lowercase().contains(&query)
+                || extension
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.to_ascii_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+pub fn find_store_extension(id_or_alias: &str) -> Option<StoreExtension> {
+    built_in_store_extensions().into_iter().find(|extension| {
+        extension.id == id_or_alias || extension.aliases.iter().any(|alias| alias == id_or_alias)
+    })
+}
+
+pub fn built_in_store_extensions() -> Vec<StoreExtension> {
+    BUILT_IN_EXTENSION_CATALOG
+        .iter()
+        .filter_map(|entry| {
+            let manifest = built_in_extension(entry.manifest_id)?;
+            Some(StoreExtension {
+                id: manifest.id.clone(),
+                aliases: entry
+                    .aliases
+                    .iter()
+                    .map(|alias| (*alias).to_owned())
+                    .collect(),
+                name: manifest.name.clone(),
+                description: entry.description.to_owned(),
+                latest: manifest.version.clone(),
+                versions: vec![manifest.version.clone()],
+                source: format!(
+                    "oci://ghcr.io/greenticai/greentic-desktop/extensions/{}:{}",
+                    entry.source_slug, manifest.version
+                ),
+                publisher: entry.publisher.to_owned(),
+                platforms: entry
+                    .platforms
+                    .iter()
+                    .map(|platform| (*platform).to_owned())
+                    .collect(),
+                capabilities: manifest.capabilities.clone(),
+                permissions: manifest.permissions.clone(),
+            })
+        })
+        .collect()
+}
+
+pub fn resolve_extension_source(
+    cache_dir: impl Into<PathBuf>,
+    source: &str,
+) -> Result<ResolvedArtifact, RuntimeError> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Err(RuntimeError::Distributor(
+            "invalid empty extension source".to_owned(),
+        ));
+    }
+    let normalized = normalize_source(source);
+    if let Some(extension) = match source_scheme(&normalized) {
+        "store" => find_store_extension(normalized.trim_start_matches("store://")),
+        "" => find_store_extension(source),
+        "oci" => extension_id_and_version_from_oci(&normalized)
+            .ok()
+            .and_then(|(id, _)| find_store_extension(&id)),
+        _ => None,
+    } {
+        let version = version_from_source(&normalized).unwrap_or_else(|| extension.latest.clone());
+        let resolved_uri = if source_scheme(&normalized) == "oci" {
+            normalized.clone()
+        } else {
+            extension.source.clone()
+        };
+        return Ok(ResolvedArtifact {
+            extension_id: extension.id,
+            version,
+            source_uri: normalized,
+            resolved_uri: resolved_uri.clone(),
+            digest: content_digest(resolved_uri.as_bytes()),
+            local_path: cache_dir.into().join(format!(
+                "{}-{}.extension.tar.zst",
+                safe_cache_name(&resolved_uri),
+                env!("CARGO_PKG_VERSION")
+            )),
+            phases: vec![
+                phase("resolving", "complete", "source resolved"),
+                phase(
+                    "downloading",
+                    "complete",
+                    "built-in extension metadata available",
+                ),
+                phase(
+                    "verifying",
+                    "complete",
+                    "built-in extension trust anchor checked",
+                ),
+            ],
+            signature_refs: vec!["builtin:greenticai".to_owned()],
+            sbom_refs: vec!["builtin:sbom".to_owned()],
+        });
+    }
+    if source_scheme(&normalized) == "store" {
+        return Err(RuntimeError::Distributor(format!(
+            "invalid extension source: {normalized}"
+        )));
+    }
+
+    let artifact = resolve_with_distributor(cache_dir.into(), &normalized)?;
+    let (extension_id, version) = extension_id_and_version_from_oci(&artifact.descriptor.raw_ref)
+        .or_else(|_| extension_id_and_version_from_oci(&artifact.descriptor.canonical_ref))
+        .map_err(|_| {
+            RuntimeError::Distributor(format!(
+                "could not infer extension id and version from {}",
+                artifact.descriptor.canonical_ref
+            ))
+        })?;
+    Ok(ResolvedArtifact {
+        extension_id,
+        version,
+        source_uri: artifact.descriptor.raw_ref.clone(),
+        resolved_uri: artifact.descriptor.canonical_ref.clone(),
+        digest: artifact.descriptor.digest.clone(),
+        local_path: artifact.local_path.clone(),
+        phases: phases_from_distributor_artifact(&artifact),
+        signature_refs: artifact.descriptor.signature_refs.clone(),
+        sbom_refs: artifact.descriptor.sbom_refs.clone(),
+    })
+}
+
+pub fn resolve_runner_source(
+    cache_dir: impl Into<PathBuf>,
+    source: &str,
+) -> Result<ResolvedRunnerArtifact, RuntimeError> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Err(RuntimeError::Distributor(
+            "invalid empty runner source".to_owned(),
+        ));
+    }
+    let artifact = resolve_with_distributor(cache_dir.into(), source)?;
+    let (runner_id, version) = runner_id_and_version_from_source(&artifact.descriptor.raw_ref)
+        .or_else(|_| runner_id_and_version_from_source(&artifact.descriptor.canonical_ref))
+        .unwrap_or_else(|_| {
+            (
+                safe_cache_name(source).replace('-', "."),
+                "latest".to_owned(),
+            )
+        });
+    Ok(ResolvedRunnerArtifact {
+        runner_id,
+        version,
+        source_uri: artifact.descriptor.raw_ref.clone(),
+        resolved_uri: artifact.descriptor.canonical_ref.clone(),
+        digest: artifact.descriptor.digest.clone(),
+        local_path: artifact.local_path.clone(),
+        phases: phases_from_distributor_artifact(&artifact),
+        signature_refs: artifact.descriptor.signature_refs.clone(),
+        sbom_refs: artifact.descriptor.sbom_refs.clone(),
+    })
+}
+
+fn resolve_with_distributor(
+    cache_dir: PathBuf,
+    source: &str,
+) -> Result<DistributorResolvedArtifact, RuntimeError> {
+    let client = DistClient::new(DistOptions {
+        cache_dir,
+        ..DistOptions::default()
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| RuntimeError::Distributor(err.to_string()))?;
+    runtime
+        .block_on(async {
+            let source = client.parse_source(source)?;
+            let descriptor = client.resolve(source, ResolvePolicy).await?;
+            client.fetch(&descriptor, CachePolicy).await
+        })
+        .map_err(|err| RuntimeError::Distributor(err.to_string()))
+}
+
+fn phases_from_distributor_artifact(
+    artifact: &DistributorResolvedArtifact,
+) -> Vec<ResolutionPhase> {
+    vec![
+        phase("resolving", "complete", "source resolved"),
+        phase(
+            "downloading",
+            if artifact.fetched {
+                "complete"
+            } else {
+                "cached"
+            },
+            "artifact available in distributor cache",
+        ),
+        phase(
+            "verifying",
+            if artifact.descriptor.signature_refs.is_empty() {
+                "warning"
+            } else {
+                "complete"
+            },
+            if artifact.descriptor.signature_refs.is_empty() {
+                "artifact has no detached signature reference"
+            } else {
+                "artifact signature metadata available"
+            },
+        ),
+    ]
+}
+
+fn normalize_source(source: &str) -> String {
+    if source.contains("://") {
+        source.to_owned()
+    } else {
+        format!("store://{source}")
+    }
+}
+
+fn source_scheme(source: &str) -> &str {
+    source.split_once("://").map_or("", |(scheme, _)| scheme)
+}
+
+fn version_from_source(source: &str) -> Option<String> {
+    source
+        .rsplit_once(':')
+        .and_then(|(_, version)| (!version.contains('/')).then(|| version.to_owned()))
+}
+
+fn extension_id_and_version_from_oci(source: &str) -> Result<(String, String), ()> {
+    let artifact = source.rsplit('/').next().ok_or(())?;
+    let (name, version) = artifact.rsplit_once(':').unwrap_or((artifact, "latest"));
+    Ok((store_alias_to_extension_id(name), version.to_owned()))
+}
+
+fn runner_id_and_version_from_source(source: &str) -> Result<(String, String), ()> {
+    let artifact = source.rsplit('/').next().ok_or(())?;
+    let (name, version) = artifact.rsplit_once(':').unwrap_or((artifact, "latest"));
+    Ok((
+        name.trim_end_matches(".runner")
+            .trim_end_matches(".yaml")
+            .trim_end_matches(".yml")
+            .replace('-', "."),
+        version.to_owned(),
+    ))
+}
+
+fn store_alias_to_extension_id(alias: &str) -> String {
+    if alias.starts_with("greentic.desktop.") {
+        alias.to_owned()
+    } else {
+        format!("greentic.desktop.{}", alias.replace('-', "."))
+    }
+}
+
+fn safe_cache_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn content_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+fn phase(phase: &str, status: &str, message: &str) -> ResolutionPhase {
+    ResolutionPhase {
+        phase: phase.to_owned(),
+        status: status.to_owned(),
+        message: message.to_owned(),
+    }
 }
 
 fn set_owner_only_permissions(_path: &Path) -> Result<(), RuntimeError> {

@@ -1,0 +1,42 @@
+id: example.online_mathjs_calculator.10x10
+name: Math.js Online Calculator 10 x 10
+version: 0.1.0
+mode: HumanDemonstration
+description: Open a public online calculator endpoint for 10 * 10 and return the calculated result.
+target:
+  kind: web
+  app: Math.js Online Calculator
+required_capabilities:
+  - web.goto
+  - web.wait_for
+  - web.extract_text
+inputs: []
+secrets: []
+outputs:
+  - outputs.result
+assertions: []
+open_questions: []
+steps:
+  - id: open-online-calculator
+    action: goto
+    required_capability: web.goto
+    value: "https://api.mathjs.org/v4/?expr=10*10"
+    target:
+      preferred:
+        role: document
+        name: Math.js
+
+  - id: wait-for-result
+    action: wait_for
+    required_capability: web.wait_for
+    target:
+      preferred:
+        text: "100"
+
+  - id: read-result
+    action: extract_text
+    required_capability: web.extract_text
+    value: outputs.result
+    target:
+      preferred:
+        css: "body"
