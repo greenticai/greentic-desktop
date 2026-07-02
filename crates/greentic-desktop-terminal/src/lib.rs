@@ -315,9 +315,12 @@ impl DesktopAdapter for TerminalAdapter {
                     "terminal.run_command requires a shell command in step.value.".to_owned(),
                 )
             })?;
-            let (program, args) = shell_program_and_args(command);
-            let terminal =
-                run_local_pty_command_with_status(program, &args, Duration::from_secs(30))?;
+            let terminal = if cfg!(windows) {
+                run_local_shell_command_with_status(command, Duration::from_secs(30))?
+            } else {
+                let (program, args) = shell_program_and_args(command);
+                run_local_pty_command_with_status(program, &args, Duration::from_secs(30))?
+            };
             let output = terminal.lines.join("\n");
             if !terminal.exit_success {
                 return Err(AdapterError::ExecutionFailed(format!(
@@ -561,6 +564,53 @@ pub fn run_local_pty_command(
 struct LocalPtyCommandOutput {
     lines: Vec<String>,
     exit_success: bool,
+}
+
+fn run_local_shell_command_with_status(
+    command_text: &str,
+    timeout: Duration,
+) -> AdapterResult<LocalPtyCommandOutput> {
+    let mut child = shell_command(command_text)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            AdapterError::ExecutionFailed(format!("failed to spawn shell command: {err}"))
+        })?;
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| {
+                AdapterError::ExecutionFailed(format!("failed to poll shell command: {err}"))
+            })?
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().map_err(|err| {
+        AdapterError::ExecutionFailed(format!("failed to collect shell command output: {err}"))
+    })?;
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(LocalPtyCommandOutput {
+        lines: parse_terminal_screen(&text),
+        exit_success: !timed_out && output.status.success(),
+    })
 }
 
 fn run_local_pty_command_with_status(
