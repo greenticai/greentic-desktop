@@ -15,6 +15,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use vte::{Params, Parser, Perform};
 
@@ -180,6 +181,14 @@ fn shell_command(command: &str) -> Command {
     }
 }
 
+fn shell_program_and_args<'a>(command: &'a str) -> (&'static str, Vec<&'a str>) {
+    if cfg!(windows) {
+        ("cmd", vec!["/C", command])
+    } else {
+        ("sh", vec!["-lc", command])
+    }
+}
+
 pub fn terminal_recording_event(
     session_id: &str,
     sequence: u64,
@@ -306,11 +315,9 @@ impl DesktopAdapter for TerminalAdapter {
                     "terminal.run_command requires a shell command in step.value.".to_owned(),
                 )
             })?;
-            let terminal = run_local_pty_command_with_status(
-                "sh",
-                &["-lc", command],
-                Duration::from_secs(30),
-            )?;
+            let (program, args) = shell_program_and_args(command);
+            let terminal =
+                run_local_pty_command_with_status(program, &args, Duration::from_secs(30))?;
             let output = terminal.lines.join("\n");
             if !terminal.exit_success {
                 return Err(AdapterError::ExecutionFailed(format!(
@@ -582,38 +589,58 @@ fn run_local_pty_command_with_status(
         .master
         .try_clone_reader()
         .map_err(|err| AdapterError::ExecutionFailed(format!("failed to read PTY: {err}")))?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(bytes));
+                    break;
+                }
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 4096];
     let mut status = None;
-    let mut eof = false;
     while Instant::now() < deadline {
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                eof = true;
+        match receiver.try_recv() {
+            Ok(Ok(output)) => {
+                bytes = output;
                 break;
             }
-            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(err) => {
+            Ok(Err(err)) => {
                 return Err(AdapterError::ExecutionFailed(format!(
                     "failed to read PTY output: {err}"
                 )));
             }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => break,
         }
         if let Ok(Some(child_status)) = child.try_wait() {
             status = Some(child_status);
             break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
     if status.is_none() {
-        if eof {
-            status = child.wait().ok();
-        } else {
-            let _ = child.kill();
-            status = child.wait().ok();
+        let _ = child.kill();
+        status = child.wait().ok();
+    }
+    drop(pair.master);
+    if bytes.is_empty() {
+        if let Ok(Ok(output)) = receiver.recv_timeout(Duration::from_millis(200)) {
+            bytes = output;
         }
     }
     let output = String::from_utf8_lossy(&bytes);
@@ -1043,6 +1070,16 @@ mod tests {
     #[test]
     fn terminal_run_command_uses_local_pty_and_labels_output() {
         let adapter = TerminalAdapter::new();
+        let command = if cfg!(windows) {
+            "echo 10K\tC:\\tmp\\example"
+        } else {
+            "printf '10K\\t/tmp/example\\n'"
+        };
+        let expected_path = if cfg!(windows) {
+            "C:\\tmp\\example"
+        } else {
+            "/tmp/example"
+        };
         let result = adapter
             .execute(RunnerStep {
                 id: "largest-files".to_owned(),
@@ -1054,24 +1091,29 @@ mod tests {
                     }),
                     ..LocatorTarget::default()
                 },
-                value: Some("printf '10K\\t/tmp/example\\n'".to_owned()),
+                value: Some(command.to_owned()),
                 required_capability: "terminal.run_command".to_owned(),
             })
             .expect("local terminal command should run");
 
         assert!(result.message.starts_with("largest files:"), "{result:?}");
-        assert!(result.message.contains("/tmp/example"), "{result:?}");
+        assert!(result.message.contains(expected_path), "{result:?}");
     }
 
     #[test]
     fn terminal_run_command_fails_on_non_zero_shell_exit() {
         let adapter = TerminalAdapter::new();
+        let command = if cfg!(windows) {
+            "echo shell failed 1>&2 && exit /B 7"
+        } else {
+            "echo shell failed >&2; exit 7"
+        };
         let err = adapter
             .execute(RunnerStep {
                 id: "bad-command".to_owned(),
                 action: "run_command".to_owned(),
                 target: LocatorTarget::default(),
-                value: Some("echo shell failed >&2; exit 7".to_owned()),
+                value: Some(command.to_owned()),
                 required_capability: "terminal.run_command".to_owned(),
             })
             .expect_err("non-zero shell exit should fail the step");
