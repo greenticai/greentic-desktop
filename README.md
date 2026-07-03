@@ -104,12 +104,6 @@ greentic-desktop runner plan --prompt "Open a resource table, ask for resource_n
 greentic-desktop record start --name generic.resource_append --profile local-web --adapter greentic.desktop.playwright --out ./recordings/generic.resource_append
 ```
 
-The same commands are also available through the `gtc desktop` form:
-
-```bash
-gtc desktop info
-```
-
 ## Detailed Documentation
 
 - [Getting Started](docs/getting-started.md)

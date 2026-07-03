@@ -1,0 +1,33 @@
+id: example.demo.excel.sample_product_lookup
+name: Demo Excel Sample Product Lookup
+version: 0.1.0
+mode: AssistedPrompt
+description: Search the bundled sample product workbook with the native Excel adapter and return the matching product fields without opening Excel.
+target:
+  kind: spreadsheet
+  app: native-excel
+required_adapters:
+  - greentic.desktop.excel
+required_capabilities:
+  - excel.search_rows
+inputs:
+  - inputs.xlsx_path
+  - inputs.search_term
+secrets: []
+outputs:
+  - outputs.product_name
+  - outputs.description
+  - outputs.height_cm
+  - outputs.width_cm
+  - outputs.depth_cm
+  - outputs.weight_kg
+  - outputs.price
+assertions: []
+open_questions:
+  - If multiple rows match the search term, the first matching row is returned.
+  - Use examples/runners/sample.xlsx for inputs.xlsx_path when running the bundled sample workbook.
+steps:
+  - id: search-product-row
+    action: search_rows
+    required_capability: excel.search_rows
+    value: '{"path":"{{inputs.xlsx_path}}","sheet":"sample","header_row":1,"limit":1,"filters":[{"column":"Product Name","op":"contains","value":"{{inputs.search_term}}"}]}'

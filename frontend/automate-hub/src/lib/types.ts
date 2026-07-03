@@ -53,8 +53,21 @@ export interface AdapterHealthDto {
   statusLabel?: string;
   message: string;
   executableCapabilities: string[];
+  blockedCapabilities?: AdapterBlockedCapabilityDto[];
+  setupActions?: AdapterSetupActionDto[];
   recordableTargets: string[];
   logPath?: string | null;
+}
+
+export interface AdapterBlockedCapabilityDto {
+  capability: string;
+  reason: string;
+}
+
+export interface AdapterSetupActionDto {
+  id: string;
+  label: string;
+  description: string;
 }
 
 export interface AdapterHealthResponseDto {

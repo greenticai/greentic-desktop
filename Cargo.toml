@@ -12,6 +12,7 @@ members = [
   "crates/greentic-desktop-java",
   "crates/greentic-desktop-terminal",
   "crates/greentic-desktop-vision",
+  "crates/greentic-desktop-excel",
   "crates/greentic-desktop-recorder",
   "crates/greentic-desktop-llm",
   "crates/greentic-desktop-runner-schema",
@@ -45,7 +46,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.13"
+version = "0.1.14"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/greenticai/greentic-desktop"
@@ -69,6 +70,7 @@ greentic-desktop-windows = { path = "crates/greentic-desktop-windows", version =
 greentic-desktop-java = { path = "crates/greentic-desktop-java", version = "0.1" }
 greentic-desktop-terminal = { path = "crates/greentic-desktop-terminal", version = "0.1" }
 greentic-desktop-vision = { path = "crates/greentic-desktop-vision", version = "0.1" }
+greentic-desktop-excel = { path = "crates/greentic-desktop-excel", version = "0.1" }
 greentic-desktop-recorder = { path = "crates/greentic-desktop-recorder", version = "0.1" }
 greentic-desktop-llm = { path = "crates/greentic-desktop-llm", version = "0.1" }
 greentic-desktop-runner-schema = { path = "crates/greentic-desktop-runner-schema", version = "0.1" }
@@ -116,3 +118,5 @@ jsonschema = { version = "0.46", default-features = false, features = ["resolve-
 ed25519-dalek = "2.2"
 portable-pty = "0.9"
 vte = "0.15"
+calamine = "0.35"
+rust_xlsxwriter = "0.95"

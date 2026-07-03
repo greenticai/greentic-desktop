@@ -157,8 +157,23 @@ pub struct AdapterHealth {
     pub readiness: AdapterReadiness,
     pub message: String,
     pub executable_capabilities: Vec<String>,
+    pub blocked_capabilities: Vec<AdapterBlockedCapability>,
+    pub setup_actions: Vec<AdapterSetupAction>,
     pub recordable_targets: Vec<String>,
     pub log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterBlockedCapability {
+    pub capability: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterSetupAction {
+    pub id: String,
+    pub label: String,
+    pub description: String,
 }
 
 impl AdapterHealth {
@@ -171,6 +186,8 @@ impl AdapterHealth {
             readiness: AdapterReadiness::Healthy,
             message: "Adapter is healthy.".to_owned(),
             executable_capabilities: sorted_strings(executable_capabilities),
+            blocked_capabilities: Vec::new(),
+            setup_actions: Vec::new(),
             recordable_targets: Vec::new(),
             log_path: None,
         }
@@ -186,9 +203,31 @@ impl AdapterHealth {
             readiness,
             message: message.into(),
             executable_capabilities: Vec::new(),
+            blocked_capabilities: Vec::new(),
+            setup_actions: Vec::new(),
             recordable_targets: Vec::new(),
             log_path: None,
         }
+    }
+
+    pub fn with_blocked_capabilities(
+        mut self,
+        blocked_capabilities: impl IntoIterator<Item = AdapterBlockedCapability>,
+    ) -> Self {
+        let mut blocked = blocked_capabilities.into_iter().collect::<Vec<_>>();
+        blocked.sort_by(|left, right| left.capability.cmp(&right.capability));
+        self.blocked_capabilities = blocked;
+        self
+    }
+
+    pub fn with_setup_actions(
+        mut self,
+        setup_actions: impl IntoIterator<Item = AdapterSetupAction>,
+    ) -> Self {
+        let mut actions = setup_actions.into_iter().collect::<Vec<_>>();
+        actions.sort_by(|left, right| left.id.cmp(&right.id));
+        self.setup_actions = actions;
+        self
     }
 
     pub fn capabilities_if_healthy(

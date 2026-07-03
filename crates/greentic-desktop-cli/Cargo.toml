@@ -40,10 +40,6 @@ path = "src/lib.rs"
 name = "greentic-desktop"
 path = "src/bin/greentic-desktop.rs"
 
-[[bin]]
-name = "gtc"
-path = "src/bin/gtc.rs"
-
 [dependencies]
 greentic-desktop-config.workspace = true
 greentic-desktop-extension.workspace = true

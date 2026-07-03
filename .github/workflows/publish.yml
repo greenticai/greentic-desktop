@@ -183,7 +183,6 @@ jobs:
           set -euo pipefail
           cargo build -p greentic-desktop \
             --bin greentic-desktop \
-            --bin gtc \
             --release \
             --target "${{ matrix.target }}"
       - name: GUI startup smoke check
@@ -204,11 +203,9 @@ jobs:
           name="greentic-desktop-v${version}-${target}"
           mkdir -p "dist/${name}"
           cp "target/${target}/release/greentic-desktop" "dist/${name}/"
-          cp "target/${target}/release/gtc" "dist/${name}/"
           cp README.md LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tgz" "${name}"
           tar -tzf "dist/${name}.tgz" | grep -Fx "${name}/greentic-desktop"
-          tar -tzf "dist/${name}.tgz" | grep -Fx "${name}/gtc"
       - name: Package Windows archive
         if: matrix.archive_fmt == 'zip'
         shell: pwsh
@@ -218,7 +215,6 @@ jobs:
           $name = "greentic-desktop-v$version-$target"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/$target/release/greentic-desktop.exe" "dist/$name/"
-          Copy-Item "target/$target/release/gtc.exe" "dist/$name/"
           Copy-Item "README.md" "dist/$name/"
           Copy-Item "LICENSE" "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
@@ -228,9 +224,6 @@ jobs:
             $entries = $zip.Entries | ForEach-Object { $_.FullName }
             if ($entries -notcontains "$name/greentic-desktop.exe") {
               throw "Archive is missing $name/greentic-desktop.exe"
-            }
-            if ($entries -notcontains "$name/gtc.exe") {
-              throw "Archive is missing $name/gtc.exe"
             }
           } finally {
             $zip.Dispose()

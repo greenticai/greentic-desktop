@@ -2,7 +2,7 @@
 
 Greentic Desktop can be installed from public GitHub release archives without Rust, Cargo, cargo-binstall, Homebrew, Chocolatey, or administrator rights.
 
-The installers download the matching release archive for your platform, verify `checksums.txt` when the release provides it, install the `greentic-desktop` and `gtc` binaries into a user-local directory, and run first-time initialization.
+The installers download the matching release archive for your platform, verify `checksums.txt` when the release provides it, install the `greentic-desktop` binary into a user-local directory, and run first-time initialization.
 
 ## macOS and Linux
 
@@ -35,9 +35,7 @@ Installed files:
 
 ```text
 ~/.greentic/desktop/bin/greentic-desktop
-~/.greentic/desktop/bin/gtc
 ~/.local/bin/greentic-desktop -> ~/.greentic/desktop/bin/greentic-desktop
-~/.local/bin/gtc -> ~/.greentic/desktop/bin/gtc
 ```
 
 If `~/.local/bin` is not on `PATH`, add this to your shell profile:
@@ -76,7 +74,6 @@ Installed files:
 
 ```text
 %LOCALAPPDATA%\Greentic\Desktop\bin\greentic-desktop.exe
-%LOCALAPPDATA%\Greentic\Desktop\bin\gtc.exe
 ```
 
 The installer adds the install directory to the User PATH. Already-open terminals may need to be restarted.
@@ -124,7 +121,6 @@ Linux and macOS use `.tgz` archives. Windows uses `.zip` archives.
 
 ```bash
 greentic-desktop info
-gtc desktop info
 ```
 
 Start Automate Hub:
@@ -138,7 +134,7 @@ greentic-desktop
 macOS/Linux:
 
 ```bash
-rm -f ~/.local/bin/greentic-desktop ~/.local/bin/gtc
+rm -f ~/.local/bin/greentic-desktop
 rm -rf ~/.greentic/desktop/bin
 ```
 

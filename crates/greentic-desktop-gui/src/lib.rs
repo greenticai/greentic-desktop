@@ -7,10 +7,11 @@ use axum::{
     Json, Router,
 };
 use greentic_desktop_adapter::{
-    AdapterCapabilities, AdapterHealth, AdapterReadiness, LocatorStrategy, LocatorTarget,
-    RunnerStep,
+    AdapterBlockedCapability, AdapterCapabilities, AdapterHealth, AdapterReadiness,
+    AdapterSetupAction, LocatorStrategy, LocatorTarget, RunnerStep,
 };
 use greentic_desktop_config::RuntimeConfig;
+use greentic_desktop_excel::{ExcelAdapter, EXCEL_ADAPTER_ID};
 use greentic_desktop_extension::{
     verify_extension_package_trust, ExtensionPackageMetadata, ExtensionPermissions,
     ExtensionPlatforms, ExtensionRuntime, ExtensionTrustPolicy, PermissionApproval,
@@ -749,7 +750,9 @@ fn runtime_info_json(addr: SocketAddr, state: &GuiApiState) -> String {
 }
 
 fn adapter_health_json(state: &GuiApiState) -> String {
-    let adapters = adapter_runtime_health(state, model_replay_allowed())
+    let health = adapter_runtime_health(state, model_replay_allowed());
+    write_adapter_probe_logs(state, &health);
+    let adapters = health
         .iter()
         .map(adapter_health_item_json)
         .collect::<Vec<_>>()
@@ -757,9 +760,43 @@ fn adapter_health_json(state: &GuiApiState) -> String {
     format!(r#"{{"adapters":[{adapters}]}}"#)
 }
 
+fn write_adapter_probe_logs(_state: &GuiApiState, health: &[AdapterHealth]) {
+    for item in health {
+        let Some(path) = item.log_path.as_deref() else {
+            continue;
+        };
+        let path = std::path::Path::new(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let blocked = item
+            .blocked_capabilities
+            .iter()
+            .map(|blocked| format!("blocked: {} - {}", blocked.capability, blocked.reason))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let actions = item
+            .setup_actions
+            .iter()
+            .map(|action| format!("setup_action: {} - {}", action.id, action.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let contents = format!(
+            "adapter: {}\nreadiness: {}\nmessage: {}\nexecutable: {}\n{}\n{}\n",
+            item.adapter_id,
+            item.readiness.as_str(),
+            item.message,
+            item.executable_capabilities.join(","),
+            blocked,
+            actions
+        );
+        let _ = std::fs::write(path, contents);
+    }
+}
+
 fn adapter_health_item_json(health: &AdapterHealth) -> String {
     format!(
-        r#"{{"id":"{}","readiness":"{}","healthy":{},"status":"{}","statusLabel":"{}","message":"{}","executableCapabilities":{},"recordableTargets":{},"logPath":{}}}"#,
+        r#"{{"id":"{}","readiness":"{}","healthy":{},"status":"{}","statusLabel":"{}","message":"{}","executableCapabilities":{},"blockedCapabilities":{},"setupActions":{},"recordableTargets":{},"logPath":{}}}"#,
         escape_json(&health.adapter_id),
         health.readiness.as_str(),
         health.readiness.is_healthy(),
@@ -767,14 +804,52 @@ fn adapter_health_item_json(health: &AdapterHealth) -> String {
         escape_json(adapter_maturity_label(&health.adapter_id)),
         escape_json(&health.message),
         string_array_json(&health.executable_capabilities),
+        blocked_capabilities_json(&health.blocked_capabilities),
+        setup_actions_json(&health.setup_actions),
         string_array_json(&health.recordable_targets),
         json_option(health.log_path.as_deref())
+    )
+}
+
+fn blocked_capabilities_json(blocked: &[AdapterBlockedCapability]) -> String {
+    format!(
+        "[{}]",
+        blocked
+            .iter()
+            .map(|item| {
+                format!(
+                    r#"{{"capability":"{}","reason":"{}"}}"#,
+                    escape_json(&item.capability),
+                    escape_json(&item.reason)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn setup_actions_json(actions: &[AdapterSetupAction]) -> String {
+    format!(
+        "[{}]",
+        actions
+            .iter()
+            .map(|action| {
+                format!(
+                    r#"{{"id":"{}","label":"{}","description":"{}"}}"#,
+                    escape_json(&action.id),
+                    escape_json(&action.label),
+                    escape_json(&action.description)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
 fn adapter_maturity_status(adapter_id: &str) -> &'static str {
     match adapter_id {
         PLAYWRIGHT_ADAPTER_ID => "beta",
+        EXCEL_ADAPTER_ID => "beta",
         MACOS_ADAPTER_ID
         | WINDOWS_ADAPTER_ID
         | LINUX_X11_ADAPTER_ID
@@ -825,46 +900,28 @@ fn model_adapter_health(
     capabilities: AdapterCapabilities,
     allow_model_replay: bool,
 ) -> AdapterHealth {
-    if capabilities.adapter_id == VISION_ADAPTER_ID
-        && std::env::var("GREENTIC_VISION_BACKEND_COMMAND")
-            .ok()
-            .filter(|command| !command.trim().is_empty())
-            .is_none()
-    {
-        let mut health = AdapterHealth::unavailable(
-            capabilities.adapter_id.clone(),
-            AdapterReadiness::SidecarMissing,
-            "Vision screenshot/OCR/input backend is not configured. Set GREENTIC_VISION_BACKEND_COMMAND.",
-        );
-        health.log_path = Some(adapter_log_path(state, &health.adapter_id));
-        return health;
-    }
-    if capabilities.adapter_id == TERMINAL_ADAPTER_ID
-        && std::env::var("GREENTIC_TERMINAL_ADAPTER_COMMAND")
-            .ok()
-            .filter(|command| !command.trim().is_empty())
-            .is_none()
-    {
-        let mut health = AdapterHealth::unavailable(
-            capabilities.adapter_id.clone(),
-            AdapterReadiness::SidecarMissing,
-            "Owned terminal PTY/SSH/TN3270 runtime is not configured. Set GREENTIC_TERMINAL_ADAPTER_COMMAND.",
-        );
-        health.log_path = Some(adapter_log_path(state, &health.adapter_id));
-        return health;
-    }
     let production_capabilities = capabilities
         .capabilities
         .iter()
         .filter(|capability| production_capability_available(state, capability))
         .cloned()
         .collect::<Vec<_>>();
+    let blocked_capabilities = capabilities
+        .capabilities
+        .iter()
+        .filter(|capability| !production_capability_available(state, capability))
+        .map(|capability| AdapterBlockedCapability {
+            capability: capability.clone(),
+            reason: blocked_capability_reason(capability),
+        })
+        .collect::<Vec<_>>();
+    let has_production_capabilities = !production_capabilities.is_empty();
     let mut health = if allow_model_replay {
         AdapterHealth::healthy(
             capabilities.adapter_id.clone(),
             capabilities.capabilities.clone(),
         )
-    } else if !production_capabilities.is_empty() {
+    } else if has_production_capabilities {
         AdapterHealth::healthy(capabilities.adapter_id.clone(), production_capabilities)
     } else {
         AdapterHealth::unavailable(
@@ -873,8 +930,77 @@ fn model_adapter_health(
             "Adapter contract is installed, but production execution is not implemented yet.",
         )
     };
+    if capabilities.adapter_id == TERMINAL_ADAPTER_ID
+        && !blocked_capabilities.is_empty()
+        && has_production_capabilities
+        && !allow_model_replay
+    {
+        health.message =
+            "Local terminal command execution is ready. SSH/TN3270 session capabilities need a configured terminal runtime.".to_owned();
+    } else if capabilities.adapter_id == JAVA_ADAPTER_ID && !java_access_bridge_available() {
+        health.readiness = AdapterReadiness::SidecarMissing;
+        health.message = "Java Access Bridge backend is not configured. Install or configure a Java accessibility sidecar before running Java workflows.".to_owned();
+    } else if capabilities.adapter_id == VISION_ADAPTER_ID
+        && !vision_backend_configured()
+        && !allow_model_replay
+    {
+        health.readiness = AdapterReadiness::SidecarMissing;
+        health.message = "Vision screenshot/OCR/input backend is not configured. Configure the local vision backend and OS permissions before using vision fallback.".to_owned();
+    }
+    health = health
+        .with_blocked_capabilities(blocked_capabilities)
+        .with_setup_actions(adapter_setup_actions(&capabilities.adapter_id));
     health.log_path = Some(adapter_log_path(state, &health.adapter_id));
     health
+}
+
+fn blocked_capability_reason(capability: &str) -> String {
+    if capability.starts_with("java.") {
+        "Java Access Bridge backend command is not configured.".to_owned()
+    } else if capability.starts_with("vision.") {
+        "Vision screenshot/OCR/input backend is not configured.".to_owned()
+    } else if capability.starts_with("terminal.") {
+        "Advanced terminal session runtime is not configured.".to_owned()
+    } else {
+        "Production backend is not available on this platform.".to_owned()
+    }
+}
+
+fn adapter_setup_actions(adapter_id: &str) -> Vec<AdapterSetupAction> {
+    match adapter_id {
+        JAVA_ADAPTER_ID => vec![AdapterSetupAction {
+            id: "java_accessibility_backend".to_owned(),
+            label: "Configure Java accessibility".to_owned(),
+            description: "Install or point Greentic to a Java Access Bridge sidecar command."
+                .to_owned(),
+        }],
+        TERMINAL_ADAPTER_ID => vec![AdapterSetupAction {
+            id: "terminal_session_runtime".to_owned(),
+            label: "Configure SSH/TN3270 runtime".to_owned(),
+            description:
+                "Optional: configure a managed terminal runtime for session-oriented workflows."
+                    .to_owned(),
+        }],
+        VISION_ADAPTER_ID => vec![
+            AdapterSetupAction {
+                id: "vision_backend".to_owned(),
+                label: "Configure vision backend".to_owned(),
+                description: "Install or configure screenshot, OCR, and region-click support."
+                    .to_owned(),
+            },
+            AdapterSetupAction {
+                id: "screen_capture_permission".to_owned(),
+                label: "Open screen capture settings".to_owned(),
+                description: "Grant OS screen recording permission for screenshots.".to_owned(),
+            },
+            AdapterSetupAction {
+                id: "input_control_permission".to_owned(),
+                label: "Open input control settings".to_owned(),
+                description: "Grant OS input permission for region clicks.".to_owned(),
+            },
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn healthy_adapter_capabilities(state: &GuiApiState) -> Vec<AdapterCapabilities> {
@@ -1286,6 +1412,21 @@ fn setup_fix_json(body: &str, state: &GuiApiState) -> Result<String, String> {
             &id,
             "manual",
             "Install the browser automation extension from Extensions, then retry web recording.",
+        ),
+        "java_accessibility_backend" => setup_fix_result_json(
+            &id,
+            "manual",
+            "Install the Java accessibility backend sidecar and set GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND, or set GREENTIC_JAVA_ACCESS_BRIDGE=1 when Java Access Bridge is available.",
+        ),
+        "terminal_session_runtime" => setup_fix_result_json(
+            &id,
+            "manual",
+            "Local terminal commands work without setup. For SSH/TN3270 session workflows, configure GREENTIC_TERMINAL_ADAPTER_COMMAND with the managed terminal runtime command.",
+        ),
+        "vision_backend" => setup_fix_result_json(
+            &id,
+            "manual",
+            "Configure GREENTIC_VISION_BACKEND_COMMAND with a local vision backend that supports screenshot, OCR, and region input actions.",
         ),
         "screen_capture_permission" => open_permission_settings(
             state,
@@ -2896,6 +3037,9 @@ fn production_capability_available(state: &GuiApiState, capability: &str) -> boo
     if capability.starts_with("web.") {
         return true;
     }
+    if capability.starts_with("excel.") {
+        return true;
+    }
     if capability.starts_with("macos.") {
         return platform.os == DesktopPlatform::MacOS;
     }
@@ -2912,16 +3056,10 @@ fn production_capability_available(state: &GuiApiState, capability: &str) -> boo
         if capability == "terminal.run_command" {
             return true;
         }
-        return std::env::var("GREENTIC_TERMINAL_ADAPTER_COMMAND")
-            .ok()
-            .filter(|command| !command.trim().is_empty())
-            .is_some();
+        return terminal_session_runtime_configured();
     }
     if capability.starts_with("vision.") {
-        return std::env::var("GREENTIC_VISION_BACKEND_COMMAND")
-            .ok()
-            .filter(|command| !command.trim().is_empty())
-            .is_some();
+        return vision_backend_configured();
     }
     false
 }
@@ -3047,6 +3185,7 @@ fn validate_runner_package_against_adapters(
 fn replay_adapter_registry(state: &GuiApiState) -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
     registry.insert(Arc::new(PlaywrightWebAdapter::new()));
+    registry.insert(Arc::new(ExcelAdapter::new()));
     registry.insert(Arc::new(TerminalAdapter::new()));
     registry.insert(Arc::new(VisionAdapter::new()));
     registry.insert(Arc::new(JavaDesktopAdapter::new(
@@ -4212,7 +4351,25 @@ fn allow_experimental_recording_backend(target: &str) -> bool {
 fn java_access_bridge_available() -> bool {
     std::env::var("GREENTIC_JAVA_ACCESS_BRIDGE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .or_else(|_| {
+            std::env::var("GREENTIC_JAVA_ACCESS_BRIDGE_COMMAND")
+                .map(|value| !value.trim().is_empty())
+        })
         .unwrap_or(false)
+}
+
+fn terminal_session_runtime_configured() -> bool {
+    std::env::var("GREENTIC_TERMINAL_ADAPTER_COMMAND")
+        .ok()
+        .filter(|command| !command.trim().is_empty())
+        .is_some()
+}
+
+fn vision_backend_configured() -> bool {
+    std::env::var("GREENTIC_VISION_BACKEND_COMMAND")
+        .ok()
+        .filter(|command| !command.trim().is_empty())
+        .is_some()
 }
 
 fn recording_action_json(
@@ -6870,15 +7027,17 @@ mod tests {
         );
         let response = String::from_utf8_lossy(&response);
         assert!(
-            response.contains("\"inputs\":[\"email\",\"name\",\"spreadsheet_name\"]"),
+            response.contains("\"inputs\":[\"email\",\"name\",\"xlsx_path\"]"),
             "{response}"
         );
+        assert!(response.contains("greentic.desktop.excel"), "{response}");
+        assert!(response.contains("excel.append_rows"), "{response}");
         assert!(
             response.contains("\"outputs\":[\"saved_status\"]"),
             "{response}"
         );
         assert!(
-            response.contains("Which application should open the spreadsheet"),
+            response.contains("Which worksheet should the Excel runner use?"),
             "{response}"
         );
         assert!(!response.contains("number_1"), "{response}");
@@ -6910,7 +7069,7 @@ mod tests {
         let health = adapter_runtime_health(&state, false);
 
         assert!(!health.is_empty());
-        assert!(health
+        assert!(!health
             .iter()
             .any(|adapter| adapter.readiness == AdapterReadiness::NotImplemented));
         assert!(health
@@ -6920,7 +7079,14 @@ mod tests {
         assert!(health
             .iter()
             .any(|adapter| adapter.adapter_id == TERMINAL_ADAPTER_ID
-                && adapter.readiness == AdapterReadiness::SidecarMissing));
+                && adapter.readiness == AdapterReadiness::Healthy
+                && adapter
+                    .executable_capabilities
+                    .contains(&"terminal.run_command".to_owned())
+                && adapter
+                    .blocked_capabilities
+                    .iter()
+                    .any(|blocked| blocked.capability == "terminal.connect")));
         let capabilities = healthy_adapter_capabilities_with_mode(&state, false);
         let current_native_capability = match detect_platform().os {
             DesktopPlatform::MacOS => "macos.activate_app",
@@ -6958,6 +7124,9 @@ mod tests {
         assert!(response.contains("\"status\":\"beta\""), "{response}");
         assert!(response.contains("\"statusLabel\""), "{response}");
         assert!(response.contains("\"logPath\""), "{response}");
+        assert!(response.contains("\"blockedCapabilities\""), "{response}");
+        assert!(response.contains("\"setupActions\""), "{response}");
+        assert!(response.contains("terminal.run_command"), "{response}");
     }
 
     #[test]
@@ -6970,6 +7139,7 @@ mod tests {
             LINUX_X11_ADAPTER_ID,
             LINUX_WAYLAND_ADAPTER_ID,
             JAVA_ADAPTER_ID,
+            EXCEL_ADAPTER_ID,
             TERMINAL_ADAPTER_ID,
             VISION_ADAPTER_ID,
         ] {

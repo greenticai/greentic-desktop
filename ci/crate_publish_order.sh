@@ -20,6 +20,7 @@ PUBLISH_CRATE_ORDER=(
   greentic-desktop-java
   greentic-desktop-terminal
   greentic-desktop-vision
+  greentic-desktop-excel
   greentic-desktop-macos
   greentic-desktop-linux
   greentic-desktop-evidence

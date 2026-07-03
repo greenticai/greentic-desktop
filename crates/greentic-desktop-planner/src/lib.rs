@@ -41,6 +41,7 @@ pub struct EvidencePolicy {
 pub enum PlannedTechnology {
     ExistingRunner,
     Web,
+    Excel,
     Java,
     Native,
     Terminal,
@@ -289,6 +290,22 @@ pub fn route_capabilities(prompt: &str, context: &PlanningContext) -> Capability
             "greentic.desktop.playwright",
         ),
         route_candidate(
+            PlannedTechnology::Excel,
+            context,
+            &[
+                "excel.read_range",
+                "excel.search_rows",
+                "excel.append_rows",
+                "excel.create_workbook",
+            ],
+            score_signals(
+                &lower,
+                context,
+                &["xlsx", "workbook", "spreadsheet", "worksheet", "excel file"],
+            ),
+            "greentic.desktop.excel",
+        ),
+        route_candidate(
             PlannedTechnology::Java,
             context,
             &[
@@ -456,10 +473,11 @@ fn technology_priority(technology: PlannedTechnology) -> u8 {
     match technology {
         PlannedTechnology::ExistingRunner => 0,
         PlannedTechnology::Web => 1,
-        PlannedTechnology::Java => 2,
-        PlannedTechnology::Native => 3,
-        PlannedTechnology::Terminal => 4,
-        PlannedTechnology::Vision => 5,
+        PlannedTechnology::Excel => 2,
+        PlannedTechnology::Java => 3,
+        PlannedTechnology::Native => 4,
+        PlannedTechnology::Terminal => 5,
+        PlannedTechnology::Vision => 6,
     }
 }
 
@@ -893,6 +911,70 @@ fn infer_steps(
             }
             steps
         }
+        PlannedTechnology::Excel => {
+            let path = inputs
+                .iter()
+                .find(|input| input.contains("xlsx") || input.contains("spreadsheet"))
+                .cloned()
+                .unwrap_or_else(|| "inputs.xlsx_path".to_owned());
+            let search = inputs
+                .iter()
+                .find(|input| input.contains("search"))
+                .cloned()
+                .unwrap_or_else(|| "inputs.search_term".to_owned());
+            let mut steps = if prompt.contains("append") || prompt.contains("add row") {
+                vec![step(
+                    "append_rows",
+                    "append_rows",
+                    "excel.append_rows",
+                    Some(&format!(
+                        r#"{{"path":"{{{{{path}}}}}","sheet":"Sheet1","rows":[],"save_as":"{{{{{path}}}}}","overwrite":true,"allow_in_place":true}}"#
+                    )),
+                )]
+            } else if prompt.contains("report")
+                || prompt.contains("export")
+                || prompt.contains("create")
+            {
+                vec![step(
+                    "create_workbook",
+                    "create_workbook",
+                    "excel.create_workbook",
+                    Some(
+                        r#"{"path":"{{inputs.output_path}}","overwrite":false,"sheets":[{"name":"Sheet1","rows":[]}]}"#,
+                    ),
+                )]
+            } else if prompt.contains("search")
+                || prompt.contains("find")
+                || prompt.contains("look up")
+            {
+                vec![step(
+                    "search_rows",
+                    "search_rows",
+                    "excel.search_rows",
+                    Some(&format!(
+                        r#"{{"path":"{{{{{path}}}}}","sheet":"Sheet1","filters":[{{"column":"Name","op":"contains","value":"{{{{{search}}}}}"}}]}}"#
+                    )),
+                )]
+            } else {
+                vec![step(
+                    "read_range",
+                    "read_range",
+                    "excel.read_range",
+                    Some(&format!(
+                        r#"{{"path":"{{{{{path}}}}}","sheet":"Sheet1","range":"A1:Z100"}}"#
+                    )),
+                )]
+            };
+            for output in outputs {
+                steps.push(step(
+                    &format!("extract_{}", output.trim_start_matches("outputs.")),
+                    "extract_text",
+                    "excel.search_rows",
+                    None,
+                ));
+            }
+            steps
+        }
         PlannedTechnology::Java => structured_desktop_steps("java", inputs, outputs),
         PlannedTechnology::Native => {
             if route.adapter_id.contains("windows") {
@@ -1125,6 +1207,30 @@ mod tests {
             .outputs
             .contains(&"outputs.confirmation_number".to_owned()));
         assert!(draft.render_yaml().contains("web.extract_text"));
+    }
+
+    #[test]
+    fn spreadsheet_file_prompt_routes_to_excel_adapter() {
+        let context = context_with(
+            vec![AdapterCapabilities::new(
+                "greentic.desktop.excel",
+                "1.0.0",
+                ["excel.read_range", "excel.search_rows", "excel.append_rows"],
+            )],
+            Vec::new(),
+        );
+        let draft = plan_prompt(
+            "Ask for an xlsx file and a search term, search the workbook, and return the matching row.",
+            &context,
+        );
+
+        assert_eq!(draft.required_adapters, vec!["greentic.desktop.excel"]);
+        assert!(draft
+            .package
+            .steps
+            .iter()
+            .any(|step| step.required_capability == "excel.search_rows"));
+        assert!(!draft.render_yaml().contains("macos.copy_spreadsheet_row"));
     }
 
     #[test]

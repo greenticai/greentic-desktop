@@ -637,7 +637,30 @@ impl GreenticLlmClient for HeuristicLlmClient {
         } else {
             "low"
         };
-        let capability = if lower.contains("terminal") || lower.contains("mainframe") {
+        let capability = if lower.contains("xlsx")
+            || lower.contains("workbook")
+            || lower.contains("spreadsheet")
+            || lower.contains("excel file")
+        {
+            if lower.contains("append")
+                || lower.contains("add a new line")
+                || lower.contains("add row")
+            {
+                "excel.append_rows"
+            } else if lower.contains("report")
+                || lower.contains("export")
+                || lower.contains("create")
+            {
+                "excel.create_workbook"
+            } else if lower.contains("search")
+                || lower.contains("look up")
+                || lower.contains("find")
+            {
+                "excel.search_rows"
+            } else {
+                "excel.read_range"
+            }
+        } else if lower.contains("terminal") || lower.contains("mainframe") {
             "terminal.read_screen"
         } else if lower.contains("calculator") || lower.contains("desktop") || lower.contains("app")
         {
@@ -646,8 +669,11 @@ impl GreenticLlmClient for HeuristicLlmClient {
             "web.goto"
         };
         let mut inputs = Vec::new();
-        if lower.contains("spreadsheet") {
-            inputs.push("spreadsheet_name");
+        if lower.contains("spreadsheet") || lower.contains("xlsx") || lower.contains("workbook") {
+            inputs.push("xlsx_path");
+        }
+        if lower.contains("search term") || lower.contains("look up") || lower.contains("find") {
+            inputs.push("search_term");
         }
         if lower.contains("document") || lower.contains("word") {
             if lower.contains("place") || lower.contains("path") || lower.contains("location") {
@@ -702,8 +728,8 @@ impl GreenticLlmClient for HeuristicLlmClient {
         } else {
             Vec::new()
         };
-        let open_questions = if lower.contains("spreadsheet") && !mentions_application(&lower) {
-            vec!["Which application should open the spreadsheet if the OS default is not correct?"]
+        let open_questions = if capability.starts_with("excel.") && !mentions_sheet_name(&lower) {
+            vec!["Which worksheet should the Excel runner use?"]
         } else if lower.contains("login") && !lower.contains("service account") {
             vec!["Which credentials or service account should be used?"]
         } else if inputs.is_empty() {
@@ -864,12 +890,10 @@ fn desktop_capability(request: &LlmRequestEnvelope) -> &'static str {
     }
 }
 
-fn mentions_application(prompt: &str) -> bool {
-    prompt.contains("excel")
-        || prompt.contains("libreoffice")
-        || prompt.contains("numbers")
-        || prompt.contains("application")
-        || prompt.contains(" app")
+fn mentions_sheet_name(prompt: &str) -> bool {
+    prompt
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| matches!(part, "sheet" | "worksheet" | "tab"))
 }
 
 fn named_schema(names: &[&str]) -> String {
@@ -986,21 +1010,22 @@ mod tests {
             .complete(&LlmRequestEnvelope::prompt_to_runner(
                 "Ask for the name of a spreadsheet. In /tmp create the spreadsheet if it does not exist already. Otherwise open it. Add a new line to the spreadsheet with the name and email that the user provided. Save the changes.",
                 LlmPlanningContext {
-                    available_adapters: vec!["greentic.desktop.macos".to_owned()],
+                    available_adapters: vec!["greentic.desktop.excel".to_owned()],
                     ..LlmPlanningContext::default()
                 },
             ))
             .expect("heuristic response");
 
-        assert!(response.content.contains("\"spreadsheet_name\""));
+        assert!(response.content.contains("\"xlsx_path\""));
         assert!(response.content.contains("\"name\""));
         assert!(response.content.contains("\"email\""));
         assert!(response.content.contains("\"saved_status\""));
+        assert!(response.content.contains("excel.append_rows"));
         assert!(!response.content.contains("\"number_1\""));
         assert!(!response.content.contains("\"operation\""));
         assert!(response
             .content
-            .contains("Which application should open the spreadsheet"));
+            .contains("Which worksheet should the Excel runner use?"));
     }
 
     #[test]

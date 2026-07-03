@@ -160,6 +160,14 @@ const BUILT_IN_EXTENSION_CATALOG: &[BuiltInExtensionCatalogEntry] = &[
         publisher: "greenticai",
     },
     BuiltInExtensionCatalogEntry {
+        manifest_id: "greentic.desktop.excel",
+        aliases: &["excel", "spreadsheet", "xlsx"],
+        description: "Read, search, update, and generate Excel workbook files.",
+        platforms: &["windows", "macos", "linux"],
+        source_slug: "excel",
+        publisher: "greenticai",
+    },
+    BuiltInExtensionCatalogEntry {
         manifest_id: "greentic.desktop.macos.ax",
         aliases: &["macos", "macos-ax"],
         description: "Drive native macOS apps through Accessibility.",
