@@ -637,8 +637,9 @@ fn extract_output_value(
         .rev()
         .filter(|result| result.success)
         .filter(|result| !result.message.trim().is_empty())
-        .map(|result| &result.message);
-    if let Some(value) = extract_labeled_output(&name, step_lines) {
+        .flat_map(|result| result.message.lines().map(str::to_owned))
+        .collect::<Vec<_>>();
+    if let Some(value) = extract_labeled_output(&name, step_lines.iter()) {
         return Some(value);
     }
     if output_can_use_saved_path(&name) {
@@ -1118,6 +1119,32 @@ mod tests {
             .artifacts
             .iter()
             .any(|artifact| matches!(artifact.kind, EvidenceArtifactKind::OutputExtractionProof)));
+    }
+
+    #[test]
+    fn extracts_outputs_from_multiline_step_messages() {
+        let mut package = package();
+        package.outputs = vec![
+            "outputs.product_name".to_owned(),
+            "outputs.price".to_owned(),
+        ];
+        let outputs = extract_outputs(
+            &package,
+            &[],
+            &[StepResult {
+                step_id: "search-product-row".to_owned(),
+                success: true,
+                message: "description: Compact mouse\nproduct name: Wireless Mouse\nprice: 24.99"
+                    .to_owned(),
+            }],
+        )
+        .expect("outputs should be extracted from multiline step message");
+
+        assert_eq!(
+            outputs.get("outputs.product_name"),
+            Some(&"Wireless Mouse".to_owned())
+        );
+        assert_eq!(outputs.get("outputs.price"), Some(&"24.99".to_owned()));
     }
 
     #[test]

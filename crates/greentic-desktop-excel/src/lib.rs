@@ -82,7 +82,7 @@ impl DesktopAdapter for ExcelAdapter {
         Ok(StepResult {
             step_id: step.id,
             success: true,
-            message: output.to_string(),
+            message: excel_result_message(&output),
         })
     }
 
@@ -333,9 +333,47 @@ fn search_rows(payload: Value) -> AdapterResult<Value> {
             }
         }
     }
+    let outputs = matches
+        .first()
+        .and_then(|matched| matched.get("cells"))
+        .and_then(Value::as_object)
+        .map(|cells| {
+            cells
+                .iter()
+                .filter_map(|(header, cell)| {
+                    cell.get("value")
+                        .map(|value| (header.clone(), value.clone()))
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
     Ok(
-        json!({"header_row_number": header_index + 1, "matches": matches, "truncated": matches.len() == limit}),
+        json!({"header_row_number": header_index + 1, "matches": matches, "outputs": outputs, "truncated": matches.len() == limit}),
     )
+}
+
+fn excel_result_message(output: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(outputs) = output.get("outputs").and_then(Value::as_object) {
+        for (key, value) in outputs {
+            lines.push(format!(
+                "{}: {}",
+                key.replace('_', " "),
+                output_value_to_text(value)
+            ));
+        }
+    }
+    lines.push(output.to_string());
+    lines.join("\n")
+}
+
+fn output_value_to_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Number(_) | Value::Bool(_) => value.to_string(),
+        _ => value.to_string(),
+    }
 }
 
 fn validate_schema(payload: Value) -> AdapterResult<Value> {
@@ -728,6 +766,55 @@ mod tests {
         }))
         .expect("rows should search");
         assert!(matches.to_string().contains("Wireless Mouse"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_rows_exposes_labeled_outputs_for_replay() {
+        let path = std::env::temp_dir().join(format!(
+            "greentic-excel-output-labels-{}.xlsx",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let path_string = path.display().to_string();
+        create_workbook(json!({
+            "path": path_string,
+            "overwrite": true,
+            "sheets": [{
+                "name": "sample",
+                "headers": ["Product Name", "Description", "Price"],
+                "rows": [{
+                    "Product Name": "Wireless Mouse",
+                    "Description": "Compact mouse",
+                    "Price": 24.99
+                }]
+            }]
+        }))
+        .expect("workbook should be created");
+
+        let step = RunnerStep {
+            id: "search-product-row".to_owned(),
+            action: "search_rows".to_owned(),
+            target: Default::default(),
+            value: Some(
+                json!({
+                    "path": path_string,
+                    "sheet": "sample",
+                    "filters": [{"column": "Product Name", "value": "Mouse"}],
+                    "limit": 1
+                })
+                .to_string(),
+            ),
+            required_capability: "excel.search_rows".to_owned(),
+        };
+        let result = ExcelAdapter::new()
+            .execute(step)
+            .expect("search step should execute");
+
+        assert!(result.message.contains("product name: Wireless Mouse"));
+        assert!(result.message.contains("description: Compact mouse"));
+        assert!(result.message.contains("price: 24.99"));
 
         let _ = std::fs::remove_file(path);
     }

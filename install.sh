@@ -99,25 +99,19 @@ mkdir -p "$extract_dir"
 tar -xzf "$archive" -C "$extract_dir"
 
 desktop_bin="$(find "$extract_dir" -type f -name greentic-desktop -perm -u+x 2>/dev/null | head -n 1 || true)"
-gtc_bin="$(find "$extract_dir" -type f -name gtc -perm -u+x 2>/dev/null | head -n 1 || true)"
 if [ -z "$desktop_bin" ]; then
   desktop_bin="$(find "$extract_dir" -type f -name greentic-desktop | head -n 1 || true)"
 fi
-if [ -z "$gtc_bin" ]; then
-  gtc_bin="$(find "$extract_dir" -type f -name gtc | head -n 1 || true)"
-fi
-if [ -z "$desktop_bin" ] || [ -z "$gtc_bin" ]; then
-  printf 'Release archive did not contain greentic-desktop and gtc binaries.\n' >&2
+if [ -z "$desktop_bin" ]; then
+  printf 'Release archive did not contain the greentic-desktop binary.\n' >&2
   exit 1
 fi
 
 mkdir -p "$install_dir" "$bin_dir"
 cp "$desktop_bin" "$install_dir/greentic-desktop"
-cp "$gtc_bin" "$install_dir/gtc"
-chmod +x "$install_dir/greentic-desktop" "$install_dir/gtc"
+chmod +x "$install_dir/greentic-desktop"
 
 ln -sfn "$install_dir/greentic-desktop" "$bin_dir/greentic-desktop"
-ln -sfn "$install_dir/gtc" "$bin_dir/gtc"
 
 if [ "${GREENTIC_DESKTOP_NO_INIT:-0}" != "1" ]; then
   "$install_dir/greentic-desktop" init
@@ -137,4 +131,3 @@ esac
 
 printf '\nTry:\n'
 printf '  greentic-desktop\n'
-printf '  gtc desktop info\n'

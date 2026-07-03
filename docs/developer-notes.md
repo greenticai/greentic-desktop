@@ -9,7 +9,7 @@ This repository is a Rust workspace for Greentic Desktop. Most crates model a sp
 - `greentic-desktop-runtime`: runtime host for config, discovery, extensions, telemetry, and MCP serving.
 - `greentic-desktop-gui-assets`: embedded browser UI asset lookup for Automate Hub.
 - `greentic-desktop-gui`: loopback HTTP host and browser opener for the Automate Hub GUI.
-- `greentic-desktop`: installable package providing default GUI startup through `greentic-desktop` and explicit CLI commands through `greentic-desktop ...` or `gtc desktop ...`.
+- `greentic-desktop`: installable package providing default GUI startup through `greentic-desktop` and explicit CLI commands through `greentic-desktop ...`.
 - `greentic-desktop-adapter`: common adapter capability, locator, step, and assertion models.
 - `greentic-desktop-extension`: extension manifests, built-in adapters, sidecar metadata, and signed install checks.
 - `greentic-desktop-recorder`: recording sessions, runner packages, portable steps, redaction, and YAML rendering.

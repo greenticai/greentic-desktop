@@ -14,7 +14,6 @@ The release also publishes:
 Each archive contains:
 
 - `greentic-desktop` or `greentic-desktop.exe`
-- `gtc` or `gtc.exe`
 - `README.md`
 - `LICENSE`
 
@@ -62,7 +61,6 @@ The same `greentic-desktop.exe` also works from PowerShell or Command Prompt:
 ```powershell
 .\greentic-desktop.exe gui --no-open --bind 127.0.0.1:0
 .\greentic-desktop.exe info
-.\gtc.exe desktop info
 ```
 
 Windows may show SmartScreen warnings for unsigned binaries. Code signing is separate from the archive layout and is not assumed by the release workflow.

@@ -67,14 +67,12 @@ try {
     Expand-Archive -Path $Archive -DestinationPath $ExtractDir -Force
 
     $DesktopExe = Get-ChildItem -Path $ExtractDir -Recurse -File -Filter "greentic-desktop.exe" | Select-Object -First 1
-    $GtcExe = Get-ChildItem -Path $ExtractDir -Recurse -File -Filter "gtc.exe" | Select-Object -First 1
-    if (-not $DesktopExe -or -not $GtcExe) {
-        throw "Release archive did not contain greentic-desktop.exe and gtc.exe."
+    if (-not $DesktopExe) {
+        throw "Release archive did not contain greentic-desktop.exe."
     }
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item $DesktopExe.FullName (Join-Path $InstallDir "greentic-desktop.exe") -Force
-    Copy-Item $GtcExe.FullName (Join-Path $InstallDir "gtc.exe") -Force
 
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $PathEntries = @()
@@ -100,7 +98,6 @@ try {
     Write-Host ""
     Write-Host "Try:"
     Write-Host "  greentic-desktop"
-    Write-Host "  gtc desktop info"
 } finally {
     Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue
 }

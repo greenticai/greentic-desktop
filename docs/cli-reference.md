@@ -1,9 +1,6 @@
 # CLI Reference
 
-The repository currently provides two binaries:
-
-- `greentic-desktop`
-- `gtc`, with commands under `gtc desktop`
+The repository currently provides the `greentic-desktop` binary.
 
 Published releases can be installed with:
 
@@ -39,9 +36,6 @@ The GUI host also exposes a local JSON API under `/api/v1/*` for the embedded
 frontend. Initial endpoints include `/api/v1/health`, `/api/v1/runtime/info`,
 `/api/v1/setup/checklist`, `/api/v1/extensions/*`, `/api/v1/runners`,
 `/api/v1/recordings`, and `/api/v1/mcp/status`.
-
-`gtc desktop` remains an explicit CLI command surface and does not start the GUI
-when no subcommand is supplied.
 
 For browser-first setup, see [Automate Hub GUI](gui.md).
 
@@ -217,12 +211,4 @@ The standalone CLI command is intentionally disabled until the runtime can load 
 
 ```bash
 greentic-desktop mcp serve
-```
-
-## `gtc desktop` Form
-
-Every command can also be called through the `gtc desktop` prefix:
-
-```bash
-gtc desktop config show
 ```
