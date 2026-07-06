@@ -129,7 +129,7 @@ fn run(
     if !require_desktop_prefix
         && matches!(
             args.first().map(String::as_str),
-            Some("--bind" | "--no-open" | "--token")
+            Some("--bind" | "--no-open" | "--token" | "--cloudflare")
         )
     {
         return run_gui(parse_gui_args(&args)?, writer, block_gui);
@@ -346,11 +346,11 @@ fn usage(require_desktop_prefix: bool) -> String {
     let gui_command = if require_desktop_prefix {
         ""
     } else {
-        "gui [--bind ADDR] [--token TOKEN] [--no-open]|"
+        "gui [--bind ADDR] [--token TOKEN] [--no-open] [--cloudflare]|"
     };
 
     format!(
-        "usage: {prefix} <{gui_command}info|init|--import (PATH|file://PATH|oci://REF|store://ID|repo://REF)|--run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]|desktop validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]|--export (PATH|ID) --out PATH|config show|extension search QUERY|extension install ID|extension list|extension info ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner import (PATH|file://PATH|oci://REF|store://ID|repo://REF)|runner run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]|runner validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]|runner export (PATH|ID) --out PATH|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|runner pack ID --out PATH|runner verify-pack PATH|runner install-pack PATH|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
+        "usage: {prefix} <{gui_command}info|init|--import (PATH|file://PATH|oci://REF|store://ID|repo://REF)|--run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]|desktop validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]|--export (PATH|ID) --out PATH|config show|extension search QUERY|extension install ID|extension versions ID|extension update [ID]|extension remove ID|extension enable ID|extension disable ID|extension health ID|extension verify [ID]|extension sidecar ID|runner list|runner import (PATH|file://PATH|oci://REF|store://ID|repo://REF)|runner run (PATH|ID) [--input KEY=VALUE] [--inputs-json JSON|--inputs-file PATH]|runner validate --workflow (PATH|ID) [--input KEY=VALUE] [--expect-file PATH] [--expect-file-changed PATH] [--expect-output KEY=VALUE] [--expect-no-modal] [--json]|runner export (PATH|ID) --out PATH|runner plan (--prompt TEXT|--prompt-file PATH) [--profile ID] [--context PATH] [--dry-run] [--out PATH]|runner pack ID --out PATH|runner verify-pack PATH|runner install-pack PATH|record <start|pause|resume|stop|cancel|status|list|normalise|finalise|mark-input|mark-secret|mark-output|add-assertion|note>|mcp serve [--bind ADDR]>"
     )
 }
 
@@ -359,6 +359,7 @@ struct GuiCliOptions {
     bind: SocketAddr,
     open_browser: bool,
     token: Option<String>,
+    cloudflare: bool,
 }
 
 impl Default for GuiCliOptions {
@@ -367,6 +368,7 @@ impl Default for GuiCliOptions {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             open_browser: true,
             token: None,
+            cloudflare: false,
         }
     }
 }
@@ -378,6 +380,10 @@ fn parse_gui_args(args: &[String]) -> Result<GuiCliOptions, CliError> {
         match args[index].as_str() {
             "--no-open" => {
                 options.open_browser = false;
+                index += 1;
+            }
+            "--cloudflare" => {
+                options.cloudflare = true;
                 index += 1;
             }
             "--bind" => {
@@ -401,7 +407,7 @@ fn parse_gui_args(args: &[String]) -> Result<GuiCliOptions, CliError> {
             }
             "--help" | "-h" => {
                 return Err(CliError::Usage(
-                    "usage: greentic-desktop gui [--bind ADDR] [--token TOKEN] [--no-open]"
+                    "usage: greentic-desktop gui [--bind ADDR] [--token TOKEN] [--no-open] [--cloudflare]"
                         .to_owned(),
                 ));
             }
@@ -427,6 +433,7 @@ fn run_gui(
         runtime_home: config.runner.home.clone(),
         evidence_store: config.evidence.store.clone(),
         mcp_bind: config.mcp.bind.clone(),
+        mcp_cloudflare: options.cloudflare,
         installed_core_adapter_ids: info.installed_adapters,
         installed_extension_ids: discover_extensions(&config.runner.home).unwrap_or_default(),
         runner_names: discover_runners(&config.runner.home).unwrap_or_default(),
@@ -450,11 +457,12 @@ fn run_gui(
     let _ = fs::write(
         &log_path,
         format!(
-            "version={}\ngui_url={}\nruntime_home={}\nmcp_bind={}\n",
+            "version={}\ngui_url={}\nruntime_home={}\nmcp_bind={}\nmcp_cloudflare={}\n",
             env!("CARGO_PKG_VERSION"),
             handle.url(),
             config.runner.home.display(),
-            config.mcp.bind
+            config.mcp.bind,
+            options.cloudflare
         ),
     );
 
@@ -1454,7 +1462,30 @@ exit 2
             run_with_writer(["--help".to_owned()], false, &mut help).expect("help should print");
             let help = String::from_utf8(help).expect("help should be utf8");
             assert!(help.contains("greentic-desktop"));
-            assert!(help.contains("gui [--bind ADDR] [--token TOKEN] [--no-open]"));
+            assert!(help.contains("gui [--bind ADDR] [--token TOKEN] [--no-open] [--cloudflare]"));
+        });
+    }
+
+    #[test]
+    fn gui_cloudflare_option_is_off_by_default_and_can_be_enabled() {
+        with_temp_home(|home| {
+            let mut output = Vec::new();
+            run_with_writer(
+                [
+                    "gui".to_owned(),
+                    "--no-open".to_owned(),
+                    "--cloudflare".to_owned(),
+                    "--bind".to_owned(),
+                    "127.0.0.1:0".to_owned(),
+                ],
+                false,
+                &mut output,
+            )
+            .expect("GUI command with Cloudflare option should start");
+
+            let log = std::fs::read_to_string(home.join("greentic-desktop.log"))
+                .expect("GUI log should be written");
+            assert!(log.contains("mcp_cloudflare=true"), "{log}");
         });
     }
 

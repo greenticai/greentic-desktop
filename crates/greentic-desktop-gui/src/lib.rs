@@ -87,14 +87,14 @@ use rmcp::{
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_GUI_HTTP_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const GUI_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -121,6 +121,7 @@ pub struct GuiApiState {
     pub runtime_home: PathBuf,
     pub evidence_store: PathBuf,
     pub mcp_bind: String,
+    pub mcp_cloudflare: bool,
     pub installed_core_adapter_ids: Vec<String>,
     pub installed_extension_ids: Vec<String>,
     pub runner_names: Vec<String>,
@@ -138,6 +139,7 @@ impl Default for GuiApiState {
             evidence_store: runtime_home.join("evidence"),
             runtime_home,
             mcp_bind: "127.0.0.1:8799".to_owned(),
+            mcp_cloudflare: false,
             installed_core_adapter_ids: vec!["greentic.desktop.core".to_owned()],
             installed_extension_ids: Vec::new(),
             runner_names: Vec::new(),
@@ -1946,9 +1948,12 @@ fn runner_detail_json(path: &str, state: &GuiApiState) -> String {
 fn mcp_status_json(state: &GuiApiState) -> String {
     let service = mcp_service_snapshot(state);
     format!(
-        r#"{{"status":"{}","bind":"{}","tools":{}}}"#,
+        r#"{{"status":"{}","bind":"{}","localUrl":"{}","publicUrl":{},"cloudflare":{},"tools":{}}}"#,
         escape_json(&service.status),
         escape_json(&service.bind),
+        escape_json(&format!("http://{}", service.bind)),
+        json_string_or_null(service.public_url.as_deref()),
+        state.mcp_cloudflare,
         enabled_mcp_tools(state).len()
     )
 }
@@ -1974,10 +1979,14 @@ fn mcp_tools_json(state: &GuiApiState) -> String {
 }
 
 fn mcp_client_config_json(state: &GuiApiState) -> String {
-    let url = format!("http://{}", state.mcp_bind);
+    let service = mcp_service_snapshot(state);
+    let local_url = format!("http://{}", service.bind);
+    let url = service.public_url.as_deref().unwrap_or(&local_url);
     format!(
-        r#"{{"localUrl":"{}","clientJson":"{}","awsWorkSpacesDoc":"docs/aws-workspaces-mcp.md","awsForwardedConfigured":false}}"#,
-        escape_json(&url),
+        r#"{{"localUrl":"{}","publicUrl":{},"activeUrl":"{}","clientJson":"{}","awsWorkSpacesDoc":"docs/aws-workspaces-mcp.md","awsForwardedConfigured":false}}"#,
+        escape_json(&local_url),
+        json_string_or_null(service.public_url.as_deref()),
+        escape_json(url),
         escape_json(&format!(
             r#"{{"mcpServers":{{"greentic-desktop":{{"url":"{url}/mcp"}}}}}}"#
         ))
@@ -1987,7 +1996,9 @@ fn mcp_client_config_json(state: &GuiApiState) -> String {
 #[derive(Debug)]
 struct ManagedMcpService {
     bind: String,
-    shutdown_tx: Sender<()>,
+    public_url: Option<String>,
+    cloudflared: Option<Child>,
+    shutdown_tx: Option<Sender<()>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -1995,6 +2006,13 @@ struct ManagedMcpService {
 struct McpServiceSnapshot {
     status: String,
     bind: String,
+    public_url: Option<String>,
+}
+
+#[derive(Debug)]
+struct CloudflaredTunnel {
+    child: Child,
+    public_url: String,
 }
 
 static MCP_SERVICES: OnceLock<Mutex<HashMap<String, ManagedMcpService>>> = OnceLock::new();
@@ -2010,22 +2028,138 @@ fn mcp_service_key(state: &GuiApiState) -> String {
 fn mcp_service_snapshot(state: &GuiApiState) -> McpServiceSnapshot {
     let key = mcp_service_key(state);
     let services = mcp_services().lock().expect("MCP service lock");
-    let (status, bind) = if let Some(service) = services.get(&key) {
-        ("running", service.bind.clone())
+    let (status, bind, public_url) = if let Some(service) = services.get(&key) {
+        ("running", service.bind.clone(), service.public_url.clone())
+    } else if let Some(saved) = read_mcp_service_snapshot(state) {
+        if local_mcp_health_ready(&saved.bind, &state.gui_token) {
+            ("running", saved.bind, saved.public_url)
+        } else {
+            ("stopped", state.mcp_bind.clone(), None)
+        }
+    } else if local_mcp_health_ready(&state.mcp_bind, &state.gui_token) {
+        ("running", state.mcp_bind.clone(), None)
     } else {
-        ("stopped", state.mcp_bind.clone())
+        ("stopped", state.mcp_bind.clone(), None)
     };
     McpServiceSnapshot {
         status: status.to_owned(),
         bind,
+        public_url,
     }
+}
+
+fn mcp_service_snapshot_path(state: &GuiApiState) -> PathBuf {
+    state.runtime_home.join("mcp-service.json")
+}
+
+fn persist_mcp_service_snapshot(state: &GuiApiState, bind: &str, public_url: Option<&str>) {
+    let path = mcp_service_snapshot_path(state);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = format!(
+        r#"{{"bind":"{}","publicUrl":{},"cloudflare":{}}}"#,
+        escape_json(bind),
+        json_string_or_null(public_url),
+        state.mcp_cloudflare
+    );
+    let _ = std::fs::write(path, json);
+}
+
+fn remove_mcp_service_snapshot(state: &GuiApiState) {
+    let _ = std::fs::remove_file(mcp_service_snapshot_path(state));
+}
+
+fn read_mcp_service_snapshot(state: &GuiApiState) -> Option<McpServiceSnapshot> {
+    let json = std::fs::read_to_string(mcp_service_snapshot_path(state)).ok()?;
+    Some(McpServiceSnapshot {
+        status: "running".to_owned(),
+        bind: json_string_field(&json, "bind")?,
+        public_url: json_string_field(&json, "publicUrl"),
+    })
+}
+
+fn local_mcp_health_ready(bind: &str, token: &str) -> bool {
+    let Ok(addr) = bind.parse::<SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let auth = if token.is_empty() {
+        String::new()
+    } else {
+        format!("Authorization: Bearer {token}\r\n")
+    };
+    let request =
+        format!("GET /health HTTP/1.1\r\nHost: {bind}\r\n{auth}Connection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok()
+        && response.starts_with("HTTP/1.1 200")
+        && response.contains(r#""status":"ok""#)
+}
+
+fn adopt_running_mcp_service(
+    state: &GuiApiState,
+    services: &mut HashMap<String, ManagedMcpService>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    if !local_mcp_health_ready(&state.mcp_bind, &state.gui_token) {
+        return Ok(None);
+    }
+
+    let saved = read_mcp_service_snapshot(state);
+    let mut public_url = saved.and_then(|snapshot| snapshot.public_url);
+    let mut cloudflared = None;
+    if state.mcp_cloudflare && public_url.is_none() {
+        match start_cloudflared_tunnel(&state.mcp_bind) {
+            Ok(tunnel) => {
+                public_url = Some(tunnel.public_url);
+                cloudflared = Some(tunnel.child);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if cloudflared.is_some() {
+        services.insert(
+            key.to_owned(),
+            ManagedMcpService {
+                bind: state.mcp_bind.clone(),
+                public_url: public_url.clone(),
+                cloudflared,
+                shutdown_tx: None,
+                join: None,
+            },
+        );
+    }
+    persist_mcp_service_snapshot(state, &state.mcp_bind, public_url.as_deref());
+    Ok(Some(mcp_lifecycle_json(
+        "running",
+        &state.mcp_bind,
+        public_url.as_deref(),
+        state,
+    )))
 }
 
 fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
     let key = mcp_service_key(state);
     let mut services = mcp_services().lock().expect("MCP service lock");
     if let Some(service) = services.get(&key) {
-        return Ok(mcp_lifecycle_json("running", &service.bind, state));
+        return Ok(mcp_lifecycle_json(
+            "running",
+            &service.bind,
+            service.public_url.as_deref(),
+            state,
+        ));
+    }
+    if let Some(json) = adopt_running_mcp_service(state, &mut services, &key)? {
+        return Ok(json);
     }
 
     let api_state = state.clone();
@@ -2061,8 +2195,12 @@ fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
                 .unwrap_or(requested_bind);
             let config = StreamableHttpServerConfig::default()
                 .with_stateful_mode(false)
-                .with_json_response(true)
-                .with_allowed_hosts(["localhost", "127.0.0.1", "::1"]);
+                .with_json_response(true);
+            let config = if api_state.mcp_cloudflare {
+                config.disable_allowed_hosts()
+            } else {
+                config.with_allowed_hosts(["localhost", "127.0.0.1", "::1"])
+            };
             let server_state = api_state.clone();
             let mcp_service: StreamableHttpService<GuiMcpServer, LocalSessionManager> =
                 StreamableHttpService::new(
@@ -2111,15 +2249,36 @@ fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
         }
     };
 
+    let (cloudflared, public_url) = if state.mcp_cloudflare {
+        match start_cloudflared_tunnel(&bind) {
+            Ok(tunnel) => (Some(tunnel.child), Some(tunnel.public_url)),
+            Err(error) => {
+                let _ = shutdown_tx.send(());
+                let _ = join.join();
+                return Err(error);
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     services.insert(
         key,
         ManagedMcpService {
             bind: bind.clone(),
-            shutdown_tx,
+            public_url: public_url.clone(),
+            cloudflared,
+            shutdown_tx: Some(shutdown_tx),
             join: Some(join),
         },
     );
-    Ok(mcp_lifecycle_json("running", &bind, state))
+    persist_mcp_service_snapshot(state, &bind, public_url.as_deref());
+    Ok(mcp_lifecycle_json(
+        "running",
+        &bind,
+        public_url.as_deref(),
+        state,
+    ))
 }
 
 fn stop_mcp_service(state: &GuiApiState) -> String {
@@ -2129,12 +2288,23 @@ fn stop_mcp_service(state: &GuiApiState) -> String {
         .expect("MCP service lock")
         .remove(&key);
     if let Some(mut service) = service {
-        let _ = service.shutdown_tx.send(());
+        if let Some(mut cloudflared) = service.cloudflared.take() {
+            let _ = cloudflared.kill();
+            let _ = cloudflared.wait();
+        }
+        if let Some(shutdown_tx) = service.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
         if let Some(join) = service.join.take() {
             let _ = join.join();
         }
     }
-    mcp_lifecycle_json("stopped", &state.mcp_bind, state)
+    remove_mcp_service_snapshot(state);
+    if local_mcp_health_ready(&state.mcp_bind, &state.gui_token) {
+        mcp_lifecycle_json("running", &state.mcp_bind, None, state)
+    } else {
+        mcp_lifecycle_json("stopped", &state.mcp_bind, None, state)
+    }
 }
 
 fn restart_mcp_service(state: &GuiApiState) -> Result<String, String> {
@@ -2142,13 +2312,241 @@ fn restart_mcp_service(state: &GuiApiState) -> Result<String, String> {
     start_mcp_service(state)
 }
 
-fn mcp_lifecycle_json(status: &str, bind: &str, state: &GuiApiState) -> String {
+fn mcp_lifecycle_json(
+    status: &str,
+    bind: &str,
+    public_url: Option<&str>,
+    state: &GuiApiState,
+) -> String {
     format!(
-        r#"{{"status":"{}","bind":"{}","tools":{}}}"#,
+        r#"{{"status":"{}","bind":"{}","localUrl":"{}","publicUrl":{},"cloudflare":{},"tools":{}}}"#,
         escape_json(status),
         escape_json(bind),
+        escape_json(&format!("http://{bind}")),
+        json_string_or_null(public_url),
+        state.mcp_cloudflare,
         enabled_mcp_tools(state).len()
     )
+}
+
+fn start_cloudflared_tunnel(bind: &str) -> Result<CloudflaredTunnel, String> {
+    let cloudflared = resolve_cloudflared_command()?;
+    let mut child = Command::new(&cloudflared)
+        .args(["tunnel", "--url", &format!("http://{bind}")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            api_error_json(
+                "mcp.cloudflare_unavailable",
+                &format!(
+                    "Could not start cloudflared at {}. Install cloudflared, set GREENTIC_CLOUDFLARED_PATH, or run without --cloudflare: {err}",
+                    cloudflared.display()
+                ),
+            )
+        })?;
+
+    let public_url = Arc::new(Mutex::new(None::<String>));
+    if let Some(stdout) = child.stdout.take() {
+        read_cloudflared_urls(stdout, Arc::clone(&public_url));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        read_cloudflared_urls(stderr, Arc::clone(&public_url));
+    }
+
+    for _ in 0..40 {
+        if let Some(url) = public_url.lock().expect("cloudflared URL lock").clone() {
+            if let Err(error) = wait_for_cloudflared_health(&mut child, &url) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            return Ok(CloudflaredTunnel {
+                child,
+                public_url: url,
+            });
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(api_error_json(
+                    "mcp.cloudflare_exit",
+                    &format!("cloudflared exited before publishing a tunnel URL: {status}"),
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(api_error_json(
+                    "mcp.cloudflare_status_failed",
+                    &format!("Could not inspect cloudflared status: {err}"),
+                ));
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(api_error_json(
+        "mcp.cloudflare_timeout",
+        "Timed out waiting for cloudflared to publish a public URL.",
+    ))
+}
+
+fn resolve_cloudflared_command() -> Result<PathBuf, String> {
+    for candidate in cloudflared_command_candidates() {
+        if candidate == Path::new("cloudflared") {
+            if command_on_path("cloudflared") {
+                return Ok(candidate);
+            }
+        } else if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(api_error_json(
+        "mcp.cloudflare_unavailable",
+        &format!(
+            "Could not find cloudflared. Install cloudflared, set GREENTIC_CLOUDFLARED_PATH, or run without --cloudflare. Checked: {}",
+            cloudflared_command_candidates()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ))
+}
+
+fn cloudflared_command_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("GREENTIC_CLOUDFLARED_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(PathBuf::from("cloudflared"));
+    candidates.push(PathBuf::from("/opt/homebrew/bin/cloudflared"));
+    candidates.push(PathBuf::from("/usr/local/bin/cloudflared"));
+    candidates
+}
+
+fn command_on_path(command: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join(command))
+                .any(|candidate| candidate.is_file())
+        })
+        .unwrap_or(false)
+}
+
+fn wait_for_cloudflared_health(child: &mut Child, public_url: &str) -> Result<(), String> {
+    let health_url = cloudflared_health_url(public_url);
+    let mut last_error = "tunnel health check did not complete".to_owned();
+    let deadline = Instant::now() + Duration::from_secs(90);
+
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(api_error_json(
+                    "mcp.cloudflare_exit",
+                    &format!(
+                        "cloudflared exited before the public tunnel became healthy: {status}"
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(api_error_json(
+                    "mcp.cloudflare_status_failed",
+                    &format!("Could not inspect cloudflared status: {err}"),
+                ));
+            }
+        }
+
+        match cloudflared_health_ready(&health_url) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                last_error = format!("GET {health_url} did not return Greentic health JSON");
+            }
+            Err(err) => {
+                last_error = err;
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    Err(api_error_json(
+        "mcp.cloudflare_health_timeout",
+        &format!(
+            "Timed out waiting for Cloudflare tunnel health check after DNS/tunnel warmup: {last_error}"
+        ),
+    ))
+}
+
+fn cloudflared_health_ready(health_url: &str) -> Result<bool, String> {
+    let output = Command::new("curl")
+        .args([
+            "-fsS",
+            "--connect-timeout",
+            "2",
+            "--max-time",
+            "3",
+            health_url,
+        ])
+        .output()
+        .map_err(|err| format!("Could not run curl for {health_url}: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(cloudflared_health_error(
+            health_url,
+            output.status.code(),
+            stderr.trim(),
+        ));
+    }
+    let body = String::from_utf8_lossy(&output.stdout);
+    Ok(body.contains(r#""status""#) && body.contains(r#""ok""#))
+}
+
+fn cloudflared_health_error(health_url: &str, curl_code: Option<i32>, stderr: &str) -> String {
+    if curl_code == Some(6) {
+        format!("GET {health_url} is waiting for Cloudflare DNS propagation: {stderr}")
+    } else {
+        format!(
+            "GET {health_url} failed with curl status {}: {stderr}",
+            curl_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        )
+    }
+}
+
+fn cloudflared_health_url(public_url: &str) -> String {
+    format!("{}/health", public_url.trim_end_matches('/'))
+}
+
+fn read_cloudflared_urls<R>(reader: R, public_url: Arc<Mutex<Option<String>>>)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            let Some(url) = cloudflared_public_url(&line) else {
+                continue;
+            };
+            let mut public_url = public_url.lock().expect("cloudflared URL lock");
+            if public_url.is_none() {
+                *public_url = Some(url);
+            }
+        }
+    });
+}
+
+fn cloudflared_public_url(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .map(|part| {
+            part.trim_matches(|ch: char| {
+                matches!(ch, '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '|')
+            })
+        })
+        .find(|part| part.starts_with("https://") && part.contains(".trycloudflare.com"))
+        .map(|part| part.trim_end_matches('/').to_owned())
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -2163,6 +2561,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 async fn mcp_auth_middleware(token: String, request: Request, next: Next) -> Response {
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
     let headers = request.headers();
     if let Some(origin) = headers
         .get(header::ORIGIN)
@@ -6169,6 +6570,12 @@ fn escape_json(value: &str) -> String {
         .collect()
 }
 
+fn json_string_or_null(value: Option<&str>) -> String {
+    value
+        .map(|value| format!(r#""{}""#, escape_json(value)))
+        .unwrap_or_else(|| "null".to_owned())
+}
+
 fn parse_request_line(request: &str) -> Option<(&str, &str)> {
     let mut parts = request.lines().next()?.split_whitespace();
     let method = parts.next()?;
@@ -8337,6 +8744,28 @@ steps:
     }
 
     #[test]
+    fn cloudflared_public_url_is_extracted_from_logs() {
+        let line = r#"2026-07-06 INF | https://green-example.trycloudflare.com |"#;
+        assert_eq!(
+            cloudflared_public_url(line).as_deref(),
+            Some("https://green-example.trycloudflare.com")
+        );
+        assert_eq!(cloudflared_public_url("no tunnel here"), None);
+        assert_eq!(
+            cloudflared_health_url("https://green-example.trycloudflare.com/"),
+            "https://green-example.trycloudflare.com/health"
+        );
+        assert!(cloudflared_health_error(
+            "https://green-example.trycloudflare.com/health",
+            Some(6),
+            "curl: (6) Could not resolve host"
+        )
+        .contains("DNS propagation"));
+        assert!(cloudflared_command_candidates()
+            .contains(&PathBuf::from("/opt/homebrew/bin/cloudflared")));
+    }
+
+    #[test]
     fn managed_mcp_service_lists_and_blocks_disabled_tools() {
         let root = std::env::temp_dir().join(format!(
             "greentic-gui-mcp-{}",
@@ -8486,6 +8915,13 @@ steps:
             .expect("mcp bind should be returned")
             .parse::<SocketAddr>()
             .expect("mcp bind should parse");
+
+        let health = get(bind, "/health");
+        assert!(
+            response_head(&health).starts_with("HTTP/1.1 200"),
+            "{:?}",
+            response_head(&health)
+        );
 
         let missing = post_json(
             bind,

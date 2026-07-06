@@ -371,6 +371,9 @@ export interface RecordingFinaliseResultDto {
 export interface McpStatusDto {
   status: string;
   bind: string;
+  localUrl?: string;
+  publicUrl?: string | null;
+  cloudflare?: boolean;
   tools: number;
 }
 
@@ -403,6 +406,8 @@ export interface McpToolActionResultDto {
 
 export interface McpClientConfigDto {
   localUrl: string;
+  publicUrl?: string | null;
+  activeUrl?: string;
   clientJson: string;
   awsWorkSpacesDoc: string;
   awsForwardedConfigured: boolean;
