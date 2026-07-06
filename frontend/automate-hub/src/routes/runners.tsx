@@ -90,7 +90,7 @@ function RunnersPage() {
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: api.approvals });
   const mcpLifecycle = useMutation({
     mutationFn: (action: "start" | "stop" | "restart") => api.mcpLifecycle(action),
-    onSuccess: () => {
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
       void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] });
       void queryClient.invalidateQueries({ queryKey: ["activity"] });
@@ -164,6 +164,8 @@ function RunnersPage() {
   const mcpToolCount = mcpStatus.data?.tools ?? mcpTools.data?.tools.length ?? items.length;
   const mcpRunning = mcpStatus.data?.status === "running";
   const mcpBusy = mcpLifecycle.isPending;
+  const mcpLocalUrl = mcpStatus.data?.localUrl ?? mcpStatus.data?.bind;
+  const mcpPublicUrl = mcpStatus.data?.publicUrl;
 
   useEffect(() => {
     if (autoStartAttempted.current || mcpLifecycle.isPending) {
@@ -244,8 +246,13 @@ function RunnersPage() {
                 MCP server {mcpStatus.data?.status ?? "checking"}
               </div>
               <div className="text-xs text-muted-foreground">
-                {mcpToolCount} runner tools on {mcpStatus.data?.bind ?? "local runtime"}
+                {mcpToolCount} runner tools on {mcpLocalUrl ?? "local runtime"}
               </div>
+              {mcpPublicUrl && (
+                <div className="text-xs text-muted-foreground">
+                  Cloudflare {mcpPublicUrl}
+                </div>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">

@@ -19,11 +19,17 @@ function MCPPage() {
   const lifecycle = useMutation({
     mutationFn: (action: "start" | "stop" | "restart") => api.mcpLifecycle(action),
     onSuccess: (result) => {
-      setActionStatus(`MCP server ${result.status} on ${result.bind}`);
-      void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
+      setActionStatus(
+        `MCP server ${result.status} on ${result.publicUrl ?? result.localUrl ?? result.bind}`,
+      );
     },
-    onError: (error) =>
-      setActionStatus(error instanceof Error ? error.message : "MCP action failed"),
+    onError: (error) => {
+      setActionStatus(error instanceof Error ? error.message : "MCP action failed");
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-client-config"] });
+    },
   });
   const toolAction = useMutation({
     mutationFn: ({ id, action }: { id: string; action: "test" | "enable" | "disable" }) =>
@@ -39,6 +45,8 @@ function MCPPage() {
   const mcpTools = tools.data?.tools ?? [];
   const enabledTools = mcpTools.filter((tool) => tool.status === "enabled").length;
   const busy = lifecycle.isPending || toolAction.isPending;
+  const localUrl = config.data?.localUrl ?? status.data?.localUrl ?? status.data?.bind;
+  const publicUrl = config.data?.publicUrl ?? status.data?.publicUrl;
 
   return (
     <div className="p-8 md:p-12 max-w-6xl mx-auto">
@@ -60,8 +68,11 @@ function MCPPage() {
               MCP server {status.data?.status ?? "configured"}
             </div>
             <div className="text-xs text-muted-foreground">
-              {enabledTools} tools available on {status.data?.bind ?? "local runtime"}
+              {enabledTools} tools available on {localUrl ?? "local runtime"}
             </div>
+            {publicUrl && (
+              <div className="text-xs text-muted-foreground">Cloudflare {publicUrl}</div>
+            )}
           </div>
         </div>
         <div className="flex gap-2">
@@ -114,8 +125,13 @@ function MCPPage() {
       <div className="rounded-2xl border bg-card p-5 mb-6 shadow-[var(--shadow-card)]">
         <div className="font-medium text-sm">Client configuration</div>
         <div className="mt-2 text-xs text-muted-foreground">
-          Local endpoint {config.data?.localUrl ?? status.data?.bind ?? "not available"}
+          Local endpoint {localUrl ?? "not available"}
         </div>
+        {publicUrl && (
+          <div className="mt-1 text-xs text-muted-foreground">
+            Cloudflare endpoint {publicUrl}
+          </div>
+        )}
         <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-3 text-xs">
           {config.data?.clientJson ?? "{}"}
         </pre>
