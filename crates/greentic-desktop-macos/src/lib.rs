@@ -17,12 +17,19 @@ use greentic_desktop_workflow::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(target_os = "macos")]
+mod native_ax;
+#[cfg(target_os = "macos")]
+use native_ax::{cancel_active_native_ax, NativeAxClient};
+
 pub const MACOS_ADAPTER_ID: &str = "greentic.desktop.macos.ax";
 pub const MACOS_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.macos.ax";
+static ACTIVE_MACOS_COMMAND_PID: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacOsLiveModalSummary {
@@ -478,10 +485,12 @@ pub struct MacOsAccessibilityAdapter {
     state: Arc<Mutex<MacOsState>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct MacOsState {
     active_app: Option<String>,
     recorded: Vec<RecordedEvent>,
+    #[cfg(target_os = "macos")]
+    native_ax: Option<NativeAxClient>,
 }
 
 impl MacOsAccessibilityAdapter {
@@ -545,6 +554,45 @@ impl MacOsAccessibilityAdapter {
             })
     }
 
+    #[cfg(target_os = "macos")]
+    fn native_ax_call(
+        &self,
+        operation: &str,
+        app: &str,
+        target: &LocatorTarget,
+        expected: Option<&str>,
+        value: Option<&str>,
+    ) -> AdapterResult<String> {
+        let mut state = self.state.lock().expect("macos adapter mutex poisoned");
+        if state
+            .native_ax
+            .as_mut()
+            .is_some_and(NativeAxClient::should_recycle)
+        {
+            state.native_ax = None;
+        }
+        if state.native_ax.is_none() {
+            state.native_ax = Some(NativeAxClient::start()?);
+        }
+        let result = state
+            .native_ax
+            .as_mut()
+            .expect("native AX helper initialized")
+            .call(operation, app, target, expected, value);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("helper exited unexpectedly"))
+        {
+            state.native_ax = Some(NativeAxClient::start()?);
+            return state
+                .native_ax
+                .as_mut()
+                .expect("native AX helper restarted")
+                .call(operation, app, target, expected, value);
+        }
+        result
+    }
+
     fn execute_real_step(&self, step: &RunnerStep) -> AdapterResult<String> {
         match step.required_capability.as_str() {
             "macos.find_app" | "macos.activate_app" => {
@@ -581,7 +629,14 @@ impl MacOsAccessibilityAdapter {
             }
             "macos.find_element" | "macos.assert_visible" => {
                 let app = self.active_app_or_frontmost()?;
-                if macos_element_exists(&app, &step.target, step.value.as_deref())? {
+                #[cfg(target_os = "macos")]
+                let visible = self
+                    .native_ax_call("find", &app, &step.target, step.value.as_deref(), None)
+                    .map(|_| true)
+                    .or_else(|_| macos_element_exists(&app, &step.target, step.value.as_deref()))?;
+                #[cfg(not(target_os = "macos"))]
+                let visible = macos_element_exists(&app, &step.target, step.value.as_deref())?;
+                if visible {
                     Ok("found macOS accessibility element".to_owned())
                 } else {
                     Err(AdapterError::ExecutionFailed(
@@ -592,8 +647,20 @@ impl MacOsAccessibilityAdapter {
             "macos.type_text" => {
                 let app = self.active_app_or_frontmost()?;
                 let value = step.value.as_deref().unwrap_or_default();
+                #[cfg(target_os = "macos")]
+                self.native_ax_call("type", &app, &step.target, None, Some(value))
+                    .or_else(|native_error| {
+                        macos_type_text(&app, &step.target, value)
+                            .map(|_| String::new())
+                            .map_err(|fallback_error| {
+                                AdapterError::ExecutionFailed(format!(
+                                    "native typing failed ({native_error}); AppleScript fallback failed ({fallback_error})"
+                                ))
+                            })
+                    })?;
+                #[cfg(not(target_os = "macos"))]
                 macos_type_text(&app, &step.target, value)?;
-                Ok("typed text through macOS Accessibility/System Events".to_owned())
+                Ok("typed text through native macOS Accessibility".to_owned())
             }
             "macos.open_resource" => {
                 let path = step.value.as_deref().ok_or_else(|| {
@@ -607,6 +674,18 @@ impl MacOsAccessibilityAdapter {
             }
             "macos.click_element" => {
                 let app = self.active_app_or_frontmost()?;
+                #[cfg(target_os = "macos")]
+                self.native_ax_call("click", &app, &step.target, None, None)
+                    .or_else(|native_error| {
+                        macos_click_element(&app, &step.target)
+                            .map(|_| String::new())
+                            .map_err(|fallback_error| {
+                                AdapterError::ExecutionFailed(format!(
+                                    "native click failed ({native_error}); AppleScript fallback failed ({fallback_error})"
+                                ))
+                            })
+                    })?;
+                #[cfg(not(target_os = "macos"))]
                 macos_click_element(&app, &step.target)?;
                 Ok("clicked macOS accessibility element".to_owned())
             }
@@ -649,6 +728,11 @@ impl MacOsAccessibilityAdapter {
             }
             "macos.read_text" => {
                 let app = self.active_app_or_frontmost()?;
+                #[cfg(target_os = "macos")]
+                let text = self
+                    .native_ax_call("read", &app, &step.target, None, None)
+                    .or_else(|_| macos_read_element_text(&app, &step.target))?;
+                #[cfg(not(target_os = "macos"))]
                 let text = macos_read_element_text(&app, &step.target)?;
                 Ok(macos_labeled_output(step)
                     .map(|label| format!("{label}: {text}"))
@@ -806,6 +890,16 @@ impl DesktopAdapter for MacOsAccessibilityAdapter {
             .recorded
             .last()
             .cloned())
+    }
+
+    fn cancel(&self) -> AdapterResult<()> {
+        #[cfg(target_os = "macos")]
+        cancel_active_native_ax();
+        let pid = ACTIVE_MACOS_COMMAND_PID.swap(0, Ordering::AcqRel);
+        if pid != 0 {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+        Ok(())
     }
 }
 
@@ -1017,15 +1111,16 @@ fn macos_element_exists(
 tell application "System Events"
   if not (exists process {app}) then return "false"
   tell process {app}
-    try
-      if exists (first UI element of entire contents of front window whose {predicate}) then return "true"
-    end try
+    {search}
+    if matchedCandidate is not missing value then return "true"
   end tell
 end tell
 return "false"
+{helpers}
 "#,
         app = apple_quote(app),
-        predicate = predicate
+        search = macos_find_candidate_script(&predicate),
+        helpers = macos_locator_helpers()
     );
     Ok(run_osascript(&script)?.trim() == "true")
 }
@@ -1052,6 +1147,9 @@ tell application "System Events"
                   set output to output & my greenticElementText(child4)
                   repeat with child5 in UI elements of child4
                     set output to output & my greenticElementText(child5)
+                    repeat with child6 in UI elements of child5
+                      set output to output & my greenticElementText(child6)
+                    end repeat
                   end repeat
                 end repeat
               end repeat
@@ -1102,22 +1200,35 @@ fn macos_read_element_text(app: &str, target: &LocatorTarget) -> AdapterResult<S
 tell application "System Events"
   tell process {app}
     set frontmost to true
-    set candidate to first UI element of entire contents of front window whose {predicate}
-    try
-      return value of candidate as text
-    end try
-    try
-      return name of candidate as text
-    end try
+    {search}
+    if matchedCandidate is missing value then error "No matching macOS accessibility element was visible."
+    set candidate to matchedCandidate
+    return my greenticElementText(candidate)
   end tell
 end tell
 return ""
+{helpers}
 "#,
         app = apple_quote(app),
-        predicate = predicate
+        search = macos_find_candidate_script(&predicate),
+        helpers = macos_locator_helpers()
     );
     match run_osascript(&script) {
-        Ok(output) => Ok(normalize_macos_ax_text(&output)),
+        Ok(output) => {
+            let output = normalize_macos_ax_text(&output);
+            if output.trim_end().ends_with(':') {
+                let visible = macos_read_process_text(app)?;
+                if let Some(index) = visible.iter().position(|value| value == &output) {
+                    if let Some(value) = visible[index + 1..]
+                        .iter()
+                        .find(|value| !value.trim().is_empty() && *value != &output)
+                    {
+                        return Ok(value.clone());
+                    }
+                }
+            }
+            Ok(output)
+        }
         Err(err) => {
             let expected = locator_expected_text(target);
             if let Some(expected) = expected {
@@ -1217,20 +1328,25 @@ end tell
 tell application "System Events"
   tell process {app}
     set frontmost to true
-    set candidate to first UI element of entire contents of front window whose {predicate}
+    {search}
+    if matchedCandidate is missing value then error "No matching macOS accessibility element was visible."
+    set candidate to matchedCandidate
     try
       set focused of candidate to true
     end try
     try
       click candidate
     end try
+    keystroke "a" using {{command down}}
     keystroke {value}
   end tell
 end tell
+{helpers}
 "#,
         app = apple_quote(app),
-        predicate = predicate,
-        value = apple_quote(value)
+        search = macos_find_candidate_script(&predicate),
+        value = apple_quote(value),
+        helpers = macos_locator_helpers()
     );
     run_osascript(&script).map(|_| ())
 }
@@ -1272,12 +1388,17 @@ fn macos_click_element(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
 tell application "System Events"
   tell process {app}
     set frontmost to true
-    click (first UI element of entire contents of front window whose {predicate})
+    {search}
+    if matchedCandidate is missing value then error "No matching macOS accessibility element was visible."
+    set candidate to matchedCandidate
+    click candidate
   end tell
 end tell
+{helpers}
 "#,
         app = apple_quote(app),
-        predicate = predicate
+        search = macos_find_candidate_script(&predicate),
+        helpers = macos_locator_helpers()
     );
     run_osascript(&script).map(|_| ())
 }
@@ -1431,6 +1552,15 @@ fn macos_invoke_menu(app: &str, menu_path: &str) -> AdapterResult<()> {
 tell application "System Events"
   tell process {app}
     set frontmost to true
+    repeat 40 times
+      try
+        if exists menu bar 1 then
+          if exists menu {menu} of menu bar 1 then exit repeat
+        end if
+      end try
+      delay 0.1
+    end repeat
+    if not (exists menu bar 1) then error "Application menu bar did not become available."
     click {expression} of menu {menu} of menu bar 1
   end tell
 end tell
@@ -1439,7 +1569,28 @@ end tell
         expression = expression,
         menu = menu
     );
-    run_osascript(&script).map(|_| ())
+    match run_osascript(&script) {
+        Ok(_) => Ok(()),
+        Err(menu_error)
+            if is_word_app(app)
+                && parts[0].eq_ignore_ascii_case("File")
+                && parts[parts.len() - 1].eq_ignore_ascii_case("New Document") =>
+        {
+            run_osascript(
+                r#"tell application "Microsoft Word"
+  activate
+  make new document
+end tell"#,
+            )
+            .map(|_| ())
+            .map_err(|fallback_error| {
+                AdapterError::ExecutionFailed(format!(
+                    "Word File > New Document failed ({menu_error}); application fallback failed ({fallback_error})"
+                ))
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn macos_focus_document(app: &str, target: &LocatorTarget) -> AdapterResult<()> {
@@ -1458,7 +1609,9 @@ fn macos_focus_document(app: &str, target: &LocatorTarget) -> AdapterResult<()> 
 tell application "System Events"
   tell process {app}
     set frontmost to true
-    set candidate to first UI element of entire contents of front window whose {predicate}
+    {search}
+    if matchedCandidate is missing value then error "No matching macOS accessibility element was visible."
+    set candidate to matchedCandidate
     try
       set focused of candidate to true
     end try
@@ -1467,9 +1620,11 @@ tell application "System Events"
     end try
   end tell
 end tell
+{helpers}
 "#,
         app = apple_quote(app),
-        predicate = predicate
+        search = macos_find_candidate_script(&predicate),
+        helpers = macos_locator_helpers()
     );
     run_osascript(&script).map(|_| ())
 }
@@ -1570,7 +1725,7 @@ fn macos_save_as(app: &str, path: &str) -> AdapterResult<()> {
     let previous_excel_default_modified =
         excel_default_output.as_deref().and_then(path_modified_at);
     let _ = macos_confirm_existing_save_dialog(app, &expanded, previous_modified);
-    if is_word_app(app) || (is_excel_app(app) && !expanded.exists()) {
+    if is_excel_app(app) && !expanded.exists() {
         match macos_application_save_as_fallback(app, &expanded, previous_modified) {
             Ok(()) => return Ok(()),
             Err(err) if is_terminal_save_ui_error(&err.to_string()) => return Err(err),
@@ -1631,6 +1786,12 @@ fn macos_save_as(app: &str, path: &str) -> AdapterResult<()> {
         }
         return Err(AdapterError::ExecutionFailed(format!(
             "macos.save_as did not finish replacing {}. {remaining_dialog}",
+            expanded.display()
+        )));
+    }
+    if is_word_app(app) {
+        return Err(AdapterError::ExecutionFailed(format!(
+            "macos.save_as did not create or update {} through Word's Save As panel. {ui_save_error}",
             expanded.display()
         )));
     }
@@ -1978,7 +2139,7 @@ fn macos_application_save_as_fallback_scripts(app: &str, path: &str) -> Vec<Stri
                 r#"
 tell application {app}
   activate
-  save as active document file name {path} file format format document
+  save as active document file name {path} file format format document default
 end tell
 "#
             ),
@@ -1986,7 +2147,7 @@ end tell
                 r#"
 tell application {app}
   activate
-  save as document 1 file name {path} file format format document
+  save as document 1 file name {path} file format format document default
 end tell
 "#
             ),
@@ -2468,10 +2629,14 @@ where
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| AdapterError::ExecutionFailed(format!("failed to run {program}: {err}")))?;
+    ACTIVE_MACOS_COMMAND_PID.store(child.id(), Ordering::Release);
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                ACTIVE_MACOS_COMMAND_PID
+                    .compare_exchange(child.id(), 0, Ordering::AcqRel, Ordering::Acquire)
+                    .ok();
                 let output = child.wait_with_output().map_err(|err| {
                     AdapterError::ExecutionFailed(format!("failed to read {program} output: {err}"))
                 })?;
@@ -2485,6 +2650,9 @@ where
                 )));
             }
             Ok(None) if Instant::now() >= deadline => {
+                ACTIVE_MACOS_COMMAND_PID
+                    .compare_exchange(child.id(), 0, Ordering::AcqRel, Ordering::Acquire)
+                    .ok();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(AdapterError::ExecutionFailed(format!(
@@ -2494,6 +2662,9 @@ where
             }
             Ok(None) => thread::sleep(Duration::from_millis(50)),
             Err(err) => {
+                ACTIVE_MACOS_COMMAND_PID
+                    .compare_exchange(child.id(), 0, Ordering::AcqRel, Ordering::Acquire)
+                    .ok();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(AdapterError::ExecutionFailed(format!(
@@ -2509,46 +2680,136 @@ fn macos_locator_predicate(
     expected_text: Option<&str>,
 ) -> AdapterResult<String> {
     let candidates = [target.preferred.as_ref(), target.fallback.as_ref()];
-    let mut predicates = Vec::new();
+    let mut alternatives = Vec::new();
     for strategy in candidates.into_iter().flatten() {
-        if let Some(id) = non_empty(strategy.automation_id.as_deref()) {
-            predicates.push(format!("its description is {}", apple_quote(id)));
+        let mut predicates = Vec::new();
+        let has_semantic_locator = non_empty(strategy.name.as_deref()).is_some()
+            || non_empty(strategy.label.as_deref()).is_some()
+            || non_empty(strategy.text.as_deref()).is_some();
+        // System Events does not expose AXIdentifier consistently. Some applications return an
+        // error when `description` is requested, which would discard an otherwise valid name/role
+        // match. Use the identifier fallback only when it is the sole semantic locator.
+        if !has_semantic_locator {
+            if let Some(id) = non_empty(strategy.automation_id.as_deref()) {
+                predicates.push(format!(
+                    "(description of candidate as text) is {}",
+                    apple_quote(id)
+                ));
+            }
         }
         if let Some(name) = non_empty(strategy.name.as_deref()) {
-            predicates.push(format!("its name contains {}", apple_quote(name)));
+            predicates.push(format!(
+                "(my greenticElementText(candidate)) contains {name}",
+                name = apple_quote(name)
+            ));
         }
         if let Some(role) = non_empty(strategy.role.as_deref()) {
             predicates.push(macos_role_predicate(role));
         }
         if let Some(text) = non_empty(strategy.text.as_deref()) {
-            predicates.push(format!("its value as text contains {}", apple_quote(text)));
+            predicates.push(format!(
+                "(my greenticElementText(candidate)) contains {}",
+                apple_quote(text)
+            ));
+        }
+        if let Some(label) = non_empty(strategy.label.as_deref()) {
+            predicates.push(format!(
+                "(my greenticElementText(candidate)) contains {label}",
+                label = apple_quote(label)
+            ));
+        }
+        if !predicates.is_empty() {
+            alternatives.push(format!("({})", predicates.join(" and ")));
         }
     }
     if let Some(text) = expected_text {
         if !text.trim().is_empty() {
-            predicates.push(format!(
-                "((its value as text contains {text}) or (its name contains {text}))",
+            alternatives.push(format!(
+                "(my greenticElementText(candidate)) contains {text}",
                 text = apple_quote(text)
             ));
         }
     }
-    if predicates.is_empty() {
+    if alternatives.is_empty() {
         return Err(AdapterError::ExecutionFailed(
             "macOS Accessibility locator requires an automation id, name, role, text, or expected text.".to_owned(),
         ));
     }
-    Ok(predicates.join(" or "))
+    Ok(alternatives.join(" or "))
+}
+
+fn macos_locator_helpers() -> &'static str {
+    r#"
+on greenticElementText(candidate)
+  tell application "System Events"
+    try
+      set candidateText to name of candidate as text
+      if candidateText is not "" and candidateText is not "missing value" then return candidateText
+    end try
+    try
+      set candidateText to value of candidate as text
+      if candidateText is not "" and candidateText is not "missing value" then return candidateText
+    end try
+    try
+      set candidateText to description of candidate as text
+      if candidateText is not "" and candidateText is not "missing value" then return candidateText
+    end try
+  end tell
+  return ""
+end greenticElementText
+"#
+}
+
+fn macos_find_candidate_script(predicate: &str) -> String {
+    fn level(predicate: &str, depth: usize, max_depth: usize, container: &str) -> String {
+        let item = format!("candidate{depth}");
+        let mut script = format!(
+            "repeat with {item} in UI elements of {container}\ntry\nset candidate to {item}\nif {predicate} then set matchedCandidate to {item}\n"
+        );
+        if depth < max_depth {
+            script.push_str("if matchedCandidate is missing value then\n");
+            script.push_str(&level(predicate, depth + 1, max_depth, &item));
+            script.push_str("end if\n");
+        }
+        script.push_str(
+            "end try\nif matchedCandidate is not missing value then exit repeat\nend repeat\n",
+        );
+        script
+    }
+
+    format!(
+        "set searchRoot to front window\ntry\nrepeat 4 times\nset searchRoot to UI element 1 of searchRoot\nend repeat\nif (role of searchRoot as text) is not \"AXWebArea\" then set searchRoot to front window\non error\nset searchRoot to front window\nend try\nset matchedCandidate to missing value\n{}\nif matchedCandidate is missing value and searchRoot is not front window then\n{}\nend if",
+        level(predicate, 0, 6, "searchRoot"),
+        level(predicate, 0, 10, "front window")
+    )
 }
 
 fn macos_role_predicate(role: &str) -> String {
-    if role.eq_ignore_ascii_case("document") {
-        return macos_document_area_predicate();
+    match role.trim().to_ascii_lowercase().as_str() {
+        "document" => macos_document_area_predicate(),
+        "button" => "(role of candidate as text) is \"AXButton\"".to_owned(),
+        "textbox" | "text field" => {
+            "(((role of candidate as text) is \"AXTextField\") or ((role of candidate as text) is \"AXTextArea\"))".to_owned()
+        }
+        "combobox" | "combo box" => {
+            "(((role of candidate as text) is \"AXComboBox\") or ((role of candidate as text) is \"AXPopUpButton\"))".to_owned()
+        }
+        "spinbutton" | "spin button" => {
+            "(((role of candidate as text) is \"AXIncrementor\") or ((role of candidate as text) is \"AXTextField\"))".to_owned()
+        }
+        "heading" => "(((role of candidate as text) is \"AXHeading\") or ((role of candidate as text) is \"AXStaticText\"))".to_owned(),
+        "static text" | "statictext" => {
+            "(role of candidate as text) is \"AXStaticText\"".to_owned()
+        }
+        _ => format!(
+            "(role of candidate as text) is {}",
+            apple_quote(role)
+        ),
     }
-    format!("its role is {}", apple_quote(role))
 }
 
 fn macos_document_area_predicate() -> String {
-    "(its role is \"AXTextArea\") or (its role is \"AXWebArea\") or (its role is \"AXScrollArea\") or (its role is \"AXGroup\")"
+    "((role of candidate as text) is \"AXTextArea\") or ((role of candidate as text) is \"AXWebArea\") or ((role of candidate as text) is \"AXScrollArea\") or ((role of candidate as text) is \"AXGroup\")"
         .to_owned()
 }
 
@@ -3034,16 +3295,58 @@ mod tests {
             macos_locator_predicate(&email, Some("buyer@example.test")).expect("predicate");
         let save_predicate = macos_locator_predicate(&save, None).expect("predicate");
 
+        assert!(email_predicate.contains("Email"), "{email_predicate}");
         assert!(
-            email_predicate.contains("customerEmail"),
+            !email_predicate.contains("customerEmail"),
             "{email_predicate}"
         );
-        assert!(email_predicate.contains("AXTextField"), "{email_predicate}");
+        assert!(
+            email_predicate.contains("greenticElementText"),
+            "{email_predicate}"
+        );
         assert!(
             email_predicate.contains("buyer@example.test"),
             "{email_predicate}"
         );
-        assert!(save_predicate.contains("AXButton"), "{save_predicate}");
+        assert!(save_predicate.contains("Save"), "{save_predicate}");
+        assert!(email_predicate.contains(" and "), "{email_predicate}");
+        assert!(email_predicate.contains(" or "), "{email_predicate}");
+    }
+
+    #[test]
+    fn generic_runner_roles_map_to_ax_roles() {
+        assert!(macos_role_predicate("textbox").contains("AXTextField"));
+        assert!(macos_role_predicate("button").contains("AXButton"));
+        assert!(macos_role_predicate("combobox").contains("AXComboBox"));
+        assert!(macos_role_predicate("spinbutton").contains("AXIncrementor"));
+        assert!(macos_role_predicate("heading").contains("AXHeading"));
+    }
+
+    #[test]
+    #[ignore = "starts the native Swift AX helper"]
+    fn native_ax_helper_starts_and_reports_missing_app() {
+        let mut client = NativeAxClient::start().expect("native AX helper");
+        let target = LocatorTarget {
+            preferred: Some(LocatorStrategy {
+                role: Some("button".to_owned()),
+                name: Some("1".to_owned()),
+                ..LocatorStrategy::default()
+            }),
+            ..LocatorTarget::default()
+        };
+        let error = client
+            .call(
+                "find",
+                "Definitely Missing Greentic App",
+                &target,
+                None,
+                None,
+            )
+            .expect_err("missing app should fail");
+        assert!(
+            error.to_string().contains("application not running"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3189,7 +3492,7 @@ mod tests {
         );
         let word_joined = word_scripts.join("\n");
         assert!(word_joined.contains("save as active document file name"));
-        assert!(word_joined.contains("file format format document"));
+        assert!(word_joined.contains("file format format document default"));
         assert!(word_joined.contains("save as document 1 file name"));
         assert!(!word_joined.contains("save workbook as"));
 

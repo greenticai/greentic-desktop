@@ -9,6 +9,7 @@ target:
   app: Microsoft Word
 required_capabilities:
   - macos.activate_app
+  - macos.invoke_menu
   - macos.press_shortcut
   - macos.focus_document
   - macos.type_text
@@ -27,9 +28,9 @@ steps:
     value: Microsoft Word
 
   - id: create-new-document
-    action: press_shortcut
-    required_capability: macos.press_shortcut
-    value: Cmd+N
+    action: invoke_menu
+    required_capability: macos.invoke_menu
+    value: File > New Document
 
   - id: focus-document
     action: focus_document

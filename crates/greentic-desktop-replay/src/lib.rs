@@ -8,8 +8,9 @@ use greentic_desktop_evidence::{
 };
 use greentic_desktop_recorder::RunnerPackage;
 use greentic_desktop_session::{plan_bootstrap, BootstrapPlan, SessionProfile};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -43,6 +44,7 @@ pub struct StepTrace {
     pub success: bool,
     pub reason: Option<String>,
     pub evidence_ref: Option<String>,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ pub struct ReplayExecutionContext {
     pub registry: AdapterRegistry,
     pub on_failure: OnFailure,
     pub step_timeout: Option<Duration>,
+    pub cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl ReplayExecutionContext {
@@ -91,6 +94,7 @@ impl ReplayExecutionContext {
             registry,
             on_failure: OnFailure::Stop,
             step_timeout: None,
+            cancellation: None,
         }
     }
 }
@@ -232,6 +236,14 @@ pub fn replay_with_context(
     let selector = ReplayAdapterSelector::new(&context.registry);
     let observe_after_steps = package_needs_step_observations(&request.package);
     for step in &request.package.steps {
+        let step_started = std::time::Instant::now();
+        if context
+            .cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::Acquire))
+        {
+            return cancelled_outcome(&request, bootstrap, traces, tool_trace);
+        }
         let retry = retry_policy(step);
         let attempts = if retry.safe {
             retry.max_attempts.max(1)
@@ -268,6 +280,7 @@ pub fn replay_with_context(
                 format!("replay-{}", request.package.id),
                 observe_after_steps.then_some(step.target.clone()),
                 context.step_timeout,
+                context.cancellation.clone(),
             )
             .map(|(result, observation)| {
                 if let Some(observation) = observation {
@@ -297,6 +310,7 @@ pub fn replay_with_context(
             success,
             reason: reason.clone(),
             evidence_ref: Some(format!("evidence://{}.json", step.id)),
+            duration_ms: step_started.elapsed().as_millis() as u64,
         });
         tool_trace.push(ToolTraceEntry {
             step_id: step.id.clone(),
@@ -335,7 +349,17 @@ pub fn replay_with_context(
         }
     }
 
-    if let Some(reason) = run_assertions(&request, &selector, &mut tool_trace) {
+    let assertions_are_explicit_steps = request.package.steps.iter().any(|step| {
+        step.required_capability
+            .split('.')
+            .any(|part| part.starts_with("assert"))
+    });
+    let assertion_failure = if assertions_are_explicit_steps {
+        None
+    } else {
+        run_assertions(&request, &selector, &mut tool_trace)
+    };
+    if let Some(reason) = assertion_failure {
         let evidence = evidence_bundle(
             &format!("run_{}", request.package.id),
             &request.package,
@@ -411,11 +435,18 @@ pub fn replay_with_context(
 }
 
 fn package_needs_step_observations(package: &RunnerPackage) -> bool {
-    !package.outputs.is_empty()
-        && package.outputs.iter().any(|output| {
+    let explicitly_read_outputs = package
+        .steps
+        .iter()
+        .filter_map(|step| step.value.as_deref())
+        .filter(|value| value.starts_with("outputs."))
+        .collect::<BTreeSet<_>>();
+    package.outputs.iter().any(|output| {
+        !explicitly_read_outputs.contains(output.as_str()) && {
             let output = output.to_ascii_lowercase();
             !(output.contains("path") || output.contains("file"))
-        })
+        }
+    })
 }
 
 fn execute_step_with_timeout(
@@ -424,7 +455,9 @@ fn execute_step_with_timeout(
     session_id: String,
     target: Option<LocatorTarget>,
     timeout: Option<Duration>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<(StepResult, Option<Observation>), AdapterError> {
+    let cancellation_adapter = Arc::clone(&adapter);
     let execute = move || {
         adapter.execute(executable).map(|result| {
             let observation = target.and_then(|target| {
@@ -438,19 +471,70 @@ fn execute_step_with_timeout(
             Ok((result, observation))
         })?
     };
-    if let Some(timeout) = timeout {
+    if timeout.is_some() || cancellation.is_some() {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(execute());
         });
-        rx.recv_timeout(timeout).map_err(|_| {
-            AdapterError::ExecutionFailed(format!(
-                "replay step timed out after {} ms",
-                timeout.as_millis()
-            ))
-        })?
+        let started = std::time::Instant::now();
+        loop {
+            if cancellation
+                .as_ref()
+                .is_some_and(|token| token.load(Ordering::Acquire))
+            {
+                let _ = cancellation_adapter.cancel();
+                return Err(AdapterError::ExecutionFailed("replay cancelled".to_owned()));
+            }
+            let wait = timeout
+                .map(|limit| limit.saturating_sub(started.elapsed()))
+                .unwrap_or(Duration::from_millis(25))
+                .min(Duration::from_millis(25));
+            if wait.is_zero() {
+                let limit = timeout.expect("zero wait requires timeout");
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "replay step timed out after {} ms",
+                    limit.as_millis()
+                )));
+            }
+            match rx.recv_timeout(wait) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(AdapterError::ExecutionFailed(
+                        "replay step worker stopped unexpectedly".to_owned(),
+                    ));
+                }
+            }
+        }
     } else {
         execute()
+    }
+}
+
+fn cancelled_outcome(
+    request: &ReplayRequest,
+    bootstrap: BootstrapPlan,
+    traces: Vec<StepTrace>,
+    tool_trace: Vec<ToolTraceEntry>,
+) -> ReplayOutcome {
+    let evidence = evidence_bundle(
+        &format!("run_{}", request.package.id),
+        &request.package,
+        EvidenceStatus::Failed,
+        &request.inputs,
+        &request.secrets,
+        BTreeMap::new(),
+        tool_trace,
+    );
+    let evidence_ref = evidence.reference();
+    ReplayOutcome {
+        passed: false,
+        bootstrap,
+        traces,
+        outputs: BTreeMap::new(),
+        evidence,
+        evidence_ref,
+        failure_reason: Some("replay cancelled".to_owned()),
     }
 }
 
@@ -689,7 +773,10 @@ fn extract_labeled_output<'a>(
                 None
             };
             if let Some(index) = value_start {
-                return Some(line[index..].trim().to_owned());
+                let value = line[index..].trim();
+                if !value.is_empty() {
+                    return Some(value.to_owned());
+                }
             }
         }
     }
@@ -892,6 +979,7 @@ mod tests {
     struct SlowAdapter {
         capabilities: AdapterCapabilities,
         delay: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
     }
 
     impl DesktopAdapter for SlowAdapter {
@@ -926,6 +1014,13 @@ mod tests {
 
         fn record_event(&self) -> AdapterResult<Option<RecordedEvent>> {
             Ok(None)
+        }
+
+        fn cancel(&self) -> AdapterResult<()> {
+            if let Some(cancelled) = &self.cancelled {
+                cancelled.store(true, Ordering::Release);
+            }
+            Ok(())
         }
     }
 
@@ -994,6 +1089,7 @@ mod tests {
             registry,
             on_failure: OnFailure::Stop,
             step_timeout: None,
+            cancellation: None,
         };
 
         let outcome = replay_with_context(request(), &context);
@@ -1086,6 +1182,15 @@ mod tests {
 
         package.outputs = vec!["outputs.result".to_owned()];
         assert!(package_needs_step_observations(&package));
+
+        package.steps.push(RunnerStep {
+            id: "read-result".to_owned(),
+            action: "read_text".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some("outputs.result".to_owned()),
+            required_capability: "web.extract_text".to_owned(),
+        });
+        assert!(!package_needs_step_observations(&package));
     }
 
     #[test]
@@ -1101,6 +1206,7 @@ mod tests {
             registry,
             on_failure: OnFailure::Stop,
             step_timeout: None,
+            cancellation: None,
         };
         let mut request = request();
         request.package.assertions = vec!["customer id".to_owned()];
@@ -1163,6 +1269,7 @@ mod tests {
             registry,
             on_failure: OnFailure::Stop,
             step_timeout: None,
+            cancellation: None,
         };
         let mut request = request();
         request.package.steps = vec![RunnerStep {
@@ -1247,11 +1354,13 @@ mod tests {
         registry.insert(Arc::new(SlowAdapter {
             capabilities: AdapterCapabilities::new("greentic.desktop.test", "1.0.0", ["web.fill"]),
             delay: Duration::from_millis(100),
+            cancelled: None,
         }));
         let context = ReplayExecutionContext {
             registry,
             on_failure: OnFailure::Stop,
             step_timeout: Some(Duration::from_millis(5)),
+            cancellation: None,
         };
 
         let outcome = replay_with_context(request(), &context);
@@ -1270,6 +1379,40 @@ mod tests {
     }
 
     #[test]
+    fn replay_cancellation_interrupts_an_active_step() {
+        let mut registry = AdapterRegistry::new();
+        let adapter_cancelled = Arc::new(AtomicBool::new(false));
+        registry.insert(Arc::new(SlowAdapter {
+            capabilities: AdapterCapabilities::new("greentic.desktop.test", "1.0.0", ["web.fill"]),
+            delay: Duration::from_secs(2),
+            cancelled: Some(Arc::clone(&adapter_cancelled)),
+        }));
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancellation);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            trigger.store(true, Ordering::Release);
+        });
+        let context = ReplayExecutionContext {
+            registry,
+            on_failure: OnFailure::Stop,
+            step_timeout: Some(Duration::from_secs(5)),
+            cancellation: Some(cancellation),
+        };
+        let started = std::time::Instant::now();
+
+        let outcome = replay_with_context(request(), &context);
+
+        assert!(!outcome.passed);
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(outcome
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("cancelled")));
+        assert!(adapter_cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn replay_fails_when_registered_adapter_assertion_fails() {
         let adapter = Arc::new(TestAdapter::new(
             &["web.fill", "web.assert_visible"],
@@ -1282,6 +1425,7 @@ mod tests {
             registry,
             on_failure: OnFailure::Stop,
             step_timeout: None,
+            cancellation: None,
         };
         let mut request = request();
         request.package.assertions = vec!["customer id".to_owned()];

@@ -83,6 +83,7 @@ function RunnersPage() {
   const [correction, setCorrection] = useState("");
   const [refinement, setRefinement] = useState<RefinementResultDto | null>(null);
   const autoStartAttempted = useRef(false);
+  const activeRunAbort = useRef<AbortController | null>(null);
   const runnersQuery = useQuery({ queryKey: ["runners"], queryFn: api.runners });
   const mcpStatus = useQuery({ queryKey: ["mcp-status"], queryFn: api.mcpStatus });
   const mcpTools = useQuery({ queryKey: ["mcp-tools"], queryFn: api.mcpTools });
@@ -105,7 +106,12 @@ function RunnersPage() {
       id: string;
       action: string;
       inputs?: Record<string, string>;
-    }) => api.runnerAction(id, action, inputs),
+    }) => {
+      if (action !== "run") return api.runnerAction(id, action, inputs);
+      const controller = new AbortController();
+      activeRunAbort.current = controller;
+      return api.runnerAction(id, action, inputs, controller.signal);
+    },
     onSuccess: (result) => {
       if (result.action === "run") {
         setRunRunner(null);
@@ -125,6 +131,9 @@ function RunnersPage() {
       void queryClient.invalidateQueries({ queryKey: ["evidence"] });
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
       void queryClient.invalidateQueries({ queryKey: ["activity"] });
+    },
+    onSettled: () => {
+      activeRunAbort.current = null;
     },
   });
   const approvalAction = useMutation({
@@ -179,6 +188,12 @@ function RunnersPage() {
 
   function runAction(runner: RunnerSummaryDto, action: string, inputs?: Record<string, string>) {
     runnerAction.mutate({ id: runner.id, action, inputs });
+  }
+
+  function cancelRun(runner: RunnerSummaryDto) {
+    const controller = activeRunAbort.current;
+    void api.cancelRunner(runner.id).finally(() => controller?.abort());
+    setRunRunner(null);
   }
 
   function deleteRunner(runner: RunnerSummaryDto) {
@@ -372,8 +387,8 @@ function RunnersPage() {
             >
               Run
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setRunRunner(null)}>
-              Cancel
+            <Button size="sm" variant="outline" onClick={() => cancelRun(runRunner)}>
+              {runnerAction.isPending ? "Cancel run" : "Cancel"}
             </Button>
           </div>
         </div>

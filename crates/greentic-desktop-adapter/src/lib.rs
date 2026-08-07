@@ -12,6 +12,9 @@ pub trait DesktopAdapter: Send + Sync {
     fn execute(&self, step: RunnerStep) -> AdapterResult<StepResult>;
     fn validate(&self, assertion: Assertion) -> AdapterResult<AssertionResult>;
     fn record_event(&self) -> AdapterResult<Option<RecordedEvent>>;
+    fn cancel(&self) -> AdapterResult<()> {
+        Ok(())
+    }
 }
 
 pub trait AdapterRuntime: Send + Sync {
