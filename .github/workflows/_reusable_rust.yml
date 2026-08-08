@@ -16,7 +16,7 @@ jobs:
       CARGO_NET_RETRY: "10"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
       - uses: actions/setup-node@v4

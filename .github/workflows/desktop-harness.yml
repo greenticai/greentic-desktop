@@ -39,7 +39,7 @@ jobs:
             command: cargo test -p greentic-desktop-linux detects_wayland_and_reports_global_restrictions && cargo test -p greentic-desktop-linux wayland_requires_manual_approval_when_portal_is_missing
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - name: Install Linux native automation dependencies
         if: runner.os == 'Linux'
         run: bash ci/install_linux_native_deps.sh
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - name: Install X11 native automation dependencies
         run: bash ci/install_linux_native_deps.sh --xvfb
       - name: Run X11 harness tests
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - name: Install Linux native automation dependencies
         run: bash ci/install_linux_native_deps.sh
       - run: cargo test -p greentic-desktop-test-harness

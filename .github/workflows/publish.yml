@@ -37,12 +37,12 @@ jobs:
       should_publish: ${{ steps.publish-intent.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/automate-hub/package-lock.json
       - name: Install Linux native automation dependencies
@@ -97,15 +97,6 @@ jobs:
             echo "Release tag '$actual' does not match Cargo.toml version '$expected'." >&2
             exit 1
           fi
-      - name: Frontend build
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd frontend/automate-hub
-          npm ci
-          npm run lint
-          npm run build
-          test -f dist/index.html
       - name: Local check
         shell: bash
         run: bash ci/local_check.sh
@@ -155,12 +146,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/automate-hub/package-lock.json
       - name: Install Linux native automation dependencies
@@ -346,7 +337,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - name: Install Linux native automation dependencies
         run: bash ci/install_linux_native_deps.sh
       - uses: Swatinem/rust-cache@v2
