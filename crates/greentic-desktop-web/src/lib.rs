@@ -926,6 +926,24 @@ impl PlaywrightReplaySidecar {
     }
 }
 
+impl Drop for PlaywrightReplaySidecar {
+    fn drop(&mut self) {
+        let _ = self
+            .stdin
+            .write_all(b"{\"id\":\"shutdown\",\"type\":\"shutdown\"}\n");
+        let _ = self.stdin.flush();
+        for _ in 0..50 {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn epoch_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1153,6 +1171,10 @@ async function dispatch(request) {
   if (request.type === 'step') return runStep(request.step);
   if (request.type === 'assert') return runAssert(request.assertion);
   if (request.type === 'observe') return observe();
+  if (request.type === 'shutdown') {
+    try { if (browser) await browser.close(); } catch (_) {}
+    return { shutdown: true };
+  }
   throw new Error(`Unknown request type ${request.type}`);
 }
 
@@ -1163,6 +1185,10 @@ rl.on('line', async (line) => {
     request = JSON.parse(line);
     const result = await dispatch(request);
     process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+    if (request.type === 'shutdown') {
+      rl.close();
+      process.exit(0);
+    }
   } catch (error) {
     const evidence = await captureEvidence(request?.type || 'error').catch(() => ({}));
     process.stdout.write(`${JSON.stringify({ id: request?.id || null, ok: false, error: `${error && error.stack ? error.stack : String(error)} evidence=${JSON.stringify(evidence)}` })}\n`);
@@ -1223,7 +1249,16 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn lock_real_playwright_test() -> MutexGuard<'static, ()> {
+        static REAL_PLAYWRIGHT_TEST: OnceLock<Mutex<()>> = OnceLock::new();
+        REAL_PLAYWRIGHT_TEST
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn target(label: &str) -> LocatorTarget {
         LocatorTarget {
@@ -1342,6 +1377,7 @@ mod tests {
             );
             return;
         }
+        let _playwright_guard = lock_real_playwright_test();
 
         let url = serve_web_form_fixture();
         let adapter = PlaywrightWebAdapter::new();
@@ -1402,6 +1438,7 @@ mod tests {
             );
             return;
         }
+        let _playwright_guard = lock_real_playwright_test();
 
         let url = serve_download_fixture();
         let out = temp_dir("greentic-web-download").join("report.txt");
@@ -1442,6 +1479,7 @@ mod tests {
             );
             return;
         }
+        let _playwright_guard = lock_real_playwright_test();
 
         let url = serve_web_form_fixture();
         let adapter = PlaywrightWebAdapter::new();
@@ -1539,6 +1577,7 @@ mod tests {
             );
             return;
         }
+        let _playwright_guard = lock_real_playwright_test();
 
         let runtime_home = temp_dir("greentic-web-recorder-real-home");
         let out = temp_dir("greentic-web-recorder-real");
