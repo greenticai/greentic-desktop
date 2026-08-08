@@ -161,16 +161,6 @@ fn parse_response(response: &str) -> AdapterResult<String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_response;
-
-    #[test]
-    fn empty_success_payload_keeps_protocol_separator() {
-        assert_eq!(parse_response("OK\t\n").expect("success"), "");
-    }
-}
-
 const SWIFT_HELPER: &str = r#"
 import AppKit
 import ApplicationServices
@@ -496,3 +486,13 @@ while let line = readLine() {
   fflush(stdout)
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::parse_response;
+
+    #[test]
+    fn empty_success_payload_keeps_protocol_separator() {
+        assert_eq!(parse_response("OK\t\n").expect("success"), "");
+    }
+}

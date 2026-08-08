@@ -76,7 +76,7 @@ use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend, WIND
 use greentic_desktop_workflow::{WorkflowOutputExtractor, WorkflowValueType};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
+        CallToolRequestParams, CallToolResponse, ErrorData, Implementation, JsonObject,
         ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
@@ -2195,7 +2195,7 @@ fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
                 .map(|addr| addr.to_string())
                 .unwrap_or(requested_bind);
             let config = StreamableHttpServerConfig::default()
-                .with_stateful_mode(false)
+                .with_legacy_session_mode(false)
                 .with_json_response(true);
             let config = if api_state.mcp_cloudflare {
                 config.disable_allowed_hosts()
@@ -2481,39 +2481,36 @@ fn wait_for_cloudflared_health(child: &mut Child, public_url: &str) -> Result<()
 }
 
 fn cloudflared_health_ready(health_url: &str) -> Result<bool, String> {
-    let output = Command::new("curl")
-        .args([
-            "-fsS",
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "3",
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|err| format!("Could not create HTTP client for {health_url}: {err}"))?;
+    let response = client.get(health_url).send().map_err(|err| {
+        let detail = err.to_string();
+        cloudflared_health_error(
             health_url,
-        ])
-        .output()
-        .map_err(|err| format!("Could not run curl for {health_url}: {err}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(cloudflared_health_error(
-            health_url,
-            output.status.code(),
-            stderr.trim(),
+            detail.contains("dns") || detail.contains("resolve") || detail.contains("lookup"),
+            &detail,
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GET {health_url} failed with HTTP status {}",
+            response.status()
         ));
     }
-    let body = String::from_utf8_lossy(&output.stdout);
+    let body = response
+        .text()
+        .map_err(|err| format!("Could not read GET {health_url} response: {err}"))?;
     Ok(body.contains(r#""status""#) && body.contains(r#""ok""#))
 }
 
-fn cloudflared_health_error(health_url: &str, curl_code: Option<i32>, stderr: &str) -> String {
-    if curl_code == Some(6) {
-        format!("GET {health_url} is waiting for Cloudflare DNS propagation: {stderr}")
+fn cloudflared_health_error(health_url: &str, dns_error: bool, detail: &str) -> String {
+    if dns_error {
+        format!("GET {health_url} is waiting for Cloudflare DNS propagation: {detail}")
     } else {
-        format!(
-            "GET {health_url} failed with curl status {}: {stderr}",
-            curl_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_owned())
-        )
+        format!("GET {health_url} failed: {detail}")
     }
 }
 
@@ -2616,13 +2613,13 @@ impl ServerHandler for GuiMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         let result = gui_mcp_call_tool(
             &self.state,
             request.name.as_ref(),
             mcp_arguments_to_strings(request.arguments.unwrap_or_default()),
         );
-        Ok(rmcp_call_tool_result(&result))
+        Ok(rmcp_call_tool_result(&result).into())
     }
 }
 
@@ -9234,8 +9231,8 @@ steps:
         );
         assert!(cloudflared_health_error(
             "https://green-example.trycloudflare.com/health",
-            Some(6),
-            "curl: (6) Could not resolve host"
+            true,
+            "Could not resolve host"
         )
         .contains("DNS propagation"));
         assert!(cloudflared_command_candidates()
