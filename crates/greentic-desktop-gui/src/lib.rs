@@ -2118,13 +2118,9 @@ fn adopt_running_mcp_service(
     let mut public_url = saved.and_then(|snapshot| snapshot.public_url);
     let mut cloudflared = None;
     if state.mcp_cloudflare && public_url.is_none() {
-        match start_cloudflared_tunnel(&state.mcp_bind) {
-            Ok(tunnel) => {
-                public_url = Some(tunnel.public_url);
-                cloudflared = Some(tunnel.child);
-            }
-            Err(error) => return Err(error),
-        }
+        let tunnel = start_cloudflared_tunnel(&state.mcp_bind)?;
+        public_url = Some(tunnel.public_url);
+        cloudflared = Some(tunnel.child);
     }
 
     if cloudflared.is_some() {
