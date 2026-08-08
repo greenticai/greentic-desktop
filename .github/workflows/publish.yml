@@ -40,6 +40,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.132
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -47,6 +50,18 @@ jobs:
           cache-dependency-path: frontend/automate-hub/package-lock.json
       - name: Install Linux native automation dependencies
         run: bash ci/install_linux_native_deps.sh
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/automate-hub/package-lock.json') }}
+      - name: Install Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: frontend/automate-hub
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install chromium
       - uses: Swatinem/rust-cache@v2
       - name: Read Cargo version
         id: version

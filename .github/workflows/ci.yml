@@ -12,19 +12,74 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      package: ${{ steps.filter.outputs.package }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - 'ci/local_check.sh'
+              - '.github/workflows/**'
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.config/nextest.toml'
+              - 'ci/**'
+              - 'install.sh'
+              - 'install.ps1'
+              - '.github/workflows/**'
+            package:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'README.md'
+              - 'LICENSE'
+              - 'ci/crate_publish_order.sh'
+              - 'ci/local_check.sh'
+              - '.github/workflows/**'
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_reusable_rust.yml
     with:
       command: |
-        cargo fmt --all -- --check
-        cargo clippy --all-targets --all-features -- -D warnings
+        bash ci/local_check.sh policy
+        bash ci/local_check.sh rust-lint
 
   test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_reusable_rust.yml
     with:
-      command: cargo test --all-features
+      command: bash ci/local_check.sh rust-test
+      playwright: true
+
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/automate-hub/package-lock.json
+      - run: bash ci/local_check.sh frontend
 
   installer-syntax:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +95,8 @@ jobs:
           fi
 
   package-dry-run:
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
     uses: ./.github/workflows/_reusable_rust.yml
     with:
-      command: |
-        chmod +x ci/local_check.sh
-        bash ci/local_check.sh
+      command: bash ci/local_check.sh package

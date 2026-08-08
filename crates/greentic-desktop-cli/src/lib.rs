@@ -103,7 +103,13 @@ fn run(
 ) -> Result<(), CliError> {
     let mut args: Vec<String> = args.into_iter().collect();
     if !require_desktop_prefix && args.is_empty() {
-        return run_gui(GuiCliOptions::default(), writer, block_gui);
+        let mut options = GuiCliOptions::default();
+        // Non-blocking invocations are used by embedded callers and tests. Opening a
+        // browser there would outlive the GUI host and leak a child process.
+        if !block_gui {
+            options.open_browser = false;
+        }
+        return run_gui(options, writer, block_gui);
     }
 
     if require_desktop_prefix {
