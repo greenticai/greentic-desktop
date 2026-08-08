@@ -2347,16 +2347,16 @@ fn start_cloudflared_tunnel(bind: &str) -> Result<CloudflaredTunnel, String> {
             )
         })?;
 
-    let public_url = Arc::new(Mutex::new(None::<String>));
+    let (url_tx, url_rx) = mpsc::sync_channel::<String>(1);
     if let Some(stdout) = child.stdout.take() {
-        read_cloudflared_urls(stdout, Arc::clone(&public_url));
+        read_cloudflared_urls(stdout, url_tx.clone());
     }
     if let Some(stderr) = child.stderr.take() {
-        read_cloudflared_urls(stderr, Arc::clone(&public_url));
+        read_cloudflared_urls(stderr, url_tx);
     }
 
     for _ in 0..40 {
-        if let Some(url) = public_url.lock().expect("cloudflared URL lock").clone() {
+        if let Ok(url) = url_rx.recv_timeout(Duration::from_millis(250)) {
             if let Err(error) = wait_for_cloudflared_health(&mut child, &url) {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -2382,7 +2382,6 @@ fn start_cloudflared_tunnel(bind: &str) -> Result<CloudflaredTunnel, String> {
                 ));
             }
         }
-        thread::sleep(Duration::from_millis(250));
     }
 
     let _ = child.kill();
@@ -2522,18 +2521,18 @@ fn cloudflared_health_url(public_url: &str) -> String {
     format!("{}/health", public_url.trim_end_matches('/'))
 }
 
-fn read_cloudflared_urls<R>(reader: R, public_url: Arc<Mutex<Option<String>>>)
+fn read_cloudflared_urls<R>(reader: R, url_tx: mpsc::SyncSender<String>)
 where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
+        let mut sent_url = false;
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            let Some(url) = cloudflared_public_url(&line) else {
-                continue;
-            };
-            let mut public_url = public_url.lock().expect("cloudflared URL lock");
-            if public_url.is_none() {
-                *public_url = Some(url);
+            if !sent_url {
+                if let Some(url) = cloudflared_public_url(&line) {
+                    let _ = url_tx.send(url);
+                    sent_url = true;
+                }
             }
         }
     });
