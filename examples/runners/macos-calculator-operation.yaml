@@ -8,6 +8,7 @@ target:
   app: Calculator
 required_capabilities:
   - macos.activate_app
+  - macos.click_element
   - macos.invoke_menu
   - macos.press_shortcut
   - macos.type_text
@@ -27,10 +28,21 @@ steps:
     required_capability: macos.activate_app
     value: Calculator
 
-  - id: clear-and-enter-expression
+  - id: press-all-clear
+    action: click_element
+    required_capability: macos.click_element
+    target:
+      preferred:
+        role: button
+        name: AC
+      fallback:
+        role: button
+        name: All Clear
+
+  - id: enter-expression
     action: type_text
     required_capability: macos.type_text
-    value: "c{{inputs.first_number}}{{inputs.operation}}{{inputs.second_number}}"
+    value: "{{inputs.first_number}}{{inputs.operation}}{{inputs.second_number}}"
 
   - id: calculate-result
     action: press_shortcut

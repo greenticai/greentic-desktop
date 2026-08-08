@@ -9,7 +9,7 @@ use greentic_desktop_security::{
 use greentic_desktop_session::SessionProfile;
 use rmcp::model::{
     CallToolResult, ContentBlock, Implementation, InitializeResult, JsonObject, ListToolsResult,
-    Meta, ProtocolVersion, ServerCapabilities, Tool,
+    MetaObject, ProtocolVersion, ServerCapabilities, Tool,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -506,7 +506,7 @@ pub fn rmcp_tool(tool: &McpTool) -> Tool {
         Arc::new(input_schema),
     )
     .with_raw_output_schema(Arc::new(output_schema));
-    rmcp_tool.meta = Some(Meta(JsonObject::from_iter([
+    rmcp_tool.meta = Some(MetaObject(JsonObject::from_iter([
         (
             "greenticRisk".to_owned(),
             serde_json::Value::String(format!("{:?}", tool.risk)),

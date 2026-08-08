@@ -76,7 +76,7 @@ use greentic_desktop_windows::{WindowsUiAdapter, WindowsUiRecordingBackend, WIND
 use greentic_desktop_workflow::{WorkflowOutputExtractor, WorkflowValueType};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
+        CallToolRequestParams, CallToolResponse, ErrorData, Implementation, JsonObject,
         ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
@@ -91,6 +91,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -2117,13 +2118,9 @@ fn adopt_running_mcp_service(
     let mut public_url = saved.and_then(|snapshot| snapshot.public_url);
     let mut cloudflared = None;
     if state.mcp_cloudflare && public_url.is_none() {
-        match start_cloudflared_tunnel(&state.mcp_bind) {
-            Ok(tunnel) => {
-                public_url = Some(tunnel.public_url);
-                cloudflared = Some(tunnel.child);
-            }
-            Err(error) => return Err(error),
-        }
+        let tunnel = start_cloudflared_tunnel(&state.mcp_bind)?;
+        public_url = Some(tunnel.public_url);
+        cloudflared = Some(tunnel.child);
     }
 
     if cloudflared.is_some() {
@@ -2194,7 +2191,7 @@ fn start_mcp_service(state: &GuiApiState) -> Result<String, String> {
                 .map(|addr| addr.to_string())
                 .unwrap_or(requested_bind);
             let config = StreamableHttpServerConfig::default()
-                .with_stateful_mode(false)
+                .with_legacy_session_mode(false)
                 .with_json_response(true);
             let config = if api_state.mcp_cloudflare {
                 config.disable_allowed_hosts()
@@ -2480,39 +2477,36 @@ fn wait_for_cloudflared_health(child: &mut Child, public_url: &str) -> Result<()
 }
 
 fn cloudflared_health_ready(health_url: &str) -> Result<bool, String> {
-    let output = Command::new("curl")
-        .args([
-            "-fsS",
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "3",
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|err| format!("Could not create HTTP client for {health_url}: {err}"))?;
+    let response = client.get(health_url).send().map_err(|err| {
+        let detail = err.to_string();
+        cloudflared_health_error(
             health_url,
-        ])
-        .output()
-        .map_err(|err| format!("Could not run curl for {health_url}: {err}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(cloudflared_health_error(
-            health_url,
-            output.status.code(),
-            stderr.trim(),
+            detail.contains("dns") || detail.contains("resolve") || detail.contains("lookup"),
+            &detail,
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GET {health_url} failed with HTTP status {}",
+            response.status()
         ));
     }
-    let body = String::from_utf8_lossy(&output.stdout);
+    let body = response
+        .text()
+        .map_err(|err| format!("Could not read GET {health_url} response: {err}"))?;
     Ok(body.contains(r#""status""#) && body.contains(r#""ok""#))
 }
 
-fn cloudflared_health_error(health_url: &str, curl_code: Option<i32>, stderr: &str) -> String {
-    if curl_code == Some(6) {
-        format!("GET {health_url} is waiting for Cloudflare DNS propagation: {stderr}")
+fn cloudflared_health_error(health_url: &str, dns_error: bool, detail: &str) -> String {
+    if dns_error {
+        format!("GET {health_url} is waiting for Cloudflare DNS propagation: {detail}")
     } else {
-        format!(
-            "GET {health_url} failed with curl status {}: {stderr}",
-            curl_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_owned())
-        )
+        format!("GET {health_url} failed: {detail}")
     }
 }
 
@@ -2615,13 +2609,13 @@ impl ServerHandler for GuiMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         let result = gui_mcp_call_tool(
             &self.state,
             request.name.as_ref(),
             mcp_arguments_to_strings(request.arguments.unwrap_or_default()),
         );
-        Ok(rmcp_call_tool_result(&result))
+        Ok(rmcp_call_tool_result(&result).into())
     }
 }
 
@@ -2774,10 +2768,46 @@ fn mcp_tool_parts(path: &str) -> (&str, &str) {
         .map_or((rest, ""), |(id, action)| (id, action))
 }
 
+fn active_runner_cancellations() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ActiveRunnerGuard(String);
+
+impl Drop for ActiveRunnerGuard {
+    fn drop(&mut self) {
+        active_runner_cancellations()
+            .lock()
+            .expect("active runner cancellation mutex poisoned")
+            .remove(&self.0);
+    }
+}
+
 fn runner_action_json(path: &str, body: &str, state: &GuiApiState) -> Result<String, String> {
     let (id, action) = runner_parts(path);
     let runner = find_runner(state, id)
         .ok_or_else(|| api_error_json("runner.not_found", "Runner not found."))?;
+    if action == "cancel" {
+        let cancelled = active_runner_cancellations()
+            .lock()
+            .expect("active runner cancellation mutex poisoned")
+            .get(id)
+            .is_some_and(|token| {
+                token.store(true, Ordering::Release);
+                true
+            });
+        return Ok(format!(
+            r#"{{"runnerId":"{}","action":"cancel","status":"{}","evidenceRef":"local://runners/{}/cancel/latest","outputs":{{}},"steps":[]}}"#,
+            escape_json(id),
+            if cancelled {
+                "cancelled"
+            } else {
+                "not_running"
+            },
+            escape_json(id)
+        ));
+    }
     let status = match action {
         "validate" => {
             let package = runner_package_from_yaml(&runner_yaml(&runner))?;
@@ -2792,7 +2822,14 @@ fn runner_action_json(path: &str, body: &str, state: &GuiApiState) -> Result<Str
             ));
         }
         "test" | "run" => {
-            let result = execute_runner(state, &runner, action, body)?;
+            let cancellation = Arc::new(AtomicBool::new(false));
+            active_runner_cancellations()
+                .lock()
+                .expect("active runner cancellation mutex poisoned")
+                .insert(runner.id.clone(), Arc::clone(&cancellation));
+            let _guard = ActiveRunnerGuard(runner.id.clone());
+            let result =
+                execute_runner_with_cancellation(state, &runner, action, body, cancellation)?;
             persist_runner_state(
                 state,
                 &runner.id,
@@ -3318,8 +3355,25 @@ fn execute_runner(
     action: &str,
     body: &str,
 ) -> Result<GuiRunnerExecution, String> {
-    let package = runner_package_from_yaml(&runner_yaml(runner))?;
-    let inputs = runner_inputs_from_body(body, &package.inputs);
+    execute_runner_with_cancellation(
+        state,
+        runner,
+        action,
+        body,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+fn execute_runner_with_cancellation(
+    state: &GuiApiState,
+    runner: &RunnerFile,
+    action: &str,
+    body: &str,
+    cancellation: Arc<AtomicBool>,
+) -> Result<GuiRunnerExecution, String> {
+    let yaml = runner_yaml(runner);
+    let package = runner_package_from_yaml(&yaml)?;
+    let inputs = runner_inputs_from_body(body, &package.inputs, &manifest_input_defaults(&yaml));
     ensure_required_inputs_present(&package, &inputs)?;
     let secrets = runner_secrets_from_body(state, body, &package.secrets)?;
     let redaction_values = execution_redaction_values(&inputs, &secrets);
@@ -3344,6 +3398,7 @@ fn execute_runner(
         registry: replay_adapter_registry(state),
         on_failure: OnFailure::Stop,
         step_timeout: Some(Duration::from_secs(60)),
+        cancellation: Some(cancellation),
     };
     let outcome = replay_with_context(request, &context);
     let output_failure = if outcome.passed {
@@ -3616,14 +3671,20 @@ fn replay_adapter_registry(state: &GuiApiState) -> AdapterRegistry {
     registry
 }
 
-fn runner_inputs_from_body(body: &str, declared_inputs: &[String]) -> BTreeMap<String, String> {
-    let mut inputs = BTreeMap::new();
+fn runner_inputs_from_body(
+    body: &str,
+    declared_inputs: &[String],
+    defaults: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut inputs = defaults.clone();
     for input in declared_inputs {
         let short = field_display_name(input);
         if let Some(value) =
             json_string_field(body, &short).or_else(|| json_string_field(body, input))
         {
-            inputs.insert(input.clone(), value);
+            if !value.trim().is_empty() || !inputs.contains_key(input) {
+                inputs.insert(input.clone(), value);
+            }
         }
     }
     inputs
@@ -3752,7 +3813,42 @@ fn manifest_input_fields_json(raw: &str) -> String {
             .join(",")
             .pipe_json_array();
     }
-    yaml_fields_json(raw, "inputs", false)
+    let defaults = yaml_mapping(raw, "input_defaults");
+    yaml_list(raw, "inputs")
+        .iter()
+        .map(|field| {
+            let name = field_display_name(field);
+            typed_field_json(
+                &name,
+                &WorkflowValueType::String,
+                true,
+                defaults.get(&name).map(String::as_str),
+                None,
+                false,
+                None,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+        .pipe_json_array()
+}
+
+fn manifest_input_defaults(raw: &str) -> BTreeMap<String, String> {
+    if let Ok(Some(definition)) = parse_runner_definition_manifest(raw) {
+        return definition
+            .inputs
+            .into_iter()
+            .filter_map(|input| {
+                input
+                    .default_value
+                    .map(|value| (format!("inputs.{}", input.name), value))
+            })
+            .collect();
+    }
+    yaml_mapping(raw, "input_defaults")
+        .into_iter()
+        .map(|(name, value)| (format!("inputs.{name}"), value))
+        .collect()
 }
 
 fn manifest_secret_fields_json(raw: &str, state: &GuiApiState) -> String {
@@ -3988,8 +4084,11 @@ fn yaml_steps(yaml: &str) -> Result<Vec<RunnerStep>, String> {
             } else if trimmed == "fallback:" {
                 current_target_slot = Some("fallback");
                 ensure_locator_slot(&mut step.target, "fallback");
-            } else if trimmed == "target:" {
+            } else if let Some(value) = trimmed.strip_prefix("target:") {
                 current_target_slot = None;
+                if !value.trim().is_empty() {
+                    parse_inline_locator_target(&mut step.target, value.trim());
+                }
             } else if let Some(slot) = current_target_slot {
                 if let Some((key, value)) = trimmed.split_once(':') {
                     assign_locator_field(
@@ -4023,6 +4122,55 @@ fn yaml_steps(yaml: &str) -> Result<Vec<RunnerStep>, String> {
         ));
     }
     Ok(steps)
+}
+
+fn parse_inline_locator_target(target: &mut LocatorTarget, value: &str) {
+    for slot in ["preferred", "fallback"] {
+        let Some(fields) = inline_mapping_section(value, slot) else {
+            continue;
+        };
+        for field in split_inline_mapping_fields(fields) {
+            if let Some((key, value)) = field.split_once(':') {
+                assign_locator_field(target, slot, key.trim(), unquote_yaml_value(value.trim()));
+            }
+        }
+    }
+}
+
+fn inline_mapping_section<'a>(value: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("{key}:");
+    let start = value.find(&marker)? + marker.len();
+    let remainder = value[start..].trim_start();
+    let inner = remainder.strip_prefix('{')?;
+    let mut quoted = None;
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '\'' | '"' if quoted == Some(ch) => quoted = None,
+            '\'' | '"' if quoted.is_none() => quoted = Some(ch),
+            '}' if quoted.is_none() => return Some(&inner[..index]),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_inline_mapping_fields(value: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut quoted = None;
+    let mut start = 0;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '\'' | '"' if quoted == Some(ch) => quoted = None,
+            '\'' | '"' if quoted.is_none() => quoted = Some(ch),
+            ',' if quoted.is_none() => {
+                fields.push(value[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    fields.push(value[start..].trim());
+    fields
 }
 
 fn ensure_locator_slot(target: &mut LocatorTarget, slot: &str) {
@@ -4088,11 +4236,12 @@ fn replay_steps_json(traces: &[greentic_desktop_replay::StepTrace]) -> String {
             .iter()
             .map(|trace| {
                 format!(
-                    r#"{{"summary":"{}","status":"{}","reason":{},"evidenceRef":{}}}"#,
+                    r#"{{"summary":"{}","status":"{}","reason":{},"evidenceRef":{},"durationMs":{}}}"#,
                     escape_json(&trace.step_id),
                     if trace.success { "passed" } else { "failed" },
                     json_option(trace.reason.as_deref()),
-                    json_option(trace.evidence_ref.as_deref())
+                    json_option(trace.evidence_ref.as_deref()),
+                    trace.duration_ms
                 )
             })
             .collect::<Vec<_>>()
@@ -4507,6 +4656,28 @@ fn yaml_list(yaml: &str, key: &str) -> Vec<String> {
             }
             if !trimmed.is_empty() && !line.starts_with(' ') {
                 break;
+            }
+        }
+    }
+    values
+}
+
+fn yaml_mapping(yaml: &str, key: &str) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let mut in_mapping = false;
+    let mapping_header = format!("{key}:");
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed == mapping_header {
+            in_mapping = true;
+            continue;
+        }
+        if in_mapping {
+            if !trimmed.is_empty() && !line.starts_with(' ') {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                values.insert(name.trim().to_owned(), unquote_yaml_value(value.trim()));
             }
         }
     }
@@ -6979,6 +7150,7 @@ mod tests {
                 success: false,
                 reason: Some(format!("adapter echoed {secret}")),
                 evidence_ref: None,
+                duration_ms: 12,
             }],
             outputs: BTreeMap::from([("status".to_owned(), format!("failed with {secret}"))]),
             evidence: greentic_desktop_evidence::EvidenceBundle::new(
@@ -8309,6 +8481,305 @@ steps:
     }
 
     #[test]
+    fn aws_demo_runners_parse_defaults_and_inline_targets() {
+        for yaml in [
+            include_str!("../../../examples/runners/aws-demo-meridian-insurance.yaml"),
+            include_str!("../../../examples/runners/aws-demo-macos-meridian-insurance.yaml"),
+        ] {
+            let package = runner_package_from_yaml(yaml).expect("AWS demo runner should parse");
+            let defaults = manifest_input_defaults(yaml);
+            let inputs = runner_inputs_from_body("{}", &package.inputs, &defaults);
+
+            ensure_required_inputs_present(&package, &inputs)
+                .expect("AWS demo defaults should cover every required input");
+            assert_eq!(inputs.len(), package.inputs.len());
+            assert_eq!(
+                inputs.get("inputs.company_name").map(String::as_str),
+                Some("ACME Trading Ltd")
+            );
+            let dynamic = runner_inputs_from_body(
+                r#"{"inputs":{"company_name":"Dynamic Industries","trading_name":""}}"#,
+                &package.inputs,
+                &defaults,
+            );
+            assert_eq!(
+                dynamic.get("inputs.company_name").map(String::as_str),
+                Some("Dynamic Industries")
+            );
+            assert_eq!(
+                dynamic.get("inputs.trading_name").map(String::as_str),
+                Some("ACME")
+            );
+            for step in &package.steps {
+                if matches!(
+                    step.action.as_str(),
+                    "click_element" | "type_text" | "find_element" | "assert_visible" | "read_text"
+                ) {
+                    assert!(
+                        step.target.preferred.is_some() || step.target.fallback.is_some(),
+                        "step {} lost its locator",
+                        step.id
+                    );
+                }
+            }
+
+            let company = package
+                .steps
+                .iter()
+                .find(|step| step.id == "set-company-name")
+                .expect("company step");
+            assert_eq!(
+                company
+                    .target
+                    .preferred
+                    .as_ref()
+                    .and_then(|locator| locator.automation_id.as_deref()),
+                Some("company-name")
+            );
+        }
+    }
+
+    #[test]
+    fn macos_calculator_clears_before_entering_expression() {
+        let package = runner_package_from_yaml(include_str!(
+            "../../../examples/runners/macos-calculator-operation.yaml"
+        ))
+        .expect("macOS calculator runner should parse");
+        let clear = package
+            .steps
+            .iter()
+            .position(|step| step.id == "press-all-clear")
+            .expect("AC step");
+        let enter = package
+            .steps
+            .iter()
+            .position(|step| step.id == "enter-expression")
+            .expect("expression step");
+        assert!(clear < enter);
+        assert_eq!(
+            package.steps[enter].value.as_deref(),
+            Some("{{inputs.first_number}}{{inputs.operation}}{{inputs.second_number}}")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the macOS Calculator app and Accessibility/Input Monitoring permissions"]
+    fn macos_calculator_live_replay() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/runners/macos-calculator-operation.yaml");
+        let runner = RunnerFile {
+            id: "example.macos.calculator.operation".to_owned(),
+            name: "macOS Calculator Operation".to_owned(),
+            path: Some(path),
+            updated: "test".to_owned(),
+        };
+        let state = GuiApiState {
+            platform: "macos".to_owned(),
+            ..GuiApiState::default()
+        };
+        let result = execute_runner(
+            &state,
+            &runner,
+            "run",
+            r#"{"inputs":{"first_number":"12","operation":"+","second_number":"30"}}"#,
+        )
+        .unwrap_or_else(|error| panic!("live Calculator replay failed: {error}"));
+        assert!(
+            result.outputs_json.contains("42"),
+            "unexpected Calculator result: {}",
+            result.outputs_json
+        );
+    }
+
+    #[test]
+    fn macos_word_creates_document_from_file_menu() {
+        let package = runner_package_from_yaml(include_str!(
+            "../../../examples/runners/macos-word-hello-bold-save.yaml"
+        ))
+        .expect("macOS Word runner should parse");
+        let create = package
+            .steps
+            .iter()
+            .find(|step| step.id == "create-new-document")
+            .expect("new-document step");
+        assert_eq!(create.required_capability, "macos.invoke_menu");
+        assert_eq!(create.value.as_deref(), Some("File > New Document"));
+    }
+
+    #[test]
+    #[ignore = "requires Microsoft Word and Accessibility/Input Monitoring permissions"]
+    fn macos_word_live_save_as() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/runners/macos-word-hello-bold-save.yaml");
+        let runner = RunnerFile {
+            id: "example.macos.word.hello_bold_save".to_owned(),
+            name: "Word Hello Bold Save".to_owned(),
+            path: Some(path),
+            updated: "test".to_owned(),
+        };
+        let output = std::env::temp_dir().join(format!(
+            "greentic-word-live-test-{}.docx",
+            std::process::id()
+        ));
+        let body = format!(r#"{{"inputs":{{"document_path":"{}"}}}}"#, output.display());
+        let state = GuiApiState {
+            platform: "macos".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let result = execute_runner(&state, &runner, "run", &body)
+            .unwrap_or_else(|error| panic!("live Word replay failed: {error}"));
+
+        assert!(output.is_file(), "Word did not create {}", output.display());
+        assert!(
+            result
+                .outputs_json
+                .contains(&output.to_string_lossy().to_string()),
+            "Word output path missing: {}",
+            result.outputs_json
+        );
+        std::fs::remove_file(&output).expect("remove live Word test document");
+    }
+
+    #[test]
+    #[ignore = "requires the installed Meridian macOS app and Accessibility/Input Monitoring permissions"]
+    fn aws_demo_macos_live_replay() {
+        use greentic_desktop_adapter::{DesktopAdapter, ObserveContext};
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/runners/aws-demo-macos-meridian-insurance.yaml");
+        let yaml = std::fs::read_to_string(&path).expect("macOS AWS demo runner");
+        let runner = runner_file_for_yaml_path(&path, &yaml).expect("runner file");
+        let state = GuiApiState {
+            platform: "macos".to_owned(),
+            ..GuiApiState::default()
+        };
+
+        let diagnostic_adapter = MacOsAccessibilityAdapter::new(detect_platform());
+        diagnostic_adapter
+            .execute(RunnerStep {
+                id: "diagnostic-activate".to_owned(),
+                action: "activate_app".to_owned(),
+                target: LocatorTarget::default(),
+                value: Some("Meridian Commercial Insurance".to_owned()),
+                required_capability: "macos.activate_app".to_owned(),
+            })
+            .expect("activate Meridian for diagnostics");
+        let mut observation = diagnostic_adapter
+            .observe(ObserveContext {
+                session_id: "aws-demo-live-test".to_owned(),
+                target: None,
+            })
+            .expect("read Meridian accessibility tree");
+        for _ in 0..60 {
+            if !observation
+                .visible_text
+                .iter()
+                .any(|value| value.contains("Contacting underwriting engine"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            observation = diagnostic_adapter
+                .observe(ObserveContext {
+                    session_id: "aws-demo-live-test".to_owned(),
+                    target: None,
+                })
+                .expect("wait for Meridian rating dialog");
+        }
+        eprintln!("Meridian visible text: {:?}", observation.visible_text);
+        if observation
+            .visible_text
+            .iter()
+            .any(|value| value.contains("QUOTE SUCCESSFUL"))
+        {
+            let _ = diagnostic_adapter.execute(RunnerStep {
+                id: "diagnostic-close-existing-result".to_owned(),
+                action: "click_element".to_owned(),
+                target: LocatorTarget {
+                    preferred: Some(LocatorStrategy {
+                        role: Some("button".to_owned()),
+                        name: Some("Close".to_owned()),
+                        ..LocatorStrategy::default()
+                    }),
+                    ..LocatorTarget::default()
+                },
+                value: None,
+                required_capability: "macos.click_element".to_owned(),
+            });
+        }
+
+        let result = execute_runner(&state, &runner, "run", "{}")
+            .unwrap_or_else(|error| panic!("live AWS demo replay failed: {error}"));
+        assert!(
+            result
+                .outputs_json
+                .contains(r#""outputs.public_liability_limit":"£2,000,000""#),
+            "runner input was not committed: {}",
+            result.outputs_json
+        );
+        assert!(
+            result
+                .outputs_json
+                .contains(r#""outputs.annual_premium":"£3,438.05""#),
+            "quote still used the application's demo values: {}",
+            result.outputs_json
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Meridian to be showing a completed quotation result"]
+    fn aws_demo_macos_live_result_extraction() {
+        let yaml = include_str!("../../../examples/runners/aws-demo-macos-meridian-insurance.yaml");
+        let mut package = runner_package_from_yaml(yaml).expect("AWS demo runner");
+        package.steps.retain(|step| {
+            step.id == "open-meridian"
+                || step.id == "wait-for-quote-result"
+                || step.id == "assert-quote-successful"
+                || step.id.starts_with("read-")
+        });
+        let state = GuiApiState {
+            platform: "macos".to_owned(),
+            ..GuiApiState::default()
+        };
+        let registry = replay_adapter_registry(&state);
+        let outcome = replay_with_context(
+            ReplayRequest {
+                adapters: registry.capabilities(),
+                package,
+                session_profile: SessionProfile {
+                    id: "aws-demo-result-test".to_owned(),
+                    bootstrap: Vec::new(),
+                    teardown: Vec::new(),
+                },
+                inputs: manifest_input_defaults(yaml),
+                secrets: BTreeMap::new(),
+            },
+            &ReplayExecutionContext {
+                registry,
+                on_failure: OnFailure::Stop,
+                step_timeout: Some(Duration::from_secs(60)),
+                cancellation: None,
+            },
+        );
+
+        assert!(outcome.passed, "{:?}", outcome.failure_reason);
+        eprintln!("AWS demo outputs: {}", outcome.outputs_json());
+        assert_eq!(
+            outcome.outputs.get("outputs.insurer").map(String::as_str),
+            Some("Meridian Commercial")
+        );
+        assert_eq!(
+            outcome.outputs.get("outputs.excess").map(String::as_str),
+            Some("£500")
+        );
+        assert!(outcome
+            .outputs
+            .get("outputs.quote_reference")
+            .is_some_and(|value| value.starts_with("BQ-")));
+    }
+
+    #[test]
     fn typed_runner_summary_exposes_fields_and_runner_secrets_are_resolved() {
         if coverage_instrumented_run() {
             return;
@@ -8756,8 +9227,8 @@ steps:
         );
         assert!(cloudflared_health_error(
             "https://green-example.trycloudflare.com/health",
-            Some(6),
-            "curl: (6) Could not resolve host"
+            true,
+            "Could not resolve host"
         )
         .contains("DNS propagation"));
         assert!(cloudflared_command_candidates()

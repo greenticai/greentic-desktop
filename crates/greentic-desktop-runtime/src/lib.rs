@@ -19,7 +19,7 @@ use greentic_distributor_client::{
 };
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorData, Implementation, JsonObject,
+        CallToolRequestParams, CallToolResponse, ErrorData, Implementation, JsonObject,
         ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
@@ -993,14 +993,14 @@ impl ServerHandler for RuntimeMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         let arguments = mcp_arguments_to_strings(request.arguments.unwrap_or_default());
         let mut state = self
             .state
             .lock()
             .map_err(|_| ErrorData::internal_error("MCP state lock is poisoned", None))?;
         let result = state.call_tool_with_arguments(request.name.into_owned(), arguments);
-        Ok(rmcp_call_tool_result(&result))
+        Ok(rmcp_call_tool_result(&result).into())
     }
 }
 

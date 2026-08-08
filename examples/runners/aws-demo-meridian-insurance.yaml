@@ -1,0 +1,266 @@
+id: example.aws_demo_meridian_insurance.create_quote
+name: AWS Demo Meridian Commercial Insurance Quote
+version: 0.1.0
+mode: AssistedPrompt
+description: Open Meridian Commercial Insurance, start a fresh commercial quote, load the deterministic demo customer, apply MCP-supplied field values, calculate the premium, and return the quotation result.
+target:
+  kind: desktop
+  app: Meridian Commercial Insurance.exe
+required_adapters:
+  - greentic.desktop.windows-ui
+required_capabilities:
+  - windows.open_app
+  - windows.find_window
+  - windows.find_element
+  - windows.click_element
+  - windows.type_text
+  - windows.read_text
+  - windows.assert_visible
+inputs:
+  - inputs.app_path
+  - inputs.company_name
+  - inputs.trading_name
+  - inputs.company_registration_number
+  - inputs.address_line_1
+  - inputs.city
+  - inputs.postcode
+  - inputs.contact_name
+  - inputs.telephone
+  - inputs.email
+  - inputs.business_activity
+  - inputs.trading_since
+  - inputs.annual_turnover
+  - inputs.employee_count
+  - inputs.premises_type
+  - inputs.building_value
+  - inputs.contents_value
+  - inputs.public_liability_limit
+input_defaults:
+  app_path: Meridian Commercial Insurance.exe
+  company_name: ACME Trading Ltd
+  trading_name: ACME
+  company_registration_number: "01234567"
+  address_line_1: 1 ACME Way
+  city: London
+  postcode: EC1A 1BB
+  contact_name: John Smith
+  telephone: "020 7946 0100"
+  email: john.smith@acme.example
+  business_activity: Retail
+  trading_since: "2015"
+  annual_turnover: "750000"
+  employee_count: "12"
+  premises_type: Office
+  building_value: "500000"
+  contents_value: "100000"
+  public_liability_limit: "2000000"
+secrets: []
+outputs:
+  - outputs.quote_reference
+  - outputs.insurer
+  - outputs.annual_premium
+  - outputs.monthly_premium
+  - outputs.excess
+  - outputs.public_liability_limit
+assertions:
+  - QUOTE SUCCESSFUL is visible before result extraction.
+open_questions:
+  - All declared inputs have demo defaults. Override app_path when Meridian Commercial Insurance.exe is not on PATH.
+  - Boolean and radio selections remain at the deterministic Load Demo Customer values because the current runner step schema has no conditional branch or templated locator support. Record separate variants if callers must change those selections.
+steps:
+  - id: open-meridian
+    action: open_app
+    required_capability: windows.open_app
+    value: "{{inputs.app_path}}"
+
+  - id: find-meridian-window
+    action: find_window
+    required_capability: windows.find_window
+    value: Meridian Commercial Insurance – Broker Workstation
+
+  - id: click-new-quote
+    action: click_element
+    required_capability: windows.click_element
+    target:
+      preferred:
+        automation_id: new-quote
+        role: button
+        name: New Quote
+      fallback:
+        role: button
+        name: "📄 New Quote"
+
+  - id: load-demo-customer
+    action: click_element
+    required_capability: windows.click_element
+    target:
+      preferred:
+        automation_id: load-demo-customer
+        role: button
+        name: Load Demo Customer
+      fallback:
+        role: button
+        name: "👤 Load Demo Customer"
+
+  - id: set-company-name
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.company_name}}"
+    target: { preferred: { automation_id: company-name, role: textbox, name: Company Name }, fallback: { label: Company Name } }
+  - id: set-trading-name
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.trading_name}}"
+    target: { preferred: { automation_id: trading-name, role: textbox, name: Trading Name }, fallback: { label: Trading Name } }
+  - id: set-company-registration-number
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.company_registration_number}}"
+    target: { preferred: { automation_id: company-registration-number, role: textbox, name: Company Registration No. }, fallback: { label: Company Registration No. } }
+  - id: set-address-line-1
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.address_line_1}}"
+    target: { preferred: { automation_id: address-line-1, role: textbox, name: Address Line 1 }, fallback: { label: Address Line 1 } }
+  - id: set-city
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.city}}"
+    target: { preferred: { automation_id: city, role: textbox, name: City }, fallback: { label: City } }
+  - id: set-postcode
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.postcode}}"
+    target: { preferred: { automation_id: postcode, role: textbox, name: Postcode }, fallback: { label: Postcode } }
+  - id: set-contact-name
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.contact_name}}"
+    target: { preferred: { automation_id: contact-name, role: textbox, name: Contact Name }, fallback: { label: Contact Name } }
+  - id: set-telephone
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.telephone}}"
+    target: { preferred: { automation_id: telephone, role: textbox, name: Telephone }, fallback: { label: Telephone } }
+  - id: set-email
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.email}}"
+    target: { preferred: { automation_id: email, role: textbox, name: Email }, fallback: { label: Email } }
+
+  - id: next-to-business
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+  - id: set-business-activity
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.business_activity}}"
+    target: { preferred: { automation_id: business-activity, role: combobox, name: Business Activity }, fallback: { label: Business Activity } }
+  - id: set-trading-since
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.trading_since}}"
+    target: { preferred: { automation_id: trading-since, role: spinbutton, name: Trading Since }, fallback: { label: Trading Since } }
+  - id: set-annual-turnover
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.annual_turnover}}"
+    target: { preferred: { automation_id: annual-turnover, role: spinbutton, name: Annual Turnover }, fallback: { label: Annual Turnover } }
+  - id: set-employee-count
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.employee_count}}"
+    target: { preferred: { automation_id: employee-count, role: spinbutton, name: Number of Employees }, fallback: { label: Number of Employees } }
+
+  - id: next-to-premises
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+  - id: set-premises-type
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.premises_type}}"
+    target: { preferred: { automation_id: premises-type, role: combobox, name: Premises Type }, fallback: { label: Premises Type } }
+  - id: set-building-value
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.building_value}}"
+    target: { preferred: { automation_id: building-value, role: spinbutton, name: Building Value }, fallback: { label: Building Value } }
+  - id: set-contents-value
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.contents_value}}"
+    target: { preferred: { automation_id: contents-value, role: spinbutton, name: Contents Value }, fallback: { label: Contents Value } }
+
+  - id: next-to-employees
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+  - id: next-to-liability
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+  - id: set-public-liability-limit
+    action: type_text
+    required_capability: windows.type_text
+    value: "{{inputs.public_liability_limit}}"
+    target: { preferred: { automation_id: public-liability-limit, role: combobox, name: Public Liability Limit }, fallback: { label: Public Liability Limit } }
+
+  - id: next-to-claims
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+  - id: next-to-underwriting
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+  - id: next-to-premium
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: next-button, role: button, name: "Next >" }, fallback: { role: button, name: "Next >" } }
+
+  - id: calculate-premium
+    action: click_element
+    required_capability: windows.click_element
+    target: { preferred: { automation_id: calculate-premium, role: button, name: Calculate Premium }, fallback: { role: button, name: Calculate Premium } }
+  - id: wait-for-quote-result
+    action: find_element
+    required_capability: windows.find_element
+    value: QUOTE SUCCESSFUL
+    target: { preferred: { role: heading, name: QUOTE SUCCESSFUL }, fallback: { name: QUOTE SUCCESSFUL } }
+  - id: assert-quote-successful
+    action: assert_visible
+    required_capability: windows.assert_visible
+    target: { preferred: { role: heading, name: QUOTE SUCCESSFUL }, fallback: { name: QUOTE SUCCESSFUL } }
+
+  - id: read-quote-reference
+    action: read_text
+    required_capability: windows.read_text
+    value: outputs.quote_reference
+    target: { preferred: { automation_id: result-quote-reference, name: Quote Reference }, fallback: { label: Quote Reference } }
+  - id: read-insurer
+    action: read_text
+    required_capability: windows.read_text
+    value: outputs.insurer
+    target: { preferred: { name: Meridian Commercial }, fallback: { label: Insurer } }
+  - id: read-annual-premium
+    action: read_text
+    required_capability: windows.read_text
+    value: outputs.annual_premium
+    target: { preferred: { automation_id: annual-premium, name: Annual Premium }, fallback: { label: Annual Premium } }
+  - id: read-monthly-premium
+    action: read_text
+    required_capability: windows.read_text
+    value: outputs.monthly_premium
+    target: { preferred: { automation_id: monthly-premium, name: Monthly Premium }, fallback: { label: Monthly Premium } }
+  - id: read-excess
+    action: read_text
+    required_capability: windows.read_text
+    value: outputs.excess
+    target: { preferred: { name: "£500" }, fallback: { label: Excess } }
+  - id: read-public-liability-limit
+    action: read_text
+    required_capability: windows.read_text
+    value: outputs.public_liability_limit
+    target: { preferred: { automation_id: result-liability-limit, name: Public Liability Limit }, fallback: { label: Public Liability Limit } }

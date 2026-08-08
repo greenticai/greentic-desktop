@@ -92,7 +92,8 @@ ensure_frontend_node
 if command -v npm >/dev/null 2>&1; then
   (
     cd frontend/automate-hub
-    npm ci
+    npm ci --no-audit --no-fund
+    npm audit --audit-level=high
     npx playwright install chromium
   )
 else
