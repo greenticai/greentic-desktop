@@ -264,9 +264,7 @@ function RunnersPage() {
                 {mcpToolCount} runner tools on {mcpLocalUrl ?? "local runtime"}
               </div>
               {mcpPublicUrl && (
-                <div className="text-xs text-muted-foreground">
-                  Cloudflare {mcpPublicUrl}
-                </div>
+                <div className="text-xs text-muted-foreground">Cloudflare {mcpPublicUrl}</div>
               )}
             </div>
           </div>

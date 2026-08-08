@@ -228,15 +228,12 @@ export const api = {
     inputs?: Record<string, string>,
     signal?: AbortSignal,
   ) =>
-    request<RunnerActionResultDto>(
-      `/runners/${encodeURIComponent(id)}/${action}`,
-      { ...jsonInit("POST", inputs ? { inputs, ...inputs } : undefined), signal },
-    ),
+    request<RunnerActionResultDto>(`/runners/${encodeURIComponent(id)}/${action}`, {
+      ...jsonInit("POST", inputs ? { inputs, ...inputs } : undefined),
+      signal,
+    }),
   cancelRunner: (id: string) =>
-    request<RunnerActionResultDto>(
-      `/runners/${encodeURIComponent(id)}/cancel`,
-      jsonInit("POST"),
-    ),
+    request<RunnerActionResultDto>(`/runners/${encodeURIComponent(id)}/cancel`, jsonInit("POST")),
   createRunnerEditDraft: (runnerId: string, instruction: string, mode = "extend") =>
     request<RunnerEditDraftDto>(
       `/runners/${encodeURIComponent(runnerId)}/edit-drafts`,

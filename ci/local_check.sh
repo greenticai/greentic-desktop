@@ -87,13 +87,16 @@ bash ci/no_handrolled_scripting_check.sh
 header "cargo fmt"
 cargo fmt --all -- --check
 
-header "frontend automation dependencies"
+header "frontend checks and automation dependencies"
 ensure_frontend_node
 if command -v npm >/dev/null 2>&1; then
   (
     cd frontend/automate-hub
     npm ci --no-audit --no-fund
     npm audit --audit-level=high
+    npm run lint
+    npm run build
+    test -f dist/index.html
     npx playwright install chromium
   )
 else
@@ -140,37 +143,6 @@ if command -v pwsh >/dev/null 2>&1; then
   pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content ./install.ps1 -Raw))'
 else
   printf 'pwsh is not available; skipping PowerShell parser check.\n'
-fi
-
-if [ "${GREENTIC_CHECK_FRONTEND:-0}" = "1" ]; then
-  header "frontend build"
-  if command -v bun >/dev/null 2>&1; then
-    (
-      cd frontend/automate-hub
-      if [ ! -d node_modules ]; then
-        bun install
-      fi
-      bun run build
-      test -f dist/index.html
-    )
-  elif command -v npm >/dev/null 2>&1; then
-    (
-      cd frontend/automate-hub
-      if [ ! -d node_modules ]; then
-        if [ -f package-lock.json ]; then
-          npm ci
-        else
-          npm install
-        fi
-      fi
-      npm run lint
-      npm run build
-      test -f dist/index.html
-    )
-  else
-    printf 'GREENTIC_CHECK_FRONTEND=1 requires bun or npm.\n' >&2
-    exit 1
-  fi
 fi
 
 CRATES="$(locally_packageable_crates)"

@@ -128,9 +128,7 @@ function MCPPage() {
           Local endpoint {localUrl ?? "not available"}
         </div>
         {publicUrl && (
-          <div className="mt-1 text-xs text-muted-foreground">
-            Cloudflare endpoint {publicUrl}
-          </div>
+          <div className="mt-1 text-xs text-muted-foreground">Cloudflare endpoint {publicUrl}</div>
         )}
         <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-3 text-xs">
           {config.data?.clientJson ?? "{}"}
