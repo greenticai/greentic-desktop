@@ -3322,6 +3322,7 @@ mod tests {
         assert!(macos_role_predicate("heading").contains("AXHeading"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "starts the native Swift AX helper"]
     fn native_ax_helper_starts_and_reports_missing_app() {
