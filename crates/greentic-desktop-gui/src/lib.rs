@@ -8701,26 +8701,6 @@ steps:
                 .expect("wait for Meridian rating dialog");
         }
         eprintln!("Meridian visible text: {:?}", observation.visible_text);
-        if observation
-            .visible_text
-            .iter()
-            .any(|value| value.contains("QUOTE SUCCESSFUL"))
-        {
-            let _ = diagnostic_adapter.execute(RunnerStep {
-                id: "diagnostic-close-existing-result".to_owned(),
-                action: "click_element".to_owned(),
-                target: LocatorTarget {
-                    preferred: Some(LocatorStrategy {
-                        role: Some("button".to_owned()),
-                        name: Some("Close".to_owned()),
-                        ..LocatorStrategy::default()
-                    }),
-                    ..LocatorTarget::default()
-                },
-                value: None,
-                required_capability: "macos.click_element".to_owned(),
-            });
-        }
 
         let result = execute_runner(&state, &runner, "run", "{}")
             .unwrap_or_else(|error| panic!("live AWS demo replay failed: {error}"));
