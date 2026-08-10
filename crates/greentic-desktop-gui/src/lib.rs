@@ -8536,6 +8536,19 @@ steps:
                     .and_then(|locator| locator.automation_id.as_deref()),
                 Some("company-name")
             );
+            let liability = package
+                .steps
+                .iter()
+                .find(|step| step.id == "set-public-liability-limit")
+                .expect("public liability step");
+            assert_eq!(
+                liability
+                    .target
+                    .preferred
+                    .as_ref()
+                    .and_then(|locator| locator.automation_id.as_deref()),
+                Some("public-liability-limit")
+            );
         }
     }
 
@@ -8688,26 +8701,6 @@ steps:
                 .expect("wait for Meridian rating dialog");
         }
         eprintln!("Meridian visible text: {:?}", observation.visible_text);
-        if observation
-            .visible_text
-            .iter()
-            .any(|value| value.contains("QUOTE SUCCESSFUL"))
-        {
-            let _ = diagnostic_adapter.execute(RunnerStep {
-                id: "diagnostic-close-existing-result".to_owned(),
-                action: "click_element".to_owned(),
-                target: LocatorTarget {
-                    preferred: Some(LocatorStrategy {
-                        role: Some("button".to_owned()),
-                        name: Some("Close".to_owned()),
-                        ..LocatorStrategy::default()
-                    }),
-                    ..LocatorTarget::default()
-                },
-                value: None,
-                required_capability: "macos.click_element".to_owned(),
-            });
-        }
 
         let result = execute_runner(&state, &runner, "run", "{}")
             .unwrap_or_else(|error| panic!("live AWS demo replay failed: {error}"));

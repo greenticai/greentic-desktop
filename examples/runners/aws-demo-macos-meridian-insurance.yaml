@@ -14,6 +14,7 @@ required_capabilities:
   - macos.find_window
   - macos.find_element
   - macos.click_element
+  - macos.click_element_if_visible
   - macos.type_text
   - macos.read_text
   - macos.assert_visible
@@ -79,6 +80,17 @@ steps:
     action: find_window
     required_capability: macos.find_window
     value: Meridian Commercial Insurance – Broker Workstation
+
+  - id: close-existing-quotation-result
+    action: click_element_if_visible
+    required_capability: macos.click_element_if_visible
+    target:
+      preferred:
+        role: button
+        name: Close
+      fallback:
+        role: button
+        name: Close
 
   - id: click-new-quote
     action: click_element
@@ -207,7 +219,7 @@ steps:
     action: type_text
     required_capability: macos.type_text
     value: "{{inputs.public_liability_limit}}"
-    target: { preferred: { role: combobox }, fallback: { role: combobox } }
+    target: { preferred: { automation_id: public-liability-limit, role: combobox, name: Public Liability Limit }, fallback: { role: combobox, name: Public Liability Limit } }
 
   - id: next-to-claims
     action: click_element
