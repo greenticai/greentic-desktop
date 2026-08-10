@@ -197,6 +197,13 @@ func normalized(_ value: String) -> String {
   value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
 }
 
+func matchesExpected(_ observed: String, _ expected: String) -> Bool {
+  if normalized(observed) == normalized(expected) { return true }
+  let expectedDigits = expected.filter(\.isNumber)
+  guard !expectedDigits.isEmpty && expected.allSatisfy({ $0.isNumber }) else { return false }
+  return observed.filter(\.isNumber) == expectedDigits
+}
+
 func comboInputValue(_ value: String) -> String {
   guard let amount = Int(value) else { return value }
   let formatter = NumberFormatter()
@@ -290,7 +297,7 @@ func paste(_ value: String, into element: AXUIElement, app: NSRunningApplication
   }
   let pasteDeadline = Date().addingTimeInterval(0.3)
   while Date() < pasteDeadline {
-    if string(element, kAXValueAttribute) == value { return true }
+    if matchesExpected(string(element, kAXValueAttribute), value) { return true }
     usleep(10_000)
   }
   return false
@@ -306,7 +313,7 @@ func confirmComboBox(_ element: AXUIElement, value: String, app: NSRunningApplic
   }
   let deadline = Date().addingTimeInterval(0.3)
   while Date() < deadline {
-    if normalized(string(element, kAXValueAttribute)) == normalized(value) { return true }
+    if matchesExpected(string(element, kAXValueAttribute), value) { return true }
     usleep(10_000)
   }
   return false
@@ -468,7 +475,7 @@ while let line = readLine() {
       break
     }
     result = string(target, kAXValueAttribute)
-    if targetRole == "AXComboBox" && (normalized(result) == normalized(values[13]) || confirmComboBox(target, value: values[13], app: app)) {
+    if targetRole == "AXComboBox" && (matchesExpected(result, values[13]) || confirmComboBox(target, value: values[13], app: app)) {
       result = string(target, kAXValueAttribute)
       break
     }

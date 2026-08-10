@@ -8536,6 +8536,19 @@ steps:
                     .and_then(|locator| locator.automation_id.as_deref()),
                 Some("company-name")
             );
+            let liability = package
+                .steps
+                .iter()
+                .find(|step| step.id == "set-public-liability-limit")
+                .expect("public liability step");
+            assert_eq!(
+                liability
+                    .target
+                    .preferred
+                    .as_ref()
+                    .and_then(|locator| locator.automation_id.as_deref()),
+                Some("public-liability-limit")
+            );
         }
     }
 

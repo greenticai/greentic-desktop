@@ -207,7 +207,7 @@ steps:
     action: type_text
     required_capability: macos.type_text
     value: "{{inputs.public_liability_limit}}"
-    target: { preferred: { role: combobox }, fallback: { role: combobox } }
+    target: { preferred: { automation_id: public-liability-limit, role: combobox, name: Public Liability Limit }, fallback: { role: combobox, name: Public Liability Limit } }
 
   - id: next-to-claims
     action: click_element
