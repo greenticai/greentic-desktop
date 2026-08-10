@@ -166,7 +166,6 @@ pub fn macos_capabilities() -> AdapterCapabilities {
             "macos.read_window_tree",
             "macos.find_element",
             "macos.click_element",
-            "macos.click_element_if_visible",
             "macos.open_resource",
             "macos.type_text",
             "macos.press_shortcut",
@@ -689,33 +688,6 @@ impl MacOsAccessibilityAdapter {
                 #[cfg(not(target_os = "macos"))]
                 macos_click_element(&app, &step.target)?;
                 Ok("clicked macOS accessibility element".to_owned())
-            }
-            "macos.click_element_if_visible" => {
-                let app = self.active_app_or_frontmost()?;
-                #[cfg(target_os = "macos")]
-                let visible = self
-                    .native_ax_call("find", &app, &step.target, None, None)
-                    .map(|_| true)
-                    .or_else(|_| macos_element_exists(&app, &step.target, None))?;
-                #[cfg(not(target_os = "macos"))]
-                let visible = macos_element_exists(&app, &step.target, None)?;
-                if !visible {
-                    return Ok("optional macOS accessibility element was not visible".to_owned());
-                }
-                #[cfg(target_os = "macos")]
-                self.native_ax_call("click", &app, &step.target, None, None)
-                    .or_else(|native_error| {
-                        macos_click_element(&app, &step.target)
-                            .map(|_| String::new())
-                            .map_err(|fallback_error| {
-                                AdapterError::ExecutionFailed(format!(
-                                    "native click failed ({native_error}); AppleScript fallback failed ({fallback_error})"
-                                ))
-                            })
-                    })?;
-                #[cfg(not(target_os = "macos"))]
-                macos_click_element(&app, &step.target)?;
-                Ok("clicked optional macOS accessibility element".to_owned())
             }
             "macos.press_shortcut" => {
                 let shortcut = step.value.as_deref().ok_or_else(|| {
@@ -3170,7 +3142,6 @@ mod tests {
 
         assert_eq!(capabilities.adapter_id, MACOS_ADAPTER_ID);
         assert!(capabilities.supports("macos.find_app"));
-        assert!(capabilities.supports("macos.click_element_if_visible"));
         assert!(capabilities.supports("macos.screenshot"));
         assert!(capabilities.supports("macos.close_app"));
         assert!(capabilities.supports("macos.press_shortcut"));
