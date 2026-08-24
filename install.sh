@@ -57,6 +57,13 @@ json="$tmp/release.json"
 printf 'Resolving Greentic Desktop release for %s...\n' "$target"
 curl -fsSL "$release_url" -o "$json"
 
+resolved_version="$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$json" | head -n 1)"
+if [ -z "$resolved_version" ]; then
+  printf 'GitHub release metadata did not contain a release version.\n' >&2
+  exit 1
+fi
+printf 'Resolved Greentic Desktop release %s.\n' "$resolved_version"
+
 asset_url="$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*greentic-desktop-v[^"]*-'$target'\.'$ext'\)".*/\1/p' "$json" | head -n 1)"
 if [ -z "$asset_url" ]; then
   printf 'No Greentic Desktop release asset found for target %s in %s.\n' "$target" "$repo" >&2
