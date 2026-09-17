@@ -127,6 +127,8 @@ pub struct TreeSnapshot<H> {
     /// Nodes whose children or description could not be read (a web page
     /// mutating mid-walk makes this normal) plus nodes cut by [`WalkLimits`].
     pub skipped: usize,
+    /// The first few reasons nodes were skipped, for diagnostics.
+    pub skip_reasons: Vec<String>,
 }
 
 impl<H: Clone + std::fmt::Debug> TreeSnapshot<H> {
@@ -146,6 +148,7 @@ impl<H: Clone + std::fmt::Debug> TreeSnapshot<H> {
                 depth: 0,
             }],
             skipped: 0,
+            skip_reasons: Vec::new(),
         };
         let mut cursor = 0;
         while cursor < snapshot.nodes.len() {
@@ -157,8 +160,8 @@ impl<H: Clone + std::fmt::Debug> TreeSnapshot<H> {
             let handle = snapshot.nodes[cursor].handle.clone();
             let children = match backend.children(&handle) {
                 Ok(children) => children,
-                Err(_) => {
-                    snapshot.skipped += 1;
+                Err(error) => {
+                    snapshot.note_skip(error.to_string());
                     cursor += 1;
                     continue;
                 }
@@ -168,9 +171,12 @@ impl<H: Clone + std::fmt::Debug> TreeSnapshot<H> {
                     snapshot.skipped += 1;
                     continue;
                 }
-                let Ok(info) = backend.describe(&child) else {
-                    snapshot.skipped += 1;
-                    continue;
+                let info = match backend.describe(&child) {
+                    Ok(info) => info,
+                    Err(error) => {
+                        snapshot.note_skip(error.to_string());
+                        continue;
+                    }
                 };
                 let index = snapshot.nodes.len();
                 snapshot.nodes.push(SnapshotNode {
@@ -189,6 +195,13 @@ impl<H: Clone + std::fmt::Debug> TreeSnapshot<H> {
 }
 
 impl<H> TreeSnapshot<H> {
+    fn note_skip(&mut self, reason: String) {
+        self.skipped += 1;
+        if self.skip_reasons.len() < 3 {
+            self.skip_reasons.push(reason);
+        }
+    }
+
     pub fn node(&self, index: usize) -> &SnapshotNode<H> {
         &self.nodes[index]
     }

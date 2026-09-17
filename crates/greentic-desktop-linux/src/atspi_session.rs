@@ -117,6 +117,21 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
     }
 
     pub fn execute(&self, step: &RunnerStep) -> AdapterResult<String> {
+        let started = std::time::Instant::now();
+        let result = self.execute_step(step);
+        if trace_enabled() {
+            eprintln!(
+                "[greentic-linux-atspi] {} {} {}ms -> {:?}",
+                step.id,
+                step.required_capability,
+                started.elapsed().as_millis(),
+                result
+            );
+        }
+        result
+    }
+
+    fn execute_step(&self, step: &RunnerStep) -> AdapterResult<String> {
         match step.required_capability.as_str() {
             "linux.open_app" => self.open_app(step),
             "linux.find_window" => {
@@ -192,6 +207,12 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
             command.program
         ))
     }
+}
+
+/// `GREENTIC_LINUX_ATSPI_TRACE=1` prints every AT-SPI step and its result to
+/// stderr, which is the fastest way to see where a live replay diverged.
+fn trace_enabled() -> bool {
+    std::env::var("GREENTIC_LINUX_ATSPI_TRACE").is_ok_and(|value| value.trim() == "1")
 }
 
 fn executor_find_timeout<B: AccessibleBackend>(session: &AccessibilitySession<B>) -> Duration {

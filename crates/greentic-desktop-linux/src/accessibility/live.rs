@@ -14,11 +14,12 @@ use atspi::proxy::device_event_controller::{DeviceEventControllerProxy, KeySynth
 use atspi::proxy::editable_text::EditableTextProxy;
 use atspi::proxy::selection::SelectionProxy;
 use atspi::proxy::text::TextProxy;
-use atspi::{AccessibilityConnection, Interface, ObjectRefOwned, State};
+use atspi::{AccessibilityConnection, Interface, State};
 use greentic_desktop_adapter::{AdapterError, AdapterResult};
 use std::time::Duration;
 use zbus::names::BusName;
 use zbus::proxy::CacheProperties;
+use zbus::zvariant::OwnedObjectPath;
 
 const REGISTRY_BUS_NAME: &str = "org.a11y.atspi.Registry";
 const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
@@ -37,8 +38,37 @@ impl std::fmt::Debug for AtspiBackend {
     }
 }
 
+const NULL_PATH: &str = "/org/a11y/atspi/null";
+
 /// Handle to one accessible object: its bus name and object path.
-pub type AtspiHandle = ObjectRefOwned;
+///
+/// Deliberately not `atspi::ObjectRefOwned`: that type insists the bus name is
+/// a D-Bus *unique* name while deserializing, and WebKitGTK's embedded web
+/// process hands out child references that fail that check, which made every
+/// web-content subtree unreachable. References are decoded as raw `(so)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtspiHandle {
+    pub bus_name: String,
+    pub path: OwnedObjectPath,
+}
+
+impl AtspiHandle {
+    fn from_reference(
+        parent_bus: &str,
+        (bus_name, path): (String, OwnedObjectPath),
+    ) -> Option<Self> {
+        if path.as_str() == NULL_PATH {
+            return None;
+        }
+        // An empty bus name refers to the parent's own connection.
+        let bus_name = if bus_name.is_empty() {
+            parent_bus.to_owned()
+        } else {
+            bus_name
+        };
+        Some(Self { bus_name, path })
+    }
+}
 
 fn failed(context: &str, error: impl std::fmt::Display) -> AdapterError {
     AdapterError::ExecutionFailed(format!("AT-SPI {context} failed: {error}"))
@@ -46,16 +76,10 @@ fn failed(context: &str, error: impl std::fmt::Display) -> AdapterError {
 
 macro_rules! object_proxy {
     ($proxy:ident, $connection:expr, $object:expr) => {{
-        let object: &ObjectRefOwned = $object;
-        let name = object
-            .name()
-            .ok_or_else(|| {
-                AdapterError::ExecutionFailed("AT-SPI object reference is null".to_owned())
-            })?
-            .clone();
+        let object: &AtspiHandle = $object;
         $proxy::builder($connection)
-            .destination(name)
-            .and_then(|builder| builder.path(object.path().clone()))
+            .destination(object.bus_name.as_str())
+            .and_then(|builder| builder.path(object.path.as_str()))
             .map(|builder| builder.cache_properties(CacheProperties::No))
             .map_err(|error| failed("proxy setup", error))?
             .build()
@@ -102,54 +126,65 @@ impl AtspiBackend {
     }
 }
 
+impl AtspiBackend {
+    /// Children via `ChildCount` + `GetChildAtIndex`, the calls libatspi
+    /// itself makes, so the backend exercises the same toolkit code paths
+    /// every screen reader does.
+    fn child_references(&self, bus_name: &str, path: &str) -> AdapterResult<Vec<AtspiHandle>> {
+        zbus::block_on(async {
+            let proxy: zbus::Proxy<'_> = zbus::proxy::Builder::new(&self.connection)
+                .destination(bus_name)
+                .and_then(|builder| builder.path(path))
+                .and_then(|builder| builder.interface("org.a11y.atspi.Accessible"))
+                .map(|builder| builder.cache_properties(CacheProperties::No))
+                .map_err(|error| failed("proxy setup", error))?
+                .build()
+                .await
+                .map_err(|error| failed("proxy setup", error))?;
+            let count: i32 = proxy
+                .get_property("ChildCount")
+                .await
+                .map_err(|error| failed("ChildCount", error))?;
+            let mut children = Vec::new();
+            for index in 0..count.max(0) {
+                let reference: (String, OwnedObjectPath) = proxy
+                    .call("GetChildAtIndex", &(index,))
+                    .await
+                    .map_err(|error| failed("GetChildAtIndex", error))?;
+                if let Some(child) = AtspiHandle::from_reference(bus_name, reference) {
+                    children.push(child);
+                }
+            }
+            Ok(children)
+        })
+    }
+}
+
 impl AccessibleBackend for AtspiBackend {
     type Handle = AtspiHandle;
 
     fn applications(&self) -> AdapterResult<Vec<AtspiHandle>> {
-        zbus::block_on(async {
-            let root = AccessibleProxy::builder(&self.connection)
-                .destination(REGISTRY_BUS_NAME)
-                .and_then(|builder| builder.path(ROOT_PATH))
-                .map(|builder| builder.cache_properties(CacheProperties::No))
-                .map_err(|error| failed("registry proxy", error))?
-                .build()
-                .await
-                .map_err(|error| failed("registry proxy", error))?;
-            root.get_children()
-                .await
-                .map_err(|error| failed("registry GetChildren", error))
-        })
-        .map(|children| {
-            children
-                .into_iter()
-                .filter(|child| !child.is_null())
-                .collect()
-        })
+        self.child_references(REGISTRY_BUS_NAME, ROOT_PATH)
     }
 
     fn children(&self, node: &AtspiHandle) -> AdapterResult<Vec<AtspiHandle>> {
-        zbus::block_on(async {
-            let proxy = object_proxy!(AccessibleProxy, &self.connection, node);
-            proxy
-                .get_children()
-                .await
-                .map_err(|error| failed("GetChildren", error))
-        })
-        .map(|children| {
-            children
-                .into_iter()
-                .filter(|child| !child.is_null())
-                .collect()
-        })
+        self.child_references(&node.bus_name, node.path.as_str())
     }
 
     fn describe(&self, node: &AtspiHandle) -> AdapterResult<AccessibleNodeInfo> {
         zbus::block_on(async {
             let proxy = object_proxy!(AccessibleProxy, &self.connection, node);
-            let role = proxy
-                .get_role_name()
-                .await
-                .map_err(|error| failed("GetRoleName", error))?;
+            // The role comes from the GetRole enum, as libatspi does. GetRoleName
+            // is only a fallback: WebKitGTK's web process answers it with an
+            // empty string, and calling it on a table cell crashed that process
+            // outright (observed on the Meridian premium summary table).
+            let role = match proxy.get_role().await {
+                Ok(role) => role.name().to_owned(),
+                Err(_) => proxy
+                    .get_role_name()
+                    .await
+                    .map_err(|error| failed("GetRole/GetRoleName", error))?,
+            };
             let name = proxy.name().await.unwrap_or_default();
             let description = proxy.description().await.unwrap_or_default();
             let attributes = proxy
@@ -192,12 +227,10 @@ impl AccessibleBackend for AtspiBackend {
     }
 
     fn process_id(&self, node: &AtspiHandle) -> Option<u32> {
-        let name = node.name()?.clone();
+        let name = BusName::try_from(node.bus_name.as_str()).ok()?;
         zbus::block_on(async {
             let dbus = zbus::fdo::DBusProxy::new(&self.connection).await.ok()?;
-            dbus.get_connection_unix_process_id(BusName::Unique(name))
-                .await
-                .ok()
+            dbus.get_connection_unix_process_id(name).await.ok()
         })
     }
 

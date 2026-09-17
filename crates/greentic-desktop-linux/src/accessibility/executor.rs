@@ -398,7 +398,10 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
                 ));
             }
             if snapshot.skipped > 0 {
-                lines.push(format!("… {} nodes skipped", snapshot.skipped));
+                lines.push(format!(
+                    "… {} nodes skipped: {:?}",
+                    snapshot.skipped, snapshot.skip_reasons
+                ));
             }
         }
         Ok(lines.join("\n"))
