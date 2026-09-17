@@ -27,6 +27,16 @@ The command fails if the runner fails, the expected file is missing or unchanged
 - `--expect-frontmost-app APP`: the frontmost app must match the expected app name.
 - `--json`: emit a structured validation summary with runner output, steps, live state, and assertion failures.
 
+## Linux AT-SPI (containerised)
+
+The Linux adapters' live proof runs in Docker, so it needs no sudo and never drives the host desktop:
+
+```sh
+MERIDIAN_SRC=../aws-demo-meridian-insurance ci/linux_atspi/run_live_check.sh --extraction
+```
+
+It builds the Meridian Tauri app and greentic-desktop inside an Ubuntu 24.04 image with WebKitGTK, Xvfb, dbus and at-spi2-core, then runs `aws_demo_linux_live_replay` and `aws_demo_linux_live_result_extraction` with `GREENTIC_LINUX_ATSPI_TRACE=1`. Set `DOCKER_DNS` when container DNS is broken and `SESSION_TYPE=wayland GREENTIC_LINUX_ATSPI_KEYBOARD=1` to route the same run through the Wayland adapter.
+
 ## Local Check Integration
 
 `ci/local_check.sh` does not run GUI desktop automation by default. To include live validation:
