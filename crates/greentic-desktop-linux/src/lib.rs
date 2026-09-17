@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+pub mod accessibility;
+
 pub const LINUX_X11_ADAPTER_ID: &str = "greentic.desktop.linux.x11";
 pub const LINUX_WAYLAND_ADAPTER_ID: &str = "greentic.desktop.linux.wayland";
 pub const LINUX_X11_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.linux.x11";
