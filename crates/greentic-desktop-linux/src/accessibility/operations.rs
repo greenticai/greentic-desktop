@@ -160,3 +160,9 @@ pub fn window_title_matches(name: &str, title: &str) -> bool {
     let title = normalize_label(title);
     !title.is_empty() && (name == title || name.contains(&title))
 }
+
+/// True when a window's accessible name is exactly `title` (normalized).
+pub fn window_title_equals(name: &str, title: &str) -> bool {
+    let title = normalize_label(title);
+    !title.is_empty() && normalize_label(name) == title
+}

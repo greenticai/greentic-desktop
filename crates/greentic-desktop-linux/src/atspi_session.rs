@@ -1,7 +1,9 @@
 //! Per-adapter AT-SPI state: the lazily opened bus connection and the window
 //! the runner is currently scoped to.
 
+use crate::accessibility::executor::WindowScope;
 use crate::accessibility::locator::target_is_resolvable;
+use crate::accessibility::operations::window_title_equals;
 use crate::accessibility::{AccessibilityExecutor, AccessibilityTiming, AccessibleBackend};
 use crate::launch::{resolve_launch_command, spawn_detached};
 use greentic_desktop_adapter::{AdapterError, AdapterResult, LocatorTarget, RunnerStep};
@@ -25,7 +27,7 @@ type Connector<B> = dyn Fn() -> AdapterResult<B> + Send + Sync;
 pub struct AccessibilitySession<B: AccessibleBackend> {
     connector: Box<Connector<B>>,
     backend: Mutex<Option<Arc<B>>>,
-    window_title: Mutex<Option<String>>,
+    scope: Mutex<Option<WindowScope>>,
     keyboard_input: bool,
     timing: AccessibilityTiming,
     launch_timeout: Duration,
@@ -55,7 +57,7 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
         Self {
             connector: Box::new(connector),
             backend: Mutex::new(None),
-            window_title: Mutex::new(None),
+            scope: Mutex::new(None),
             keyboard_input,
             timing,
             launch_timeout,
@@ -63,16 +65,30 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
     }
 
     pub fn window_title(&self) -> Option<String> {
-        self.window_title
+        self.scope().map(|scope| scope.title)
+    }
+
+    fn scope(&self) -> Option<WindowScope> {
+        self.scope
             .lock()
-            .map(|title| title.clone())
+            .map(|scope| scope.clone())
             .unwrap_or_default()
     }
 
-    fn set_window_title(&self, title: String) {
-        if let Ok(mut current) = self.window_title.lock() {
-            *current = Some(title);
+    fn set_scope(&self, scope: WindowScope) {
+        if let Ok(mut current) = self.scope.lock() {
+            *current = Some(scope);
         }
+    }
+
+    /// Record a window found without AT-SPI (the X11 `wmctrl` fallback), so a
+    /// later step reports the real problem — no accessibility bus — rather
+    /// than asking for a window scope that was just established.
+    pub fn set_window_title_without_process(&self, title: String) {
+        self.set_scope(WindowScope {
+            title,
+            process_id: None,
+        });
     }
 
     fn backend(&self) -> AdapterResult<Arc<B>> {
@@ -92,9 +108,14 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
         run: impl FnOnce(&AccessibilityExecutor<'_, B>) -> AdapterResult<T>,
     ) -> AdapterResult<T> {
         let backend = self.backend()?;
-        let executor =
-            AccessibilityExecutor::new(backend.as_ref(), self.window_title(), self.timing)
-                .with_keyboard_input(self.keyboard_input);
+        let scope = self.scope();
+        let executor = AccessibilityExecutor::new(
+            backend.as_ref(),
+            scope.as_ref().map(|scope| scope.title.clone()),
+            self.timing,
+        )
+        .with_keyboard_input(self.keyboard_input)
+        .with_scope_process(scope.and_then(|scope| scope.process_id));
         let result = run(&executor);
         if result.is_err() {
             // A dropped bus connection must not poison every later step.
@@ -110,7 +131,6 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
     pub fn handles(step: &RunnerStep) -> bool {
         match step.required_capability.as_str() {
             "linux.click_element" | "linux.type_text" => target_is_resolvable(&step.target),
-            "linux.read_text" => target_is_resolvable(&step.target),
             "linux.wayland.accessibility_tree" | "linux.wayland.assert_visible" => true,
             capability => ATSPI_CAPABILITIES.contains(&capability),
         }
@@ -136,11 +156,16 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
             "linux.open_app" => self.open_app(step),
             "linux.find_window" => {
                 let title = window_title_for(step)?;
+                // A new lookup replaces the scope, including its process.
+                if let Ok(mut current) = self.scope.lock() {
+                    *current = None;
+                }
                 let found = self.with_executor(|executor| {
-                    executor.wait_for_window(&title, None, executor_find_timeout(self))
+                    executor.wait_for_scope(&title, executor_find_timeout(self))
                 })?;
-                self.set_window_title(found.clone());
-                Ok(format!("found accessible window {found:?}"))
+                let message = format!("found accessible window {:?}", found.title);
+                self.set_scope(found);
+                Ok(message)
             }
             "linux.read_window_tree" | "linux.wayland.accessibility_tree" => {
                 self.with_executor(|executor| executor.dump_tree())
@@ -156,7 +181,12 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
                 self.require_window_scope(step)?;
                 self.with_executor(|executor| executor.type_text(step))
             }
-            "linux.read_text" => self.with_executor(|executor| executor.read_text(step)),
+            "linux.read_text" if target_is_resolvable(&step.target) => {
+                self.with_executor(|executor| executor.read_text(step))
+            }
+            "linux.read_text" => self
+                .with_executor(|executor| executor.visible_texts())
+                .map(|texts| texts.join("\n")),
             other => Err(AdapterError::UnsupportedCapability(other.to_owned())),
         }
     }
@@ -184,29 +214,68 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
     }
 
     fn open_app(&self, step: &RunnerStep) -> AdapterResult<String> {
-        let title = crate::accessibility::locator::target_is_resolvable(&step.target)
-            .then(|| target_title(&step.target))
-            .flatten();
+        let title = target_title(&step.target);
         if let Some(title) = &title {
-            let running = self.with_executor(|executor| executor.windows_matching(title))?;
-            if let Some((_, name)) = running.into_iter().next() {
-                self.set_window_title(name.clone());
+            if let Ok(mut current) = self.scope.lock() {
+                *current = None;
+            }
+            // Reuse only a window whose title is exactly the requested one,
+            // owned by a single process; a substring such as a browser tab
+            // titled after the app must not stand in for it.
+            let running = self.with_executor(|executor| {
+                let windows = executor.windows_matching(title)?;
+                let exact = windows
+                    .into_iter()
+                    .filter(|(_, name)| window_title_equals(name, title))
+                    .map(|(window, name)| (executor_process(executor, &window), name))
+                    .collect::<Vec<_>>();
+                Ok(exact)
+            })?;
+            let mut processes = running
+                .iter()
+                .map(|(process, _)| *process)
+                .collect::<Vec<_>>();
+            processes.sort_unstable();
+            processes.dedup();
+            if let ([process], Some((_, name))) = (processes.as_slice(), running.first()) {
+                let name = name.clone();
+                self.set_scope(WindowScope {
+                    title: name.clone(),
+                    process_id: *process,
+                });
                 return Ok(format!("application window {name:?} is already open"));
             }
         }
         let value = step.value.as_deref().unwrap_or_default();
         let command = resolve_launch_command(value)?;
-        let process_id = spawn_detached(&command)?;
-        let found = self.with_executor(|executor| match &title {
-            Some(title) => executor.wait_for_window(title, Some(process_id), self.launch_timeout),
-            None => executor.wait_for_process_window(process_id, self.launch_timeout),
+        let mut child = spawn_detached(&command)?;
+        let process_id = child.id();
+        let found = self.with_executor(|executor| {
+            executor.wait_for_launched_window(
+                title.as_deref(),
+                process_id,
+                self.launch_timeout,
+                || match child.try_wait() {
+                    Ok(Some(status)) => Some(status.to_string()),
+                    Ok(None) => None,
+                    Err(error) => Some(format!("could not query the process: {error}")),
+                },
+            )
         })?;
-        self.set_window_title(found.clone());
-        Ok(format!(
-            "launched {} (pid {process_id}); accessible window {found:?} is open",
-            command.program
-        ))
+        let message = format!(
+            "launched {} (pid {process_id}); accessible window {:?} is open",
+            command.program, found.title
+        );
+        self.set_scope(found);
+        Ok(message)
     }
+}
+
+fn executor_process<B: AccessibleBackend>(
+    executor: &AccessibilityExecutor<'_, B>,
+    window: &B::Handle,
+) -> Option<u32> {
+    executor.process_of(window)
 }
 
 /// `GREENTIC_LINUX_ATSPI_TRACE=1` prints every AT-SPI step and its result to

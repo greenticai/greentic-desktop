@@ -536,7 +536,11 @@ impl DesktopAdapter for LinuxX11Adapter {
                             .to_string()
                             .contains("accessibility bus is unavailable") =>
                 {
-                    execute_x11_step(&step)?
+                    let message = execute_x11_step(&step)?;
+                    if let Some(title) = step.value.clone() {
+                        self.accessibility.set_window_title_without_process(title);
+                    }
+                    message
                 }
                 result => result?,
             }

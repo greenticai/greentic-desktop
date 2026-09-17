@@ -38,6 +38,7 @@ pub fn node(role: &str, name: &str) -> FixtureNode {
             states: NodeStates {
                 showing: true,
                 visible: true,
+                active: true,
                 enabled: true,
                 ..NodeStates::default()
             },
@@ -118,6 +119,13 @@ impl FixtureTree {
 
     pub fn set_process_id(&mut self, index: usize, process_id: u32) {
         self.nodes.get_mut().expect("fixture mutex")[index].process_id = Some(process_id);
+    }
+
+    pub fn set_active(&mut self, index: usize, active: bool) {
+        self.nodes.get_mut().expect("fixture mutex")[index]
+            .info
+            .states
+            .active = active;
     }
 
     pub fn fail_children(&mut self, index: usize) {
@@ -211,9 +219,8 @@ impl AccessibleBackend for FixtureTree {
                     .iter()
                     .find(|action| action.eq_ignore_ascii_case(wanted))
             })
-            .or(actions.first())
             .cloned()
-            .ok_or_else(|| AdapterError::ExecutionFailed("node has no actions".to_owned()))?;
+            .ok_or_else(|| AdapterError::ExecutionFailed("no preferred action".to_owned()))?;
         if let Some(popup) = nodes[*node].opens_popup {
             Self::set_showing(&mut nodes, popup, true);
         }
@@ -260,6 +267,10 @@ impl AccessibleBackend for FixtureTree {
     }
 
     fn grab_focus(&self, node: &usize) -> AdapterResult<()> {
+        self.nodes.lock().expect("fixture mutex")[*node]
+            .info
+            .states
+            .focused = true;
         self.record(format!("focus {node}"));
         Ok(())
     }

@@ -131,8 +131,10 @@ fn text_match<H>(node: &SnapshotNode<H>, query: &str) -> Option<TextMatch> {
     best
 }
 
-/// Score a node against one strategy. `None` means it does not match.
-fn score<H>(node: &SnapshotNode<H>, strategy: &LocatorStrategy) -> Option<u32> {
+/// Score a node against one strategy. `None` means it does not match. The
+/// flag is true when the match is *definite*: every name/label/text query
+/// matched exactly, or the identifier matched.
+fn score<H>(node: &SnapshotNode<H>, strategy: &LocatorStrategy) -> Option<(u32, bool)> {
     let role = non_empty(strategy.role.as_ref());
     let semantic = [
         non_empty(strategy.name.as_ref()),
@@ -150,15 +152,20 @@ fn score<H>(node: &SnapshotNode<H>, strategy: &LocatorStrategy) -> Option<u32> {
         }
     }
     let mut total = 0;
+    let mut all_exact = true;
     for query in semantic.into_iter().flatten() {
         total += match text_match(node, query)? {
             TextMatch::Exact => 20,
-            TextMatch::Contains => 10,
+            TextMatch::Contains => {
+                all_exact = false;
+                10
+            }
         };
     }
     let has_semantic = total > 0;
+    let mut id_matches = false;
     if let Some(automation_id) = automation_id {
-        let id_matches = node.info.identifier() == Some(automation_id);
+        id_matches = node.info.identifier() == Some(automation_id);
         if id_matches {
             total += 40;
         } else if !has_semantic {
@@ -168,7 +175,7 @@ fn score<H>(node: &SnapshotNode<H>, strategy: &LocatorStrategy) -> Option<u32> {
     if node.info.states.showing {
         total += 2;
     }
-    Some(total)
+    Some((total, all_exact || id_matches))
 }
 
 /// Best node for one strategy, or `None`.
@@ -182,7 +189,15 @@ pub fn find_by_strategy<H>(
     snapshot: &TreeSnapshot<H>,
     strategy: &LocatorStrategy,
 ) -> Option<usize> {
-    best_match(snapshot, strategy).or_else(|| {
+    find_by_strategy_with(snapshot, strategy, false)
+}
+
+fn find_by_strategy_with<H>(
+    snapshot: &TreeSnapshot<H>,
+    strategy: &LocatorStrategy,
+    definite_only: bool,
+) -> Option<usize> {
+    best_match(snapshot, strategy, definite_only).or_else(|| {
         let has_semantic = [&strategy.name, &strategy.label, &strategy.text]
             .into_iter()
             .any(|field| non_empty(field.as_ref()).is_some());
@@ -195,14 +210,21 @@ pub fn find_by_strategy<H>(
                 text: None,
                 ..strategy.clone()
             })
-            .and_then(|identifier_only| best_match(snapshot, &identifier_only))
+            .and_then(|identifier_only| best_match(snapshot, &identifier_only, definite_only))
     })
 }
 
-fn best_match<H>(snapshot: &TreeSnapshot<H>, strategy: &LocatorStrategy) -> Option<usize> {
+fn best_match<H>(
+    snapshot: &TreeSnapshot<H>,
+    strategy: &LocatorStrategy,
+    definite_only: bool,
+) -> Option<usize> {
     let mut best: Option<(u32, usize)> = None;
     for (index, node) in snapshot.nodes.iter().enumerate() {
-        if let Some(points) = score(node, strategy) {
+        if let Some((points, definite)) = score(node, strategy) {
+            if definite_only && !definite {
+                continue;
+            }
             if best.is_none_or(|(best_points, _)| points > best_points) {
                 best = Some((points, index));
             }
@@ -213,16 +235,41 @@ fn best_match<H>(snapshot: &TreeSnapshot<H>, strategy: &LocatorStrategy) -> Opti
 
 /// Resolve a runner target: preferred strategy first, then fallback.
 pub fn resolve_target<H>(snapshot: &TreeSnapshot<H>, target: &LocatorTarget) -> Option<usize> {
+    resolve_target_with(snapshot, target, false)
+}
+
+/// Like [`resolve_target`] but accepting only definite matches (exact names
+/// or a matching identifier). Actions wait for one of these, so a button
+/// whose name merely *contains* the query cannot be clicked while the page is
+/// still rendering the intended one.
+pub fn resolve_target_definite<H>(
+    snapshot: &TreeSnapshot<H>,
+    target: &LocatorTarget,
+) -> Option<usize> {
+    resolve_target_with(snapshot, target, true)
+}
+
+fn resolve_target_with<H>(
+    snapshot: &TreeSnapshot<H>,
+    target: &LocatorTarget,
+    definite_only: bool,
+) -> Option<usize> {
     target
         .preferred
         .as_ref()
-        .and_then(|strategy| find_by_strategy(snapshot, strategy))
+        .and_then(|strategy| find_by_strategy_with(snapshot, strategy, definite_only))
         .or_else(|| {
             target
                 .fallback
                 .as_ref()
-                .and_then(|strategy| find_by_strategy(snapshot, strategy))
+                .and_then(|strategy| find_by_strategy_with(snapshot, strategy, definite_only))
         })
+}
+
+/// Exact comparison for verifying what was typed: only surrounding
+/// whitespace and AT-SPI embedded-object characters are ignored. Case matters.
+pub fn text_equals(observed: &str, expected: &str) -> bool {
+    observed.replace('\u{fffc}', "").trim() == expected.trim()
 }
 
 /// True when the target carries at least one field this matcher reads.

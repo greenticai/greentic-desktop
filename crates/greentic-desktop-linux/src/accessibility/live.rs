@@ -192,8 +192,16 @@ impl AccessibleBackend for AtspiBackend {
                 .await
                 .map(|attributes| attributes.into_iter().collect())
                 .unwrap_or_default();
-            let interfaces = proxy.get_interfaces().await.unwrap_or_default();
-            let states = proxy.get_state().await.unwrap_or_default();
+            // Interfaces and states decide what the executor may do with the
+            // node; a failed read must not masquerade as "no EditableText".
+            let interfaces = proxy
+                .get_interfaces()
+                .await
+                .map_err(|error| failed("GetInterfaces", error))?;
+            let states = proxy
+                .get_state()
+                .await
+                .map_err(|error| failed("GetState", error))?;
             let text = if interfaces.contains(Interface::Text) {
                 let text_proxy = object_proxy!(TextProxy, &self.connection, node);
                 text_proxy.get_text(0, -1).await.ok()
@@ -208,6 +216,7 @@ impl AccessibleBackend for AtspiBackend {
                 attributes,
                 states: NodeStates {
                     showing: states.contains(State::Showing),
+                    active: states.contains(State::Active),
                     visible: states.contains(State::Visible),
                     enabled: states.contains(State::Enabled),
                     focused: states.contains(State::Focused),
@@ -257,7 +266,11 @@ impl AccessibleBackend for AtspiBackend {
                         .iter()
                         .position(|name| name.eq_ignore_ascii_case(wanted))
                 })
-                .unwrap_or(0);
+                .ok_or_else(|| {
+                    AdapterError::ExecutionFailed(format!(
+                        "AT-SPI element offers actions {names:?}, none of which is one of {preferred:?}; nothing was invoked."
+                    ))
+                })?;
             let done = proxy
                 .do_action(index as i32)
                 .await

@@ -87,14 +87,20 @@ impl<B: AccessibleBackend> AccessibilityExecutor<'_, B> {
         };
         self.backend
             .perform_action(&popup.node(option).handle, OPTION_ACTIONS)?;
+        self.wait_popup_closed()?;
 
-        let (popup, options) = self.open_popup(choice)?;
+        let (popup, options) = self.open_popup(choice).map_err(|error| {
+            AdapterError::ExecutionFailed(format!(
+                "AT-SPI option {value:?} was activated but the selection could not be verified: reopening the control failed ({error})."
+            ))
+        })?;
         let selected = options
             .iter()
             .copied()
             .find(|option| popup.node(*option).info.states.selected)
             .map(|option| popup.node(option).info.readable_text());
         self.close_popup(&popup, &options);
+        self.wait_popup_closed()?;
         match selected {
             Some(current) if values_match(&current, value) => {
                 Ok(format!("selected AT-SPI popup option {current:?}"))
@@ -138,8 +144,27 @@ impl<B: AccessibleBackend> AccessibilityExecutor<'_, B> {
         })
     }
 
+    /// Fail unless every popup with options has closed: an open popup would
+    /// swallow the next step's input.
+    fn wait_popup_closed(&self) -> AdapterResult<()> {
+        let closed = self.poll(self.timing.action_timeout, || {
+            let still_open = self.popup_snapshots()?.iter().any(|popup| {
+                popup
+                    .nodes
+                    .iter()
+                    .any(|node| node.info.states.showing && role_matches("option", &node.info.role))
+            });
+            Ok((!still_open).then_some(()))
+        })?;
+        closed.ok_or_else(|| {
+            AdapterError::ExecutionFailed(
+                "AT-SPI choice popup did not close after activating an option.".to_owned(),
+            )
+        })
+    }
+
     /// Close an open popup without changing the value: activate the option
-    /// that is already selected. Best effort.
+    /// that is already selected. The caller verifies that it closed.
     fn close_popup(&self, popup: &TreeSnapshot<B::Handle>, options: &[usize]) {
         if let Some(selected) = options
             .iter()
@@ -155,13 +180,24 @@ impl<B: AccessibleBackend> AccessibilityExecutor<'_, B> {
     /// scope is set, only windows of the scoped window's own process count, so
     /// another application's dialog can never be mistaken for the popup.
     fn popup_snapshots(&self) -> AdapterResult<Vec<TreeSnapshot<B::Handle>>> {
-        let scope_processes = match self.window_title.as_deref() {
-            Some(title) => self
-                .windows_matching(title)?
-                .iter()
-                .filter_map(|(window, _)| self.backend.process_id(window))
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
+        let scope_processes = match (self.scope_process, self.window_title.as_deref()) {
+            (Some(process), _) => vec![process],
+            (None, Some(title)) => {
+                let processes = self
+                    .windows_matching(title)?
+                    .iter()
+                    .filter_map(|(window, _)| self.backend.process_id(window))
+                    .collect::<Vec<_>>();
+                if processes.is_empty() {
+                    // Widening the search to every application could activate
+                    // an option in someone else's window.
+                    return Err(AdapterError::ExecutionFailed(format!(
+                        "Could not resolve the process owning window {title:?}, so its choice popup cannot be told apart from other applications' windows."
+                    )));
+                }
+                processes
+            }
+            (None, None) => Vec::new(),
         };
         let mut popups = Vec::new();
         for application in self.backend.applications()? {

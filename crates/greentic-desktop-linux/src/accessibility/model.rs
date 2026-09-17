@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 pub struct NodeStates {
     pub showing: bool,
     pub visible: bool,
+    /// The window is the active (input-focused) top-level window.
+    pub active: bool,
     pub enabled: bool,
     pub focused: bool,
     pub editable: bool,

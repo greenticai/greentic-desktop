@@ -41,14 +41,16 @@ Use this adapter for:
 
 | Capability | Backend | Behaviour |
 | --- | --- | --- |
-| `linux.open_app` | process spawn + AT-SPI | `value` is an executable, an absolute path, or a `.desktop` entry (id or path, resolved through `XDG_DATA_HOME`/`XDG_DATA_DIRS`). When the target names a window that is already open it is reused; otherwise the program is spawned with `NO_AT_BRIDGE`/`GTK_A11Y` removed and the adapter waits for its accessible window (`GREENTIC_LINUX_ATSPI_LAUNCH_TIMEOUT_MS`, default 30 s). |
-| `linux.find_window` | AT-SPI, `wmctrl` fallback | Waits for a top-level window whose name contains the title and scopes every later step to it. Falls back to `wmctrl` only when no accessibility bus exists. |
+| `linux.open_app` | process spawn + AT-SPI | `value` is an executable, an absolute path, or a `.desktop` entry (id or path, resolved through `XDG_DATA_HOME`/`XDG_DATA_DIRS`). A window whose title *equals* the target name, owned by one process, is reused; otherwise the program is spawned with `NO_AT_BRIDGE`/`GTK_A11Y` removed and the adapter waits for a window of that process (or, for launchers that hand off, an exact title match), failing early with the exit status if the process dies (`GREENTIC_LINUX_ATSPI_LAUNCH_TIMEOUT_MS`, default 30 s). |
+| `linux.find_window` | AT-SPI, `wmctrl` fallback | Waits for a top-level window whose name contains the title (exact matches win) and scopes every later step to that window's process; a title matching windows of several processes is refused. Falls back to `wmctrl` only when no accessibility bus exists. |
 | `linux.find_element`, `linux.assert_visible` | AT-SPI | Polls until the locator resolves (`GREENTIC_LINUX_ATSPI_FIND_TIMEOUT_MS`, default 15 s). With no locator fields the step value is searched as a name. |
-| `linux.click_element` | AT-SPI Action | Invokes `click`/`press`/`activate`. A target with only a `region` still uses `xdotool` coordinates. |
-| `linux.type_text` | AT-SPI | EditableText when the control has it; otherwise (WebKitGTK entries) focus, select the existing text and synthesize the string through the AT-SPI device event controller. The value is read back and must match. Combo boxes are handled as selections, below. An untargeted step still types into the focused window through `xdotool`. |
+| `linux.click_element` | AT-SPI Action | Invokes `click`/`press`/`activate`/`check`/`toggle`/`select`, and nothing else. Until the action timeout only definite matches (exact name or matching id) are clicked; a substring match is accepted only at the end. A target with only a `region` still uses `xdotool` coordinates. |
+| `linux.type_text` | AT-SPI | EditableText when the control has it; otherwise (WebKitGTK entries) focus, select the existing text and synthesize the string through the AT-SPI device event controller — only after the control reports focus and the scoped window is active, so keystrokes cannot reach another window. The value is read back and must match exactly (case-sensitive). Combo boxes are handled as selections, below. An untargeted step still types into the focused window through `xdotool`. |
 | `linux.read_text` | AT-SPI | Reads Text contents or the name. A caption ending in `:` yields the next sibling's text. With `value: outputs.<name>` the result is emitted as `<name with spaces>: <text>`, which replay extracts into the output. |
 | `linux.read_window_tree` | AT-SPI | Indented `role "name" #id` dump of the scoped window. |
 | `linux.press_shortcut`, `linux.activate_window`, `linux.close_window`, `linux.screenshot` | `xdotool`, `wmctrl`, `xcap` | X11 only. |
+
+Popup options are only taken from windows of the scoped window's process; if that process cannot be resolved the selection is refused rather than searching every application. The popup must close after selection.
 
 Clicks and typing refuse to run until `linux.open_app` or `linux.find_window` has scoped the session to one window, so a locator such as `name: Close` can never act on another application.
 

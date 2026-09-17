@@ -14,6 +14,8 @@ mod unavailable;
 mod fixture;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_safety;
 
 pub use executor::{AccessibilityExecutor, AccessibilityTiming};
 #[cfg(target_os = "linux")]

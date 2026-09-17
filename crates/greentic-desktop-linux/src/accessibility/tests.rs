@@ -551,11 +551,12 @@ fn a_missing_window_is_reported_instead_of_searching_everything() {
 fn wait_for_window_prefers_the_spawned_process() {
     let fixture = meridian();
     let found = executor(&fixture)
-        .wait_for_window("Broker Workstation", Some(4242), std::time::Duration::ZERO)
+        .wait_for_scope("Broker Workstation", std::time::Duration::ZERO)
         .expect("window");
-    assert_eq!(found, TITLE);
+    assert_eq!(found.title, TITLE);
+    assert_eq!(found.process_id, Some(4242));
     assert!(executor(&fixture)
-        .wait_for_window("Nope", None, std::time::Duration::ZERO)
+        .wait_for_scope("Nope", std::time::Duration::ZERO)
         .is_err());
 }
 
@@ -693,12 +694,31 @@ fn an_unknown_popup_option_is_reported_with_the_available_choices() {
 fn wait_for_process_window_names_the_spawned_process_window() {
     let fixture = meridian();
     let found = executor(&fixture)
-        .wait_for_process_window(4242, std::time::Duration::ZERO)
+        .wait_for_launched_window(None, 4242, std::time::Duration::ZERO, || None)
         .expect("process window");
-    assert_eq!(found, TITLE);
+    assert_eq!(found.title, TITLE);
     assert!(executor(&fixture)
-        .wait_for_process_window(1, std::time::Duration::ZERO)
+        .wait_for_launched_window(None, 1, std::time::Duration::ZERO, || None)
         .is_err());
+    let exited = executor(&fixture)
+        .wait_for_launched_window(None, 1, std::time::Duration::ZERO, || {
+            Some("exit status: 127".to_owned())
+        })
+        .expect_err("exited process");
+    assert!(exited.to_string().contains("exited"), "{exited}");
+    // Another process's window only counts on an exact title.
+    assert!(executor(&fixture)
+        .wait_for_launched_window(
+            Some("Broker Workstation"),
+            1,
+            std::time::Duration::ZERO,
+            || None
+        )
+        .is_err());
+    let exact = executor(&fixture)
+        .wait_for_launched_window(Some(TITLE), 1, std::time::Duration::ZERO, || None)
+        .expect("exact title from a launcher child");
+    assert_eq!(exact.process_id, Some(4242));
 }
 
 #[test]

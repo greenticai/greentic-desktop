@@ -46,9 +46,11 @@ rsync -a --delete --exclude node_modules --exclude src-tauri/target --exclude di
 docker run --rm "${dns_args[@]}" \
   -e SESSION_TYPE="$SESSION_TYPE" -e EXTRACTION="$EXTRACTION" \
   -e GREENTIC_LINUX_ATSPI_KEYBOARD="${GREENTIC_LINUX_ATSPI_KEYBOARD:-}" \
-  -e GREENTIC_LINUX_ATSPI_TRACE=1 \
+  -e GREENTIC_LINUX_ATSPI_TRACE=1 -e HOST_OWNER="$(id -u):$(id -g)" \
   -v "$CACHE_DIR:/cache" -v "$ROOT/ci/linux_atspi:/scripts:ro" \
   "$IMAGE" bash -euo pipefail -c '
+    # Hand the cache back to the invoking user so the next run can rsync over it.
+    trap "chown -R \"\$HOST_OWNER\" /cache" EXIT
     source /root/.cargo/env
     export RUSTUP_HOME=/root/.rustup CARGO_HOME=/cache/cargo-home TMPDIR=/cache/tmp HOME=/cache/home
     (cd /cache/meridian && npm ci --no-audit --no-fund && npm run build \

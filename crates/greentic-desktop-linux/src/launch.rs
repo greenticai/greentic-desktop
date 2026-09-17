@@ -137,11 +137,11 @@ pub fn resolve_launch_command(value: &str) -> AdapterResult<LaunchCommand> {
 /// Spawn the command detached from the adapter's stdio, with accessibility
 /// explicitly enabled for GTK: `NO_AT_BRIDGE` and `GTK_A11Y=none` would stop
 /// the application from registering on the accessibility bus.
-pub fn spawn_detached(command: &LaunchCommand) -> AdapterResult<u32> {
+pub fn spawn_detached(command: &LaunchCommand) -> AdapterResult<std::process::Child> {
     // The program comes from the runner step or a desktop entry and is
     // executed directly with an argv array, never through a shell.
     // foxguard: ignore[rs/no-command-injection]
-    let child = Command::new(&command.program)
+    Command::new(&command.program)
         .args(&command.args)
         .env_remove("NO_AT_BRIDGE")
         .env_remove("GTK_A11Y")
@@ -151,8 +151,7 @@ pub fn spawn_detached(command: &LaunchCommand) -> AdapterResult<u32> {
         .spawn()
         .map_err(|error| {
             AdapterError::ExecutionFailed(format!("failed to launch {}: {error}", command.program))
-        })?;
-    Ok(child.id())
+        })
 }
 
 #[cfg(test)]
