@@ -21,8 +21,9 @@ use greentic_desktop_java::{
     JavaAccessBridgeRecordingBackend, JavaDesktopAdapter, JAVA_ADAPTER_ID,
 };
 use greentic_desktop_linux::{
-    detect_wayland_support, LinuxWaylandAdapter, LinuxWaylandRecordingBackend, LinuxX11Adapter,
-    LinuxX11RecordingBackend, WaylandCompositor, LINUX_WAYLAND_ADAPTER_ID, LINUX_X11_ADAPTER_ID,
+    at_spi_bus_available, detect_wayland_support, LinuxWaylandAdapter,
+    LinuxWaylandRecordingBackend, LinuxX11Adapter, LinuxX11RecordingBackend, WaylandCompositor,
+    LINUX_WAYLAND_ADAPTER_ID, LINUX_X11_ADAPTER_ID,
 };
 use greentic_desktop_llm::{
     is_openai_compatible_provider, known_providers, provider_by_id, HeuristicLlmClient,
@@ -3656,11 +3657,13 @@ fn replay_adapter_registry(state: &GuiApiState) -> AdapterRegistry {
         DesktopPlatform::Linux if state.platform == "linux" => {
             let platform = detect_platform();
             if platform.display_server.as_deref() == Some("wayland") {
+                // AT-SPI is D-Bus, so element automation works on Wayland; report
+                // the bus as available only when it actually answers.
                 registry.insert(Arc::new(LinuxWaylandAdapter::new(detect_wayland_support(
                     &platform,
                     WaylandCompositor::Unknown,
                     false,
-                    false,
+                    at_spi_bus_available(Duration::from_millis(750)),
                 ))));
             } else {
                 registry.insert(Arc::new(LinuxX11Adapter::new(platform)));
@@ -8485,6 +8488,7 @@ steps:
         for yaml in [
             include_str!("../../../examples/runners/aws-demo-meridian-insurance.yaml"),
             include_str!("../../../examples/runners/aws-demo-macos-meridian-insurance.yaml"),
+            include_str!("../../../examples/runners/aws-demo-linux-meridian-insurance.yaml"),
         ] {
             let package = runner_package_from_yaml(yaml).expect("AWS demo runner should parse");
             let defaults = manifest_input_defaults(yaml);
@@ -8758,6 +8762,179 @@ steps:
 
         assert!(outcome.passed, "{:?}", outcome.failure_reason);
         eprintln!("AWS demo outputs: {}", outcome.outputs_json());
+        assert_eq!(
+            outcome.outputs.get("outputs.insurer").map(String::as_str),
+            Some("Meridian Commercial")
+        );
+        assert_eq!(
+            outcome.outputs.get("outputs.excess").map(String::as_str),
+            Some("£500")
+        );
+        assert!(outcome
+            .outputs
+            .get("outputs.quote_reference")
+            .is_some_and(|value| value.starts_with("BQ-")));
+    }
+
+    #[test]
+    fn aws_demo_linux_runner_targets_linux_atspi_capabilities() {
+        let yaml = include_str!("../../../examples/runners/aws-demo-linux-meridian-insurance.yaml");
+        let package = runner_package_from_yaml(yaml).expect("Linux AWS demo runner");
+        let macos = runner_package_from_yaml(include_str!(
+            "../../../examples/runners/aws-demo-macos-meridian-insurance.yaml"
+        ))
+        .expect("macOS AWS demo runner");
+
+        assert_eq!(
+            package.id,
+            "example.aws_demo_linux_meridian_insurance.create_quote"
+        );
+        assert_eq!(package.inputs, macos.inputs);
+        assert_eq!(package.outputs, macos.outputs);
+        let capabilities = greentic_desktop_linux::linux_x11_capabilities();
+        let wayland = greentic_desktop_linux::linux_wayland_capabilities();
+        for step in &package.steps {
+            assert!(
+                step.required_capability.starts_with("linux."),
+                "step {} uses {}",
+                step.id,
+                step.required_capability
+            );
+            assert!(
+                capabilities.supports(&step.required_capability),
+                "{}",
+                step.id
+            );
+            assert!(wayland.supports(&step.required_capability), "{}", step.id);
+        }
+        assert_eq!(
+            package
+                .steps
+                .first()
+                .map(|step| step.required_capability.as_str()),
+            Some("linux.open_app")
+        );
+        assert_eq!(
+            package.steps.last().map(|step| step.id.as_str()),
+            Some("close-quotation-result")
+        );
+        let linux_defaults = manifest_input_defaults(yaml);
+        let macos_defaults = manifest_input_defaults(include_str!(
+            "../../../examples/runners/aws-demo-macos-meridian-insurance.yaml"
+        ));
+        for (input, value) in &macos_defaults {
+            if input != "inputs.app_path" {
+                assert_eq!(linux_defaults.get(input), Some(value), "{input}");
+            }
+        }
+    }
+
+    fn linux_meridian_app_path() -> String {
+        std::env::var("GREENTIC_MERIDIAN_APP")
+            .unwrap_or_else(|_| "aws-demo-meridian-insurance".to_owned())
+    }
+
+    fn dump_linux_meridian_tree() {
+        use greentic_desktop_adapter::DesktopAdapter;
+        let adapter = LinuxX11Adapter::new(detect_platform());
+        for (capability, value) in [
+            ("linux.find_window", Some("Meridian Commercial Insurance")),
+            ("linux.read_window_tree", None),
+        ] {
+            match adapter.execute(RunnerStep {
+                id: "diagnostic".to_owned(),
+                action: capability.trim_start_matches("linux.").to_owned(),
+                target: LocatorTarget::default(),
+                value: value.map(str::to_owned),
+                required_capability: capability.to_owned(),
+            }) {
+                Ok(result) => eprintln!("{capability}:\n{}", result.message),
+                Err(error) => eprintln!("{capability} failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux X11 with an AT-SPI bus and the Meridian app (GREENTIC_MERIDIAN_APP); see docs/adapters/linux-x11.md"]
+    fn aws_demo_linux_live_replay() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/runners/aws-demo-linux-meridian-insurance.yaml");
+        let yaml = std::fs::read_to_string(&path).expect("Linux AWS demo runner");
+        let runner = runner_file_for_yaml_path(&path, &yaml).expect("runner file");
+        let state = GuiApiState {
+            platform: "linux".to_owned(),
+            ..GuiApiState::default()
+        };
+        let body =
+            serde_json::json!({ "inputs": { "app_path": linux_meridian_app_path() } }).to_string();
+
+        let result = match execute_runner(&state, &runner, "run", &body) {
+            Ok(result) => result,
+            Err(error) => {
+                dump_linux_meridian_tree();
+                panic!("live Linux AWS demo replay failed: {error}");
+            }
+        };
+        eprintln!("Linux AWS demo outputs: {}", result.outputs_json);
+        assert!(
+            result
+                .outputs_json
+                .contains(r#""outputs.public_liability_limit":"£2,000,000""#),
+            "runner input was not committed: {}",
+            result.outputs_json
+        );
+        assert!(
+            result
+                .outputs_json
+                .contains(r#""outputs.annual_premium":"£3,438.05""#),
+            "quote still used the application's demo values: {}",
+            result.outputs_json
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Meridian on Linux to be showing a completed quotation result"]
+    fn aws_demo_linux_live_result_extraction() {
+        let yaml = include_str!("../../../examples/runners/aws-demo-linux-meridian-insurance.yaml");
+        let mut package = runner_package_from_yaml(yaml).expect("Linux AWS demo runner");
+        package.steps.retain(|step| {
+            step.id == "open-meridian"
+                || step.id == "wait-for-quote-result"
+                || step.id == "assert-quote-successful"
+                || step.id.starts_with("read-")
+        });
+        let state = GuiApiState {
+            platform: "linux".to_owned(),
+            ..GuiApiState::default()
+        };
+        let registry = replay_adapter_registry(&state);
+        let mut inputs = manifest_input_defaults(yaml);
+        inputs.insert("inputs.app_path".to_owned(), linux_meridian_app_path());
+        let outcome = replay_with_context(
+            ReplayRequest {
+                adapters: registry.capabilities(),
+                package,
+                session_profile: SessionProfile {
+                    id: "aws-demo-linux-result-test".to_owned(),
+                    bootstrap: Vec::new(),
+                    teardown: Vec::new(),
+                },
+                inputs,
+                secrets: BTreeMap::new(),
+            },
+            &ReplayExecutionContext {
+                registry,
+                on_failure: OnFailure::Stop,
+                step_timeout: Some(Duration::from_secs(60)),
+                cancellation: None,
+            },
+        );
+
+        if !outcome.passed {
+            dump_linux_meridian_tree();
+        }
+        assert!(outcome.passed, "{:?}", outcome.failure_reason);
+        eprintln!("Linux AWS demo outputs: {}", outcome.outputs_json());
         assert_eq!(
             outcome.outputs.get("outputs.insurer").map(String::as_str),
             Some("Meridian Commercial")

@@ -900,6 +900,7 @@ pub fn built_in_extension(extension_id: &str) -> Option<ExtensionManifest> {
             command: None,
             args: Vec::new(),
             capabilities: vec![
+                "linux.open_app".to_owned(),
                 "linux.find_window".to_owned(),
                 "linux.read_window_tree".to_owned(),
                 "linux.find_element".to_owned(),
@@ -913,6 +914,7 @@ pub fn built_in_extension(extension_id: &str) -> Option<ExtensionManifest> {
             ],
             permissions: vec![
                 "desktop.x11".to_owned(),
+                "desktop.accessibility".to_owned(),
                 "desktop.window_management".to_owned(),
                 "desktop.screenshot".to_owned(),
                 "desktop.input".to_owned(),
@@ -932,6 +934,14 @@ pub fn built_in_extension(extension_id: &str) -> Option<ExtensionManifest> {
                 "linux.wayland.accessibility_tree".to_owned(),
                 "linux.wayland.assert_visible".to_owned(),
                 "linux.wayland.safe_keyboard_shortcut".to_owned(),
+                "linux.open_app".to_owned(),
+                "linux.find_window".to_owned(),
+                "linux.read_window_tree".to_owned(),
+                "linux.find_element".to_owned(),
+                "linux.click_element".to_owned(),
+                "linux.type_text".to_owned(),
+                "linux.read_text".to_owned(),
+                "linux.assert_visible".to_owned(),
             ],
             permissions: vec![
                 "desktop.wayland".to_owned(),
