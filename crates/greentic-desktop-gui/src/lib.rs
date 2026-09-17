@@ -8875,20 +8875,19 @@ steps:
                 panic!("live Linux AWS demo replay failed: {error}");
             }
         };
-        eprintln!("Linux AWS demo outputs: {}", result.outputs_json);
+        // The run's outputs derive from the request body, which can carry
+        // runner secrets, so they are compared but never echoed into the log.
         assert!(
             result
                 .outputs_json
                 .contains(r#""outputs.public_liability_limit":"£2,000,000""#),
-            "runner input was not committed: {}",
-            result.outputs_json
+            "runner input was not committed: public_liability_limit is not £2,000,000"
         );
         assert!(
             result
                 .outputs_json
                 .contains(r#""outputs.annual_premium":"£3,438.05""#),
-            "quote still used the application's demo values: {}",
-            result.outputs_json
+            "quote still used the application's demo values: annual_premium is not £3,438.05"
         );
     }
 
@@ -8934,7 +8933,6 @@ steps:
             dump_linux_meridian_tree();
         }
         assert!(outcome.passed, "{:?}", outcome.failure_reason);
-        eprintln!("Linux AWS demo outputs: {}", outcome.outputs_json());
         assert_eq!(
             outcome.outputs.get("outputs.insurer").map(String::as_str),
             Some("Meridian Commercial")
