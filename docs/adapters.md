@@ -54,8 +54,8 @@ Native desktop adapters use platform APIs where possible:
 
 - Windows uses UI Automation concepts.
 - macOS uses Accessibility-style app, window, and element operations.
-- Linux X11 uses window management, UI tree access, screenshots, and input.
-- Linux Wayland is intentionally more constrained and reports unsupported operations where the desktop environment does not allow safe automation.
+- Linux X11 uses AT-SPI (over D-Bus) for element lookup, clicks, typing and reads, plus window management, screenshots and XTest input.
+- Linux Wayland shares the AT-SPI element automation, but reports unsupported operations (global input, window control, keyboard synthesis) where the desktop environment does not allow safe automation.
 
 ## Terminal Systems
 

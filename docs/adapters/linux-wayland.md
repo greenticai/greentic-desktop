@@ -31,8 +31,14 @@ Wayland intentionally limits desktop automation. This adapter is a compatibility
 - `linux.wayland.accessibility_tree`
 - `linux.wayland.assert_visible`
 - `linux.wayland.safe_keyboard_shortcut`
+- `linux.open_app`, `linux.find_window`, `linux.read_window_tree`, `linux.find_element`, `linux.click_element`, `linux.type_text`, `linux.read_text`, `linux.assert_visible`
 
-Notably, this adapter does not expose unrestricted `linux.click_element` or `linux.type_text`.
+The `linux.*` element capabilities use the same AT-SPI executor as the X11 adapter (see [Linux X11](linux-x11.md#how-steps-execute)). AT-SPI is D-Bus, not global input, so tree reads, element actions, EditableText writes and option selection work on Wayland. What does not:
+
+- typing into a control without EditableText (WebKitGTK entries, for example) needs keyboard synthesis, which Wayland blocks. The step fails with that reason. For XWayland applications set `GREENTIC_LINUX_ATSPI_KEYBOARD=1` to allow it;
+- `linux.press_shortcut`, `linux.activate_window`, `linux.close_window` and `linux.screenshot` are not offered.
+
+The GUI reports `linux.wayland.*` accessibility as available only when an AT-SPI bus actually answers.
 
 ## Runner Planning
 

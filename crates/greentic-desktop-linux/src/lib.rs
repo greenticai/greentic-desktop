@@ -19,6 +19,69 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+pub mod accessibility;
+mod atspi_session;
+pub mod launch;
+
+pub use atspi_session::{AccessibilitySession, ATSPI_CAPABILITIES};
+
+#[cfg(target_os = "linux")]
+type LiveBackend = accessibility::AtspiBackend;
+#[cfg(not(target_os = "linux"))]
+type LiveBackend = accessibility::UnavailableBackend;
+
+/// Opens the real accessibility bus. Unit tests of this crate never do: the
+/// developer's own desktop is on that bus, and a locator test must not click
+/// or type into it.
+fn connect_live_backend() -> AdapterResult<LiveBackend> {
+    #[cfg(test)]
+    {
+        Err(AdapterError::ExecutionFailed(
+            "live AT-SPI access is disabled in unit tests".to_owned(),
+        ))
+    }
+    #[cfg(all(not(test), target_os = "linux"))]
+    {
+        accessibility::AtspiBackend::connect()
+    }
+    #[cfg(all(not(test), not(target_os = "linux")))]
+    {
+        Err(AdapterError::ExecutionFailed(
+            "Linux desktop automation can only run on Linux.".to_owned(),
+        ))
+    }
+}
+
+fn live_session(keyboard_input: bool) -> Arc<AccessibilitySession<LiveBackend>> {
+    Arc::new(AccessibilitySession::new(
+        connect_live_backend,
+        keyboard_input,
+        accessibility::AccessibilityTiming::from_env(),
+    ))
+}
+
+/// True when an AT-SPI bus answers within `timeout`. Used to report
+/// Wayland accessibility support honestly instead of assuming it.
+pub fn at_spi_bus_available(timeout: std::time::Duration) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        accessibility::AtspiBackend::probe(timeout)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = timeout;
+        false
+    }
+}
+
+/// Wayland blocks global input, so AT-SPI keyboard synthesis is off unless
+/// the operator opts in (for example for XWayland applications).
+fn wayland_keyboard_input_enabled() -> bool {
+    std::env::var("GREENTIC_LINUX_ATSPI_KEYBOARD")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 pub const LINUX_X11_ADAPTER_ID: &str = "greentic.desktop.linux.x11";
 pub const LINUX_WAYLAND_ADAPTER_ID: &str = "greentic.desktop.linux.wayland";
 pub const LINUX_X11_RECORDER_BACKEND_ID: &str = "greentic.recording.desktop.linux.x11";
@@ -29,6 +92,7 @@ pub fn linux_x11_capabilities() -> AdapterCapabilities {
         LINUX_X11_ADAPTER_ID,
         env!("CARGO_PKG_VERSION"),
         [
+            "linux.open_app",
             "linux.find_window",
             "linux.read_window_tree",
             "linux.find_element",
@@ -54,7 +118,9 @@ pub fn linux_wayland_capabilities() -> AdapterCapabilities {
             "linux.wayland.accessibility_tree",
             "linux.wayland.assert_visible",
             "linux.wayland.safe_keyboard_shortcut",
-        ],
+        ]
+        .into_iter()
+        .chain(ATSPI_CAPABILITIES.iter().copied()),
     )
 }
 
@@ -334,12 +400,14 @@ pub fn detect_wayland_support(
 pub struct LinuxX11Adapter {
     platform: PlatformInfo,
     state: Arc<Mutex<LinuxState>>,
+    accessibility: Arc<AccessibilitySession<LiveBackend>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LinuxWaylandAdapter {
     support: WaylandSupport,
     state: Arc<Mutex<WaylandState>>,
+    accessibility: Arc<AccessibilitySession<LiveBackend>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -357,6 +425,7 @@ impl LinuxX11Adapter {
         Self {
             platform,
             state: Arc::new(Mutex::new(LinuxState::default())),
+            accessibility: live_session(true),
         }
     }
 
@@ -388,6 +457,7 @@ impl LinuxWaylandAdapter {
         Self {
             support,
             state: Arc::new(Mutex::new(WaylandState::default())),
+            accessibility: live_session(wayland_keyboard_input_enabled()),
         }
     }
 
@@ -436,14 +506,14 @@ impl DesktopAdapter for LinuxX11Adapter {
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
         self.require_x11()?;
-        let windows = list_x11_windows()?;
-        let visible_text = read_at_spi_text()?;
+        let visible_text = self.accessibility.visible_texts()?;
         Ok(Observation {
             adapter_id: LINUX_X11_ADAPTER_ID.to_owned(),
             summary: format!(
-                "linux x11 session {} windows={}",
+                "linux x11 session {} window={:?} accessible_texts={}",
                 ctx.session_id,
-                windows.len()
+                self.accessibility.window_title(),
+                visible_text.len()
             ),
             visible_text,
         })
@@ -457,7 +527,26 @@ impl DesktopAdapter for LinuxX11Adapter {
         }
         self.require_x11()?;
 
-        let message = execute_x11_step(&step)?;
+        let message = if AccessibilitySession::<LiveBackend>::handles(&step) {
+            match self.accessibility.execute(&step) {
+                // Window-manager steps keep working on X11 without an AT-SPI bus.
+                Err(error)
+                    if step.required_capability == "linux.find_window"
+                        && error
+                            .to_string()
+                            .contains("accessibility bus is unavailable") =>
+                {
+                    let message = execute_x11_step(&step)?;
+                    if let Some(title) = step.value.clone() {
+                        self.accessibility.set_window_title_without_process(title);
+                    }
+                    message
+                }
+                result => result?,
+            }
+        } else {
+            execute_x11_step(&step)?
+        };
 
         self.state
             .lock()
@@ -485,9 +574,9 @@ impl DesktopAdapter for LinuxX11Adapter {
         self.require_x11()?;
 
         let passed = match assertion.required_capability.as_str() {
-            "linux.assert_visible" => read_at_spi_text()?
-                .iter()
-                .any(|value| value.contains(&assertion.expected)),
+            "linux.assert_visible" => self
+                .accessibility
+                .is_visible(&assertion.target, &assertion.expected)?,
             "linux.find_window" => list_x11_windows()?
                 .iter()
                 .any(|window| window.title.contains(&assertion.expected)),
@@ -522,8 +611,8 @@ impl DesktopAdapter for LinuxWaylandAdapter {
     }
 
     fn observe(&self, ctx: ObserveContext) -> AdapterResult<Observation> {
-        self.require_at_spi()?;
-        let visible_text = read_at_spi_text()?;
+        self.require_wayland()?;
+        let visible_text = self.accessibility.visible_texts()?;
         Ok(Observation {
             adapter_id: LINUX_WAYLAND_ADAPTER_ID.to_owned(),
             summary: format!(
@@ -557,13 +646,9 @@ impl DesktopAdapter for LinuxWaylandAdapter {
                 portal_screenshot(&path)?;
                 path.display().to_string()
             }
-            "linux.wayland.accessibility_tree" => {
+            "linux.wayland.accessibility_tree" | "linux.wayland.assert_visible" => {
                 self.require_at_spi()?;
-                format!("read {} AT-SPI text entries", read_at_spi_text()?.len())
-            }
-            "linux.wayland.assert_visible" => {
-                self.require_at_spi()?;
-                "Wayland AT-SPI assertion target checked".to_owned()
+                self.accessibility.execute(&step)?
             }
             "linux.wayland.safe_keyboard_shortcut" => {
                 self.require_wayland()?;
@@ -571,7 +656,10 @@ impl DesktopAdapter for LinuxWaylandAdapter {
                     "Wayland global keyboard injection is intentionally unsupported unless a compositor-specific portal is configured.".to_owned(),
                 ))?
             }
-            _ => String::new(),
+            _ => {
+                self.require_wayland()?;
+                self.accessibility.execute(&step)?
+            }
         };
 
         self.state
@@ -597,11 +685,11 @@ impl DesktopAdapter for LinuxWaylandAdapter {
                 assertion.required_capability,
             ));
         }
-        self.require_at_spi()?;
+        self.require_wayland()?;
 
-        let passed = read_at_spi_text()?
-            .iter()
-            .any(|value| value.contains(&assertion.expected));
+        let passed = self
+            .accessibility
+            .is_visible(&assertion.target, &assertion.expected)?;
 
         Ok(AssertionResult {
             assertion_id: assertion.id,
@@ -673,27 +761,6 @@ fn execute_x11_step(step: &RunnerStep) -> AdapterResult<String> {
             run_command("wmctrl", ["-a", title.as_str()])?;
             Ok(format!("activated X11 window {title}"))
         }
-        "linux.read_window_tree" => {
-            Ok(format!("read {} AT-SPI entries", read_at_spi_text()?.len()))
-        }
-        "linux.find_element" | "linux.assert_visible" => {
-            let expected = target_text(&step.target).or(step.value.clone()).ok_or_else(|| {
-                AdapterError::ExecutionFailed(
-                    "Linux AT-SPI locator requires accessible name, role, class, text, or step value."
-                        .to_owned(),
-                )
-            })?;
-            if read_at_spi_text()?
-                .iter()
-                .any(|value| value.contains(&expected))
-            {
-                Ok("found Linux AT-SPI element".to_owned())
-            } else {
-                Err(AdapterError::ExecutionFailed(format!(
-                    "No Linux AT-SPI element containing {expected} was visible."
-                )))
-            }
-        }
         "linux.type_text" => {
             let value = step.value.as_deref().unwrap_or_default();
             if step.target != LocatorTarget::default() {
@@ -731,7 +798,6 @@ fn execute_x11_step(step: &RunnerStep) -> AdapterResult<String> {
                 "clicked Linux target at {x},{y} through XTest/xdotool"
             ))
         }
-        "linux.read_text" => Ok(read_at_spi_text()?.join("\n")),
         "linux.screenshot" => {
             let path = step
                 .value
@@ -775,31 +841,6 @@ fn parse_wmctrl_window(line: &str) -> Option<LinuxWindow> {
         title,
         active: false,
     })
-}
-
-fn read_at_spi_text() -> AdapterResult<Vec<String>> {
-    let output =
-        run_optional_command("busctl", ["--user", "tree", "org.a11y.Bus"]).or_else(|_| {
-            run_optional_command(
-                "gdbus",
-                [
-                    "call",
-                    "--session",
-                    "--dest",
-                    "org.a11y.Bus",
-                    "--object-path",
-                    "/org/a11y/bus",
-                    "--method",
-                    "org.a11y.Bus.GetAddress",
-                ],
-            )
-        })?;
-    Ok(output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect())
 }
 
 fn linux_xdotool_key_sequence(shortcut: &str) -> AdapterResult<String> {
@@ -884,6 +925,7 @@ fn portal_screenshot(path: &Path) -> AdapterResult<()> {
     )))
 }
 
+#[cfg(test)]
 fn target_text(target: &LocatorTarget) -> Option<String> {
     target
         .preferred
@@ -942,10 +984,6 @@ fn parse_region_center(region: &str) -> Option<(u32, u32)> {
         return None;
     }
     Some((parts[0] + parts[2] / 2, parts[1] + parts[3] / 2))
-}
-
-fn run_optional_command<const N: usize>(program: &str, args: [&str; N]) -> AdapterResult<String> {
-    run_command(program, args)
 }
 
 fn run_command<const N: usize>(program: &str, args: [&str; N]) -> AdapterResult<String> {
@@ -1348,7 +1386,51 @@ mod tests {
         assert_eq!(capabilities.adapter_id, LINUX_WAYLAND_ADAPTER_ID);
         assert!(capabilities.supports("linux.wayland.detect"));
         assert!(capabilities.supports("linux.wayland.portal_screenshot"));
-        assert!(!capabilities.supports("linux.click_element"));
+        // Element actions go through AT-SPI (D-Bus), which Wayland allows.
+        assert!(capabilities.supports("linux.click_element"));
+        assert!(capabilities.supports("linux.type_text"));
+        assert!(capabilities.supports("linux.open_app"));
+        // Global input and window-manager control stay X11-only.
+        assert!(!capabilities.supports("linux.press_shortcut"));
+        assert!(!capabilities.supports("linux.activate_window"));
+        assert!(!capabilities.supports("linux.close_window"));
+    }
+
+    #[test]
+    fn atspi_steps_fail_closed_without_a_live_bus_in_unit_tests() {
+        let adapter = LinuxWaylandAdapter::new(detect_wayland_support(
+            &wayland_platform(),
+            WaylandCompositor::GnomeMutter,
+            true,
+            true,
+        ));
+        let error = adapter
+            .execute(RunnerStep {
+                id: "find".to_owned(),
+                action: "find_element".to_owned(),
+                target: stable_linux_target(&metadata()),
+                value: None,
+                required_capability: "linux.find_element".to_owned(),
+            })
+            .expect_err("unit tests never reach the developer's accessibility bus");
+        assert!(
+            error.to_string().contains("disabled in unit tests"),
+            "{error}"
+        );
+        assert!(AccessibilitySession::<LiveBackend>::handles(&RunnerStep {
+            id: "type".to_owned(),
+            action: "type_text".to_owned(),
+            target: stable_linux_target(&metadata()),
+            value: Some("x".to_owned()),
+            required_capability: "linux.type_text".to_owned(),
+        }));
+        assert!(!AccessibilitySession::<LiveBackend>::handles(&RunnerStep {
+            id: "type".to_owned(),
+            action: "type_text".to_owned(),
+            target: LocatorTarget::default(),
+            value: Some("x".to_owned()),
+            required_capability: "linux.type_text".to_owned(),
+        }));
     }
 
     #[test]

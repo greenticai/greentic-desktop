@@ -17,3 +17,7 @@ greentic-desktop-automation-foundation.workspace = true
 greentic-desktop-platform.workspace = true
 greentic-desktop-recorder.workspace = true
 greentic-desktop-workflow.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi.workspace = true
+zbus.workspace = true

@@ -113,6 +113,8 @@ rmcp = { version = "3", features = ["client", "server", "transport-io", "transpo
 rdev = "0.5"
 enigo = "0.6"
 xcap = { version = "0.9", features = ["image"] }
+atspi = { version = "0.30", default-features = false, features = ["connection", "proxies"] }
+zbus = { version = "5.5", default-features = false, features = ["async-io"] }
 schemars = "1.2"
 jsonschema = { version = "0.49", default-features = false, features = ["resolve-file"] }
 ed25519-dalek = "3"
