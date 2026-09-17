@@ -8,8 +8,8 @@
 use super::locator::{normalize_label, resolve_target, target_is_resolvable, values_match};
 use super::model::{AccessibleBackend, TreeSnapshot, WalkLimits};
 use super::operations::{
-    choice_value, choose_option, editable_target, is_choice_role, is_window_role, labeled_output,
-    read_value, window_title_matches,
+    editable_target, is_choice_role, is_window_role, labeled_output, read_value,
+    window_title_matches,
 };
 use greentic_desktop_adapter::{
     AdapterError, AdapterResult, LocatorStrategy, LocatorTarget, RunnerStep,
@@ -68,10 +68,11 @@ impl AccessibilityTiming {
 
 /// Executes AT-SPI runner steps scoped to one window.
 pub struct AccessibilityExecutor<'a, B: AccessibleBackend> {
-    backend: &'a B,
-    window_title: Option<String>,
-    timing: AccessibilityTiming,
-    limits: WalkLimits,
+    pub(super) backend: &'a B,
+    pub(super) window_title: Option<String>,
+    pub(super) timing: AccessibilityTiming,
+    pub(super) limits: WalkLimits,
+    pub(super) keyboard_input: bool,
 }
 
 impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
@@ -81,7 +82,16 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
             window_title,
             timing,
             limits: WalkLimits::default(),
+            keyboard_input: false,
         }
+    }
+
+    /// Allow typing through AT-SPI keyboard synthesis when a control has no
+    /// EditableText interface. Synthesis goes through XTest, so only X11
+    /// sessions should enable it.
+    pub fn with_keyboard_input(mut self, enabled: bool) -> Self {
+        self.keyboard_input = enabled;
+        self
     }
 
     /// Top-level windows whose name satisfies `title`, across all applications.
@@ -146,7 +156,7 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
             .collect()
     }
 
-    fn poll<T>(
+    pub(super) fn poll<T>(
         &self,
         timeout: Duration,
         mut attempt: impl FnMut() -> AdapterResult<Option<T>>,
@@ -242,15 +252,27 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
             return self.select_option(snapshot, index, value);
         }
         let node = snapshot.node(index);
-        if !node.info.interfaces.editable_text {
+        let method = if node.info.interfaces.editable_text {
+            let _ = self.backend.grab_focus(&node.handle);
+            self.backend.set_text_contents(&node.handle, value)?;
+            "EditableText"
+        } else if node.info.interfaces.text && self.keyboard_input {
+            // WebKitGTK entries implement Text but not EditableText: focus the
+            // field, select its contents and synthesize the string.
+            self.backend.replace_text_by_keyboard(&node.handle, value)?;
+            "keyboard synthesis"
+        } else {
             return Err(AdapterError::ExecutionFailed(format!(
-                "AT-SPI {} {:?} does not implement EditableText, so its contents cannot be set safely.",
+                "AT-SPI {} {:?} does not implement EditableText{}, so its contents cannot be set safely.",
                 node.info.role,
-                node.info.readable_text()
+                node.info.readable_text(),
+                if node.info.interfaces.text {
+                    " and keyboard synthesis is unavailable in this session (Wayland blocks global input)"
+                } else {
+                    ""
+                }
             )));
-        }
-        let _ = self.backend.grab_focus(&node.handle);
-        self.backend.set_text_contents(&node.handle, value)?;
+        };
         let handle = node.handle.clone();
         let observed = self.poll(self.timing.action_timeout, || {
             let fresh = self.backend.describe(&handle)?;
@@ -259,11 +281,11 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
         })?;
         match observed {
             Some(_) => Ok(format!(
-                "set AT-SPI text of {} to {value:?}",
+                "set AT-SPI text of {} to {value:?} via {method}",
                 node.info.role
             )),
             None => Err(AdapterError::ExecutionFailed(format!(
-                "AT-SPI text verification failed: expected {value:?}, observed {:?}.",
+                "AT-SPI text verification failed after {method}: expected {value:?}, observed {:?}.",
                 self.backend
                     .describe(&handle)
                     .ok()
@@ -271,53 +293,6 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
                     .unwrap_or_default()
             ))),
         }
-    }
-
-    fn select_option(
-        &self,
-        snapshot: TreeSnapshot<B::Handle>,
-        choice: usize,
-        value: &str,
-    ) -> AdapterResult<String> {
-        if values_match(&choice_value(&snapshot, choice), value) {
-            return Ok(format!("AT-SPI choice already shows {value:?}"));
-        }
-        let option = choose_option(&snapshot, choice, value).ok_or_else(|| {
-            AdapterError::ExecutionFailed(format!(
-                "AT-SPI choice {:?} has no option matching {value:?}.",
-                snapshot.node(choice).info.readable_text()
-            ))
-        })?;
-        let option_node = snapshot.node(option);
-        let parent = option_node.parent;
-        let selected_via_selection = parent
-            .filter(|parent| snapshot.node(*parent).info.interfaces.selection)
-            .and_then(|parent| {
-                let index = snapshot.index_in_parent(option)?;
-                self.backend
-                    .select_child(&snapshot.node(parent).handle, index)
-                    .ok()
-            })
-            .is_some();
-        if !selected_via_selection {
-            self.backend.perform_action(
-                &option_node.handle,
-                &["click", "press", "select", "activate"],
-            )?;
-        }
-        let choice_handle = snapshot.node(choice).handle.clone();
-        let observed = self.poll(self.timing.action_timeout, || {
-            let fresh = TreeSnapshot::capture(self.backend, &choice_handle, self.limits)?;
-            let current = choice_value(&fresh, 0);
-            Ok(values_match(&current, value).then_some(current))
-        })?;
-        observed
-            .map(|current| format!("selected AT-SPI option {current:?}"))
-            .ok_or_else(|| {
-                AdapterError::ExecutionFailed(format!(
-                    "AT-SPI option selection did not take effect: expected {value:?}."
-                ))
-            })
     }
 
     pub fn read_text(&self, step: &RunnerStep) -> AdapterResult<String> {

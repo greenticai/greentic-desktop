@@ -1,5 +1,6 @@
 //! AT-SPI element automation shared by the Linux X11 and Wayland adapters.
 
+mod choice;
 pub mod executor;
 pub mod locator;
 pub mod model;

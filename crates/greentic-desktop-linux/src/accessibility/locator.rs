@@ -12,7 +12,7 @@
 //! * `automation_id` compares against the toolkit id attribute. When the
 //!   strategy also carries a semantic field the id only ranks candidates —
 //!   name/label wins over identifier, mirroring the macOS adapter — otherwise
-//!   the id is required.
+//!   the id is required. If nothing satisfies the name, the id alone is tried.
 //! * Showing nodes rank above non-showing ones; remaining ties go to capture
 //!   order.
 
@@ -78,7 +78,7 @@ pub fn role_matches(query: &str, role: &str) -> bool {
         "radio" | "radiobutton" => &["radiobutton", "radiomenuitem"],
         "dialog" => &["dialog", "alert", "window", "frame"],
         "window" | "frame" => &["frame", "window", "dialog"],
-        "option" | "menuitem" | "listitem" => &["menuitem", "listitem", "option"],
+        "option" | "menuitem" | "listitem" => &["menuitem", "listitem", "option", "tablecell"],
         _ => return role_key == key,
     };
     accepted.contains(&role_key.as_str())
@@ -172,10 +172,34 @@ fn score<H>(node: &SnapshotNode<H>, strategy: &LocatorStrategy) -> Option<u32> {
 }
 
 /// Best node for one strategy, or `None`.
+///
+/// When a strategy pairs an identifier with a name/label/text and no node
+/// satisfies the name, a second pass accepts the identifier alone. Web
+/// toolkits often expose a value element (`<strong id="annual-premium">`)
+/// while flattening its caption away, so the name cannot match there even
+/// though the identifier is exact.
 pub fn find_by_strategy<H>(
     snapshot: &TreeSnapshot<H>,
     strategy: &LocatorStrategy,
 ) -> Option<usize> {
+    best_match(snapshot, strategy).or_else(|| {
+        let has_semantic = [&strategy.name, &strategy.label, &strategy.text]
+            .into_iter()
+            .any(|field| non_empty(field.as_ref()).is_some());
+        let has_identifier = non_empty(strategy.automation_id.as_ref()).is_some()
+            || non_empty(strategy.data_testid.as_ref()).is_some();
+        (has_semantic && has_identifier)
+            .then(|| LocatorStrategy {
+                name: None,
+                label: None,
+                text: None,
+                ..strategy.clone()
+            })
+            .and_then(|identifier_only| best_match(snapshot, &identifier_only))
+    })
+}
+
+fn best_match<H>(snapshot: &TreeSnapshot<H>, strategy: &LocatorStrategy) -> Option<usize> {
     let mut best: Option<(u32, usize)> = None;
     for (index, node) in snapshot.nodes.iter().enumerate() {
         if let Some(points) = score(node, strategy) {

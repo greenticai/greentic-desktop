@@ -11,6 +11,8 @@ const TITLE: &str = "Meridian Commercial Insurance – Broker Workstation";
 
 struct Meridian {
     tree: FixtureTree,
+    turnover_entry: usize,
+    activity_popup: usize,
     company_entry: usize,
     liability_menu: usize,
     other_close: usize,
@@ -26,8 +28,15 @@ fn meridian() -> Meridian {
         Some(other_frame),
         node("push button", "Close").clickable("press"),
     );
+    // Another application's window that happens to list a "Retail" cell.
+    let other_popup = tree.add(Some(other_app), node("window", ""));
+    tree.add(
+        Some(other_popup),
+        node("table cell", "Retail").clickable("activate"),
+    );
 
     let app = tree.add(None, node("application", "aws-demo-meridian-insurance"));
+    // Indices below assume the application root is node 5.
     tree.set_process_id(app, 4242);
     let frame = tree.add(Some(app), node("frame", TITLE));
     let doc = tree.add(Some(frame), node("document web", TITLE));
@@ -85,6 +94,31 @@ fn meridian() -> Meridian {
         );
     }
 
+    // WebKitGTK shape: entries implement Text but not EditableText, and a
+    // <select> exposes no options until its popup window is opened.
+    let turnover_entry = tree.add(
+        Some(grid),
+        node("entry", "Annual Turnover (£):*")
+            .id("annual-turnover")
+            .text(""),
+    );
+    let activity = tree.add(
+        Some(grid),
+        node("combo box", "Business Activity:*")
+            .id("business-activity")
+            .clickable("select"),
+    );
+    let activity_popup = tree.add(Some(app), node("window", ""));
+    let table = tree.add(Some(activity_popup), node("tree table", "").selection());
+    for (index, label) in ["-- Select activity --", "Manufacturing", "Retail"]
+        .iter()
+        .enumerate()
+    {
+        let cell = node("table cell", label).clickable("activate");
+        tree.add(Some(table), if index == 0 { cell.selected() } else { cell });
+    }
+    tree.link_popup(activity, activity_popup);
+
     let dialog = tree.add(Some(doc), node("dialog", "Quotation Result"));
     tree.add(Some(dialog), node("heading", "✓ QUOTE SUCCESSFUL"));
     let results = tree.add(Some(dialog), node("section", ""));
@@ -113,6 +147,10 @@ fn meridian() -> Meridian {
             },
         );
     }
+    tree.add(
+        Some(dialog),
+        node("unknown", "").id("monthly-premium").text("£286.50"),
+    );
     let result_close = tree.add(
         Some(dialog),
         node("push button", "Close")
@@ -121,6 +159,8 @@ fn meridian() -> Meridian {
     );
     Meridian {
         tree,
+        turnover_entry,
+        activity_popup,
         company_entry,
         liability_menu,
         other_close,
@@ -157,7 +197,7 @@ fn step(capability: &str, target: LocatorTarget, value: Option<&str>) -> RunnerS
 
 fn whole_tree(fixture: &Meridian) -> TreeSnapshot<usize> {
     // Application 1 is Meridian; capture from its root.
-    TreeSnapshot::capture(&fixture.tree, &3, WalkLimits::default()).expect("capture")
+    TreeSnapshot::capture(&fixture.tree, &5, WalkLimits::default()).expect("capture")
 }
 
 fn executor(fixture: &Meridian) -> AccessibilityExecutor<'_, FixtureTree> {
@@ -531,14 +571,15 @@ fn snapshot_skips_subtrees_that_vanish_mid_walk() {
         .all(|node| node.info.role != "menu item"));
     let limited = TreeSnapshot::capture(
         &fixture.tree,
-        &3,
+        &5,
         WalkLimits {
             max_depth: 1,
             max_nodes: 100,
         },
     )
     .expect("capture");
-    assert_eq!(limited.nodes.len(), 2);
+    // Application root plus its two top-level windows (frame and popup).
+    assert_eq!(limited.nodes.len(), 3);
 }
 
 #[test]
@@ -552,4 +593,98 @@ fn observations_list_visible_texts_once_and_dump_names_ids() {
         dump.contains("push button \"📄 New Quote\" #new-quote"),
         "{dump}"
     );
+}
+
+#[test]
+fn identifier_alone_resolves_when_the_caption_is_flattened_away() {
+    let fixture = meridian();
+    let snapshot = whole_tree(&fixture);
+    let index = find_by_strategy(
+        &snapshot,
+        &strategy(None, Some("Monthly Premium"), Some("monthly-premium")),
+    )
+    .expect("identifier fallback");
+    assert_eq!(read_value(&snapshot, index), "£286.50");
+    assert!(find_by_strategy(&snapshot, &strategy(None, Some("Monthly Premium"), None)).is_none());
+}
+
+#[test]
+fn text_only_entries_are_typed_by_keyboard_synthesis_when_allowed() {
+    let fixture = meridian();
+    let typed = step(
+        "linux.type_text",
+        target(
+            strategy(
+                Some("spinbutton"),
+                Some("Annual Turnover"),
+                Some("annual-turnover"),
+            ),
+            None,
+        ),
+        Some("750000"),
+    );
+    let refused = executor(&fixture)
+        .type_text(&typed)
+        .expect_err("keyboard disabled");
+    assert!(refused.to_string().contains("Wayland"), "{refused}");
+
+    let message = executor(&fixture)
+        .with_keyboard_input(true)
+        .type_text(&typed)
+        .expect("keyboard");
+    assert!(message.contains("keyboard synthesis"), "{message}");
+    let text = fixture
+        .tree
+        .with_node(fixture.turnover_entry, |node| node.info.text.clone());
+    assert_eq!(text.as_deref(), Some("750000"));
+}
+
+#[test]
+fn a_select_without_inline_options_is_chosen_through_its_popup_and_verified() {
+    let fixture = meridian();
+    let typed = step(
+        "linux.type_text",
+        target(
+            strategy(
+                Some("combobox"),
+                Some("Business Activity"),
+                Some("business-activity"),
+            ),
+            None,
+        ),
+        Some("Retail"),
+    );
+    let message = executor(&fixture).type_text(&typed).expect("popup select");
+    assert!(message.contains("Retail"), "{message}");
+    let log = fixture.tree.log.lock().expect("log").clone();
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert!(log[0].starts_with("action select on"), "{log:?}");
+    assert!(log[1].starts_with("action activate on"), "{log:?}");
+    assert!(log[2].starts_with("action select on"), "{log:?}");
+    assert_eq!(
+        log[1], log[3],
+        "popup closed by re-activating the selection"
+    );
+    assert!(!fixture
+        .tree
+        .with_node(fixture.activity_popup, |popup| popup.info.states.showing));
+}
+
+#[test]
+fn an_unknown_popup_option_is_reported_with_the_available_choices() {
+    let fixture = meridian();
+    let typed = step(
+        "linux.type_text",
+        target(
+            strategy(Some("combobox"), Some("Business Activity"), None),
+            None,
+        ),
+        Some("Farming"),
+    );
+    let error = executor(&fixture).type_text(&typed).expect_err("no option");
+    let message = error.to_string();
+    assert!(message.contains("Manufacturing"), "{message}");
+    assert!(!fixture
+        .tree
+        .with_node(fixture.activity_popup, |popup| popup.info.states.showing));
 }

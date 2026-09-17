@@ -89,6 +89,9 @@ pub trait AccessibleBackend {
     fn perform_action(&self, node: &Self::Handle, preferred: &[&str]) -> AdapterResult<String>;
     fn set_text_contents(&self, node: &Self::Handle, value: &str) -> AdapterResult<()>;
     fn grab_focus(&self, node: &Self::Handle) -> AdapterResult<()>;
+    /// Focus `node`, select its current text and type `value` through
+    /// keyboard synthesis, replacing the selection.
+    fn replace_text_by_keyboard(&self, node: &Self::Handle, value: &str) -> AdapterResult<()>;
     /// Select the child at `index` of a node implementing Selection.
     fn select_child(&self, parent: &Self::Handle, index: usize) -> AdapterResult<()>;
 }

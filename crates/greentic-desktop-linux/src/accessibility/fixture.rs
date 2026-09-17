@@ -17,6 +17,10 @@ pub struct FixtureNode {
     /// When set, EditableText writes are silently ignored (a control that
     /// reports success but does not change) so verification can be tested.
     pub ignores_text_writes: bool,
+    /// Invoking any action on this node shows the popup window at this index.
+    pub opens_popup: Option<usize>,
+    /// This node is a popup window: activating an option inside hides it.
+    pub is_popup: bool,
 }
 
 #[derive(Debug, Default)]
@@ -120,6 +124,32 @@ impl FixtureTree {
         self.nodes.get_mut().expect("fixture mutex")[index].fail_children = true;
     }
 
+    pub fn link_popup(&mut self, opener: usize, popup: usize) {
+        let nodes = self.nodes.get_mut().expect("fixture mutex");
+        nodes[opener].opens_popup = Some(popup);
+        nodes[popup].is_popup = true;
+        Self::set_showing(nodes, popup, false);
+    }
+
+    fn set_showing(nodes: &mut [FixtureNode], index: usize, showing: bool) {
+        let mut stack = vec![index];
+        while let Some(current) = stack.pop() {
+            nodes[current].info.states.showing = showing;
+            stack.extend(nodes[current].children.iter().copied());
+        }
+    }
+
+    fn enclosing_popup(nodes: &[FixtureNode], index: usize) -> Option<usize> {
+        let mut cursor = nodes[index].parent;
+        while let Some(current) = cursor {
+            if nodes[current].is_popup {
+                return Some(current);
+            }
+            cursor = nodes[current].parent;
+        }
+        None
+    }
+
     pub fn ignore_text_writes(&mut self, index: usize) {
         self.nodes.get_mut().expect("fixture mutex")[index].ignores_text_writes = true;
     }
@@ -184,8 +214,17 @@ impl AccessibleBackend for FixtureTree {
             .or(actions.first())
             .cloned()
             .ok_or_else(|| AdapterError::ExecutionFailed("node has no actions".to_owned()))?;
-        if matches!(nodes[*node].info.role.as_str(), "menu item" | "list item") {
+        if let Some(popup) = nodes[*node].opens_popup {
+            Self::set_showing(&mut nodes, popup, true);
+        }
+        if matches!(
+            nodes[*node].info.role.as_str(),
+            "menu item" | "list item" | "table cell"
+        ) {
             Self::select_among_siblings(&mut nodes, *node);
+            if let Some(popup) = Self::enclosing_popup(&nodes, *node) {
+                Self::set_showing(&mut nodes, popup, false);
+            }
         }
         drop(nodes);
         self.record(format!("action {action} on {node}"));
@@ -202,6 +241,21 @@ impl AccessibleBackend for FixtureTree {
         }
         drop(nodes);
         self.record(format!("set_text {node} {value}"));
+        Ok(())
+    }
+
+    fn replace_text_by_keyboard(&self, node: &usize, value: &str) -> AdapterResult<()> {
+        let mut nodes = self.nodes.lock().expect("fixture mutex");
+        if !nodes[*node].info.interfaces.text {
+            return Err(AdapterError::ExecutionFailed(
+                "no text interface".to_owned(),
+            ));
+        }
+        if !nodes[*node].ignores_text_writes {
+            nodes[*node].info.text = Some(value.to_owned());
+        }
+        drop(nodes);
+        self.record(format!("keyboard {node} {value}"));
         Ok(())
     }
 

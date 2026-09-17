@@ -20,7 +20,11 @@ pub fn is_option_role(role: &str) -> bool {
 
 fn is_editable_node<H>(snapshot: &TreeSnapshot<H>, index: usize) -> bool {
     let info = &snapshot.node(index).info;
-    info.interfaces.editable_text || info.states.editable || is_choice_role(&info.role)
+    info.interfaces.editable_text
+        || info.states.editable
+        || is_choice_role(&info.role)
+        || (info.interfaces.text
+            && (role_matches("textbox", &info.role) || role_matches("spinbutton", &info.role)))
 }
 
 /// The node a `type_text` step should write into.
@@ -62,7 +66,16 @@ pub fn choice_options<H>(snapshot: &TreeSnapshot<H>, choice: usize) -> Vec<usize
 /// The option whose visible text equals `value`, or — for a purely numeric
 /// value — whose digits equal it. Exact text wins over the digit rule.
 pub fn choose_option<H>(snapshot: &TreeSnapshot<H>, choice: usize, value: &str) -> Option<usize> {
-    let options = choice_options(snapshot, choice);
+    choose_among(snapshot, &choice_options(snapshot, choice), value)
+}
+
+/// [`choose_option`] over an explicit candidate list — used for a popup
+/// window that is not a descendant of the control that opened it.
+pub fn choose_among<H>(
+    snapshot: &TreeSnapshot<H>,
+    options: &[usize],
+    value: &str,
+) -> Option<usize> {
     let wanted = normalize_label(value);
     options
         .iter()
