@@ -700,3 +700,32 @@ fn wait_for_process_window_names_the_spawned_process_window() {
         .wait_for_process_window(1, std::time::Duration::ZERO)
         .is_err());
 }
+
+#[test]
+fn session_refuses_actions_until_a_window_is_scoped_then_scopes_them() {
+    use crate::AccessibilitySession;
+    let session = AccessibilitySession::new(
+        || Ok(meridian().tree),
+        false,
+        AccessibilityTiming::immediate(),
+    );
+    let click = step(
+        "linux.click_element",
+        target(strategy(Some("button"), Some("Close"), None), None),
+        None,
+    );
+    let refused = session.execute(&click).expect_err("unscoped click");
+    assert!(refused.to_string().contains("window scope"), "{refused}");
+
+    let found = session
+        .execute(&step(
+            "linux.find_window",
+            LocatorTarget::default(),
+            Some("Broker Workstation"),
+        ))
+        .expect("find window");
+    assert!(found.contains(TITLE), "{found}");
+    assert_eq!(session.window_title().as_deref(), Some(TITLE));
+    let clicked = session.execute(&click).expect("scoped click");
+    assert!(clicked.contains("press"), "{clicked}");
+}

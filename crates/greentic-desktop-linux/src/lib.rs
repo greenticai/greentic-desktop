@@ -1402,11 +1402,11 @@ mod tests {
         ));
         let error = adapter
             .execute(RunnerStep {
-                id: "click".to_owned(),
-                action: "click_element".to_owned(),
+                id: "find".to_owned(),
+                action: "find_element".to_owned(),
                 target: stable_linux_target(&metadata()),
                 value: None,
-                required_capability: "linux.click_element".to_owned(),
+                required_capability: "linux.find_element".to_owned(),
             })
             .expect_err("unit tests never reach the developer's accessibility bus");
         assert!(

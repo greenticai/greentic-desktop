@@ -133,11 +133,31 @@ impl<B: AccessibleBackend> AccessibilitySession<B> {
             "linux.find_element" | "linux.assert_visible" | "linux.wayland.assert_visible" => {
                 self.with_executor(|executor| executor.find_element(step))
             }
-            "linux.click_element" => self.with_executor(|executor| executor.click(step)),
-            "linux.type_text" => self.with_executor(|executor| executor.type_text(step)),
+            "linux.click_element" => {
+                self.require_window_scope(step)?;
+                self.with_executor(|executor| executor.click(step))
+            }
+            "linux.type_text" => {
+                self.require_window_scope(step)?;
+                self.with_executor(|executor| executor.type_text(step))
+            }
             "linux.read_text" => self.with_executor(|executor| executor.read_text(step)),
             other => Err(AdapterError::UnsupportedCapability(other.to_owned())),
         }
+    }
+
+    /// Clicks and typing act on whatever matches, so they only run once
+    /// `linux.open_app` or `linux.find_window` has scoped the session to one
+    /// window. Without that, a locator such as `name: Close` could match a
+    /// control in any application on the user's desktop.
+    fn require_window_scope(&self, step: &RunnerStep) -> AdapterResult<()> {
+        if self.window_title().is_some() {
+            return Ok(());
+        }
+        Err(AdapterError::ExecutionFailed(format!(
+            "{} requires a window scope: run linux.open_app or linux.find_window first so AT-SPI actions cannot reach other applications.",
+            step.required_capability
+        )))
     }
 
     pub fn visible_texts(&self) -> AdapterResult<Vec<String>> {
