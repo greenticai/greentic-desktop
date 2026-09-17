@@ -688,3 +688,15 @@ fn an_unknown_popup_option_is_reported_with_the_available_choices() {
         .tree
         .with_node(fixture.activity_popup, |popup| popup.info.states.showing));
 }
+
+#[test]
+fn wait_for_process_window_names_the_spawned_process_window() {
+    let fixture = meridian();
+    let found = executor(&fixture)
+        .wait_for_process_window(4242, std::time::Duration::ZERO)
+        .expect("process window");
+    assert_eq!(found, TITLE);
+    assert!(executor(&fixture)
+        .wait_for_process_window(1, std::time::Duration::ZERO)
+        .is_err());
+}

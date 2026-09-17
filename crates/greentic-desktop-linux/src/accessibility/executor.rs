@@ -136,6 +136,37 @@ impl<'a, B: AccessibleBackend> AccessibilityExecutor<'a, B> {
         })
     }
 
+    /// Wait until the process `process_id` exposes a top-level window and
+    /// return its accessible name.
+    pub fn wait_for_process_window(
+        &self,
+        process_id: u32,
+        timeout: Duration,
+    ) -> AdapterResult<String> {
+        self.poll(timeout, || {
+            for application in self.backend.applications()? {
+                if self.backend.process_id(&application) != Some(process_id) {
+                    continue;
+                }
+                for child in self.backend.children(&application).unwrap_or_default() {
+                    let Ok(info) = self.backend.describe(&child) else {
+                        continue;
+                    };
+                    if is_window_role(&info.role) && !info.name.trim().is_empty() {
+                        return Ok(Some(info.name));
+                    }
+                }
+            }
+            Ok(None)
+        })?
+        .ok_or_else(|| {
+            AdapterError::ExecutionFailed(format!(
+                "Process {process_id} exposed no accessible window within {}ms. Check that it registers with AT-SPI (NO_AT_BRIDGE unset, toolkit accessibility enabled).",
+                timeout.as_millis()
+            ))
+        })
+    }
+
     /// Capture every window in scope. With no scope, every application.
     pub fn capture_scope(&self) -> AdapterResult<Vec<TreeSnapshot<B::Handle>>> {
         let roots = match &self.window_title {
